@@ -310,7 +310,7 @@ function generateRegistry(tools: CompiledToolInfo[], outputPath: string): void {
     .map((tool) => {
       // Escape single quotes in description
       const escapedDesc = tool.description.replace(/'/g, "\\'");
-      
+
       // Format multi-line if description is long (> 80 chars)
       const descLine =
         escapedDesc.length > 80
@@ -375,7 +375,7 @@ function generateBuiltinSources(toolsSourceDir: string, outputPath: string): voi
 
     if (fs.existsSync(scriptPath)) {
       const sourceCode = fs.readFileSync(scriptPath, 'utf-8');
-      
+
       // Extract tool ID from metadata
       const metadata = extractMetadata(sourceCode);
       if (metadata && metadata.name && metadata.namespace) {
@@ -400,8 +400,8 @@ function generateBuiltinSources(toolsSourceDir: string, outputPath: string): voi
       // 2. Backticks (template literal delimiters)
       // 3. Template expressions ${...} -> need to escape as \${
       const escapedSource = source
-        .replace(/\\/g, '\\\\')  // \ -> \\
-        .replace(/`/g, '\\`')     // ` -> \`
+        .replace(/\\/g, '\\\\') // \ -> \\
+        .replace(/`/g, '\\`') // ` -> \`
         .replace(/\$\{/g, '\\${'); // ${ -> \${
       return `  ${id}: \`${escapedSource}\``;
     })

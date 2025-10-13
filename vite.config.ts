@@ -3,7 +3,7 @@ import { crx } from '@crxjs/vite-plugin';
 import manifest from './manifest.json' with { type: 'json' };
 import pkg from './package.json' with { type: 'json' };
 import path from 'path';
-import { webmcpCompilerPlugin } from './build/vite-plugin-webmcp-compiler';
+import { webmcpCompilerPlugin } from './scripts/vite-plugin-webmcp-compiler';
 
 // Single source of truth: inject version from package.json into manifest
 const manifestWithVersion = {
