@@ -1,5 +1,7 @@
 # AgentBoard
 
+<img width="2800" height="838" alt="image" src="https://github.com/user-attachments/assets/2f520ecd-1601-4226-8254-7994be61bde0" />
+
 A switchboard for AI in your browser: wire in any model, script WebMCP tools, connect remote MCP servers, bring your commands.
 
 - **Multi agent**: Configure as many profile as you want, switch mid-conversation.
@@ -183,4 +185,4 @@ Sites that deploy strict CSP (e.g. no dynamic scripts) may not allow custom tool
 
 ## What information does AgentBoard collect?
 
-None. See PRIVACY.md.
+None. See [PRIVACY.md](PRIVACY.md).
