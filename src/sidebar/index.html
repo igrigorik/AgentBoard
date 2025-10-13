@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Assistant</title>
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/themes/prism.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css">
+</head>
+
+<body>
+  <div id="app">
+    <header class="sidebar-header">
+      <div class="agent-selector">
+        <select id="agent-select">
+          <option value="">No agents configured</option>
+        </select>
+      </div>
+      <button id="settings-button" class="settings-button" title="Open Settings">⚙</button>
+    </header>
+
+    <main class="chat-container">
+      <div id="messages" class="messages">
+        <!-- Messages will be rendered here -->
+      </div>
+    </main>
+
+    <footer class="input-container">
+      <textarea id="message-input" placeholder="Ask anything. Use /help for available commands." rows="3"></textarea>
+      <button id="send-button" type="button" title="Send message">⎆</button>
+    </footer>
+  </div>
+
+  <script type="module" src="./index.ts"></script>
+</body>
+
+</html>

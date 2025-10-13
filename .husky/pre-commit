@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Run lint-staged to check and fix staged files
+npx lint-staged
+
+# Run type checking on the entire project (can't do partial)
+echo "Running TypeScript type check..."
+npm run typecheck
+
+# If everything passes, allow the commit
+exit $?

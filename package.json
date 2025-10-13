@@ -1,0 +1,76 @@
+{
+  "name": "ai-sidebar-extension",
+  "version": "0.4.7",
+  "description": "Chrome extension AI sidebar with LLM providers and MCP support",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "prebuild": "npm run typecheck && npm run lint",
+    "build": "vite build",
+    "build:force": "vite build",
+    "build:release": "RELEASE=1 vite build",
+    "preview": "vite preview",
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives",
+    "lint:fix": "eslint . --ext ts,tsx --fix",
+    "lint:strict": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\" \"*.{json,md}\"",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "clean": "rm -rf dist release",
+    "prerelease": "npm run clean && npm test",
+    "release": "npm run build:release && node scripts/package-release.js",
+    "release:github": "node scripts/github-release.js",
+    "postinstall": "husky || true"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.15",
+    "@ai-sdk/google": "^2.0.13",
+    "@ai-sdk/openai": "^2.0.27",
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@types/json-schema": "^7.0.15",
+    "@types/prismjs": "^1.26.5",
+    "ai": "^5.0.39",
+    "json-formatter-js": "^2.5.23",
+    "linkedom": "^0.18.12",
+    "loglevel": "^1.9.2",
+    "prismjs": "^1.30.0",
+    "streaming-markdown": "^0.2.15",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-rc.5",
+    "@eslint/js": "^9.35.0",
+    "@types/chrome": "^0.0.286",
+    "@types/jsdom": "^27.0.0",
+    "@types/node": "^22.10.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "archiver": "^7.0.1",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-prettier": "^5.2.2",
+    "husky": "^9.1.7",
+    "jsdom": "^26.1.0",
+    "lint-staged": "^16.1.6",
+    "prettier": "^3.4.2",
+    "terser": "^5.44.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{css,json,md}": [
+      "prettier --write"
+    ]
+  }
+}

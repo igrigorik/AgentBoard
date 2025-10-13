@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentBoard: settings</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+
+<body>
+  <div class="container">
+    <main>
+      <section class="agents-section">
+        <div class="agents-header">
+          <h2>AI Agents</h2>
+          <button id="create-agent" class="button button-primary">+ New Agent</button>
+        </div>
+
+        <div id="agents-list" class="agents-list">
+          <!-- Agent cards will be populated dynamically -->
+        </div>
+
+        <div id="no-agents" class="no-agents hidden">
+          <div class="no-agents-content">
+            <h3>No agents configured</h3>
+            <p>Create your first AI agent to get started. Each agent can be configured with a different provider, model, and personality.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Commands Section -->
+      <section class="commands-section">
+        <div class="commands-header">
+          <h2>Commands</h2>
+          <button id="create-command" class="button button-primary">+ New Command</button>
+        </div>
+
+        <div id="commands-list" class="commands-list">
+          <!-- Command cards will be populated dynamically -->
+        </div>
+
+        <div id="no-commands" class="no-commands hidden">
+          <div class="no-commands-content">
+            <h3>No commands configured</h3>
+            <p>Create custom commands that expand into reusable prompt templates. Trigger them with <code>/name</code> in the chat. Use <code>$ARGUMENTS</code> to capture any text after the command.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- WebMCP Tools Section -->
+      <section class="webmcp-section">
+        <div class="webmcp-header">
+          <h2>WebMCP Tools</h2>
+          <div class="header-actions">
+            <button id="create-script" class="button button-primary">+ New Script</button>
+          </div>
+        </div>
+
+        <div id="scripts-list" class="scripts-list">
+          <!-- Script cards will be populated dynamically -->
+        </div>
+
+        <div id="no-scripts" class="no-scripts hidden">
+          <div class="no-scripts-content">
+            <h3>No scripts configured</h3>
+            <p>Create custom WebMCP tools that interact with web pages. Scripts can extract data, manipulate DOM, or provide page-specific functionality to your AI assistant.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="mcp-section">
+        <div class="mcp-header">
+          <h2>MCP Servers</h2>
+          <button id="test-mcp-config" class="button button-primary">Test Connections</button>
+        </div>
+        
+        <div class="form-group">
+          <span class="field-hint">Enter your MCP server configuration in JSON format. Each server should have transport type (http), URL, and optional auth token.</span>
+          <textarea id="mcp-config" rows="10" placeholder='{
+  "mcpServers": {
+    "filesystem": {
+      "transport": "http",
+      "url": "http://localhost:3000/mcp",
+      "authToken": "optional-bearer-token"
+    }
+  }
+}'></textarea>
+          <span class="field-error" id="mcp-config-error"></span>
+        </div>
+
+        <div id="mcp-status" class="mcp-status hidden">
+          <h3>Server Status</h3>
+          <div id="mcp-status-content" class="mcp-status-content">
+            <!-- Status will be populated dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings Section -->
+      <section class="settings-section">
+        <h2>Settings</h2>
+        
+        <div class="form-group">
+          <label for="log-level">Log Level</label>
+          <select id="log-level">
+            <option value="trace">TRACE - Fine-grained debugging (all logs)</option>
+            <option value="debug">DEBUG - Detailed operational info</option>
+            <option value="info">INFO - Significant events</option>
+            <option value="warn" selected>WARN - Unexpected but handled (default)</option>
+            <option value="error">ERROR - Errors only</option>
+            <option value="silent">SILENT - No logs</option>
+          </select>
+          <span class="field-hint">Controls log verbosity across all extension surfaces. Change to DEBUG for detailed troubleshooting.</span>
+        </div>
+
+        <!-- Backup & Restore -->
+        <div class="settings-subsection">
+          <h3>Backup & Restore</h3>
+          <p class="section-description">
+            Backup files contain your API keys and authentication tokens. Store them securely.
+          </p>
+          
+          <div class="backup-actions">
+            <button id="export-settings" class="button button-secondary">
+              📥 Export Settings
+            </button>
+            <button id="import-settings" class="button button-secondary">
+              📤 Import Settings
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div id="status-message" class="status-message"></div>
+    </main>
+
+    <!-- Agent Edit Modal -->
+    <div id="agent-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="modal-title">Create Agent</h3>
+          <button id="modal-close" class="modal-close">&times;</button>
+        </div>
+        
+        <form id="agent-form" class="modal-body">
+          <div class="form-group">
+            <label for="agent-name">Agent Name *</label>
+            <input type="text" id="agent-name" placeholder="e.g., Code Assistant, Creative Writer" required>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-description">Description (optional)</label>
+            <input type="text" id="agent-description" placeholder="Brief description of this agent's purpose">
+          </div>
+
+          <div class="form-group">
+            <label for="agent-provider">Provider *</label>
+            <select id="agent-provider" required>
+              <option value="">Select provider</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="google">Google</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-api-key">API Key *</label>
+            <input type="password" id="agent-api-key" placeholder="Your API key" required>
+            <span class="api-key-hint"></span>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-model">Model *</label>
+            <input type="text" id="agent-model" placeholder="e.g., gpt-4o, claude-3-5-sonnet-20241022" required>
+            <span class="field-hint">Enter the exact model name</span>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-system-prompt">System Prompt</label>
+            <textarea id="agent-system-prompt" rows="4" placeholder="You are a helpful AI assistant..."></textarea>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="agent-temperature">Temperature</label>
+              <input type="number" id="agent-temperature" min="0" max="2" step="0.1" value="0.7">
+              <span class="field-hint">0 = focused, 2 = creative</span>
+            </div>
+
+            <div class="form-group">
+              <label for="agent-max-tokens">Max Tokens</label>
+              <input type="number" id="agent-max-tokens" min="100" max="200000" value="4000">
+              <span class="field-hint">Maximum response length</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-endpoint">Custom API Endpoint (optional)</label>
+            <input type="url" id="agent-endpoint" placeholder="e.g., http://localhost:11434/v1 for Ollama">
+            <span class="field-hint">Leave empty to use default provider endpoint</span>
+          </div>
+
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="agent-is-default">
+              <span class="checkmark"></span>
+              Set as default agent
+            </label>
+          </div>
+
+          <!-- Reasoning Configuration Section -->
+          <div class="form-section">
+            <h4>Reasoning Configuration</h4>
+            
+            <div class="form-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="reasoning-enabled">
+                <span class="checkmark"></span>
+                Enable Chain-of-Thought Reasoning
+              </label>
+              <span class="field-hint">Model will show its thinking process before responding</span>
+            </div>
+
+            <div id="reasoning-settings" class="reasoning-settings hidden">
+              <!-- Provider-specific reasoning controls will be populated dynamically -->
+              <div id="reasoning-openai" class="provider-reasoning hidden">
+                <div class="form-group">
+                  <label for="reasoning-effort">Reasoning Effort</label>
+                  <select id="reasoning-effort">
+                    <option value="minimal">Minimal - Quick analysis</option>
+                    <option value="low">Low - Basic reasoning</option>
+                    <option value="medium" selected>Medium - Balanced thinking</option>
+                    <option value="high">High - Deep analysis</option>
+                  </select>
+                  <span class="field-hint">Higher effort uses more tokens but provides deeper insights</span>
+                </div>
+                <div class="form-group">
+                  <label for="reasoning-summary">Reasoning Summary</label>
+                  <select id="reasoning-summary">
+                    <option value="auto" selected>Auto - Model decides</option>
+                    <option value="detailed">Detailed - Full thinking trace</option>
+                  </select>
+                </div>
+              </div>
+
+              <div id="reasoning-anthropic" class="provider-reasoning hidden">
+                <div class="form-group">
+                  <label for="thinking-budget">Thinking Budget (tokens)</label>
+                  <input type="number" id="thinking-budget" min="1000" max="20000" value="12000">
+                  <span class="field-hint">Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span>
+                </div>
+              </div>
+
+              <div id="reasoning-google" class="provider-reasoning hidden">
+                <div class="form-group">
+                  <label for="thinking-budget-google">Thinking Budget</label>
+                  <input type="number" id="thinking-budget-google" min="-1" max="24576" value="8192">
+                  <span class="field-hint">Token budget (0-24576, -1 for dynamic). Flash models only</span>
+                </div>
+                <div class="form-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="include-thoughts" checked>
+                    <span class="checkmark"></span>
+                    Include Thought Summaries
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="reasoning-auto-expand" checked>
+                  <span class="checkmark"></span>
+                  Auto-expand reasoning when streaming
+                </label>
+              </div>
+            </div>
+
+          </div>
+        </form>
+
+        <div id="agent-modal-status" class="modal-status hidden"></div>
+
+        <div class="modal-footer">
+          <!-- Footer buttons will be dynamically generated -->
+        </div>
+      </div>
+    </div>
+
+    <!-- WebMCP Script Editor Modal -->
+    <div id="script-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content modal-large">
+        <div class="modal-header">
+          <h3 id="script-modal-title">Create WebMCP Script</h3>
+          <button id="script-modal-close" class="modal-close">&times;</button>
+        </div>
+        
+        <form id="script-form" class="modal-body script-editor-body">
+          <!-- Built-in Tool Banner (hidden by default) -->
+          <div id="builtin-banner" class="builtin-banner hidden">
+            <strong>Built-in Tool:</strong> This is a precompiled system tool. The code is read-only and cannot be modified.
+          </div>
+          
+          <div class="editor-layout">
+            <!-- Code Editor Section -->
+            <div class="editor-section">
+              <div class="editor-toolbar">
+                <label>Script Code</label>
+                <div class="editor-actions">
+                  <button type="button" id="insert-template" class="button button-small">Insert Template</button>
+                  <button type="button" id="format-code" class="button button-small">Format</button>
+                </div>
+              </div>
+              <div id="code-editor-container" class="code-editor-container">
+                <!-- CodeMirror will be inserted here -->
+                <textarea id="script-code" class="script-code-fallback" rows="20" placeholder="// Your WebMCP tool script here..."></textarea>
+              </div>
+            </div>
+
+            <!-- Preview & Validation Section -->
+            <div class="preview-section">
+              <div class="preview-tabs">
+                <button type="button" class="tab-button active" data-tab="metadata">Metadata</button>
+                <button type="button" class="tab-button" data-tab="validation">Validation</button>
+              </div>
+              
+              <div class="tab-content" id="metadata-tab">
+                <h4>Parsed Metadata</h4>
+                <div id="metadata-preview" class="metadata-preview">
+                  <div class="metadata-empty">Write a script to see metadata</div>
+                </div>
+              </div>
+              
+              <div class="tab-content hidden" id="validation-tab">
+                <h4>Validation Results</h4>
+                <div id="validation-results" class="validation-results">
+                  <div class="validation-empty">No validation issues</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </form>
+
+        <div id="script-modal-status" class="modal-status hidden"></div>
+
+        <div class="modal-footer">
+          <button id="validate-script" class="button button-secondary">Validate</button>
+          <!-- Other footer buttons will be dynamically generated -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Command Edit Modal -->
+    <div id="command-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="command-modal-title">Create Command</h3>
+          <button id="command-modal-close" class="modal-close">&times;</button>
+        </div>
+        
+        <form id="command-form" class="modal-body">
+          <div class="form-group">
+            <label for="command-name">Command Name *</label>
+            <input type="text" id="command-name" placeholder="e.g., pr-reviewer, sql-expert" required maxlength="50">
+            <span class="field-hint">Lowercase letters, numbers, and hyphens only. No slashes or spaces. (1-50 characters)</span>
+            <span class="field-error" id="command-name-error"></span>
+          </div>
+
+          <div class="form-group">
+            <label for="command-instructions">Instructions Template *</label>
+            <textarea id="command-instructions" rows="6" maxlength="5000" placeholder="You are an expert software developer. Review this code focusing on: $ARGUMENTS" required></textarea>
+            <span class="field-hint">Use $ARGUMENTS where you want the command arguments to be inserted</span>
+          </div>
+
+          <div class="form-group">
+            <h4>Example Usage</h4>
+            <div class="example-usage">
+              <div class="example-input">
+                <strong>Input:</strong> <code id="example-input">/command your arguments here</code>
+              </div>
+              <div class="example-output">
+                <strong>Expands to:</strong> <span id="example-output">Your template with arguments replaced</span>
+              </div>
+            </div>
+          </div>
+        </form>
+
+        <div id="command-modal-status" class="modal-status hidden"></div>
+
+        <div class="modal-footer">
+          <!-- Footer buttons will be dynamically generated -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Hidden file input for settings import -->
+    <input type="file" id="import-file-input" class="hidden" accept=".json">
+  </div>
+
+  <script type="module" src="./index.ts"></script>
+</body>
+
+</html>

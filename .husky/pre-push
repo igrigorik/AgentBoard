@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# Run full check before push
+echo "Running pre-push checks..."
+echo "→ Type checking..."
+npm run typecheck || exit 1
+
+echo "→ Linting..."
+npm run lint || exit 1
+
+echo "→ Running tests..."
+npm test || exit 1
+
+echo "✅ All checks passed! Pushing..."
+exit 0

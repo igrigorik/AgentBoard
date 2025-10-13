@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+*.crx
+*.pem
+*.zip
+
+# Environment & Keys
+.env
+.env.local
+.env.*.local
+*.key
+secrets/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+AGENTS*.md
+CLAUDE.md
+.claude
+
+# Testing
+coverage/
+*.lcov
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Chrome Extension specific
+web-ext-artifacts/
+extension-dist/
+
+# Temporary files
+*.tmp
+.cache/
+temp/
+
+# Husky
+.husky/_
+local/
