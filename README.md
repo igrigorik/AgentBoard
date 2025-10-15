@@ -13,7 +13,7 @@ A switchboard for AI in your browser: wire in any model, script WebMCP tools, co
 
 Bring your own models—local, fine-tuned, custom—to power multiple agent profiles. Connect remote MCP servers: bring external tools (APIs, databases, services) into browser context. Script WebMCP tools that interact with page content — think, Greasemonkey for the AI age. Built for power users.
 
-## Demo: [YouTube](https://www.youtube.com/watch?v=Sf9M5SeInOU)
+## Install extension from [Chrome Web Store](https://chromewebstore.google.com/detail/agentboard/jlmajjfiibgnejlndfoboojahlclgoam?authuser=0&hl=en)
 
 [<img width="976" height="562" alt="image" src="https://github.com/user-attachments/assets/69ee32a1-67b2-45b6-8b6b-f0c6fc266a5f" />](https://www.youtube.com/watch?v=Sf9M5SeInOU)
 
