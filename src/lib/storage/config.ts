@@ -27,7 +27,7 @@ export interface AgentConfig {
   name: string;
   description?: string;
   provider: AIProvider;
-  apiKey: string;
+  apiKey?: string; // Optional when using custom endpoint/proxy
   model: string;
   endpoint?: string; // Custom API base URL for provider
   systemPrompt: string;

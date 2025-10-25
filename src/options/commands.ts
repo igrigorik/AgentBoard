@@ -92,6 +92,26 @@ function setupCommandEventListeners(): void {
 }
 
 /**
+ * Check for command name conflicts that HTML5 can't validate
+ */
+function checkCommandConflicts(name: string): string {
+  // Check for conflicts with built-in commands
+  if (BUILTIN_COMMANDS.includes(name.toLowerCase())) {
+    return `"${name}" is a built-in command and cannot be used`;
+  }
+
+  // Check for conflicts with existing user commands
+  // Only check when not in edit mode (editingCommandName would match current command)
+  if (!editingCommandName || editingCommandName.toLowerCase() !== name.toLowerCase()) {
+    if (!commandRegistry.isCommandNameAvailable(name)) {
+      return `Command /${name} already exists`;
+    }
+  }
+
+  return '';
+}
+
+/**
  * Setup live preview for command creation
  */
 function setupLivePreview(): void {
@@ -99,89 +119,10 @@ function setupLivePreview(): void {
   const instructionsInput = document.getElementById('command-instructions') as HTMLTextAreaElement;
   const exampleInput = document.getElementById('example-input');
   const exampleOutput = document.getElementById('example-output');
-  const errorElement = document.getElementById('command-name-error');
-  const saveButton = document.getElementById('save-command') as HTMLButtonElement;
-
-  const validateCommandName = (name: string): { valid: boolean; error?: string } => {
-    if (!name) {
-      return { valid: false, error: 'Command name is required' };
-    }
-
-    // Check for slashes
-    if (name.includes('/')) {
-      return {
-        valid: false,
-        error: 'Command names cannot contain slashes. The slash is added automatically.',
-      };
-    }
-
-    // Check for spaces
-    if (name.includes(' ')) {
-      return { valid: false, error: 'Command names cannot contain spaces. Use hyphens instead.' };
-    }
-
-    // Check for valid characters (lowercase letters, numbers, hyphens)
-    if (!/^[a-z0-9-]+$/.test(name)) {
-      return { valid: false, error: 'Use only lowercase letters, numbers, and hyphens' };
-    }
-
-    // Check length
-    if (name.length > 50) {
-      return { valid: false, error: 'Command name must be 50 characters or less' };
-    }
-
-    // Check for conflicts with built-in commands first (independent of registry)
-    if (BUILTIN_COMMANDS.includes(name.toLowerCase())) {
-      return { valid: false, error: `"${name}" is a built-in command and cannot be used` };
-    }
-
-    // Check for conflicts with existing user commands
-    // Only check when not in edit mode (editingCommandName would match current command)
-    if (!editingCommandName || editingCommandName.toLowerCase() !== name.toLowerCase()) {
-      if (!commandRegistry.isCommandNameAvailable(name)) {
-        return { valid: false, error: `Command /${name} already exists` };
-      }
-    }
-
-    return { valid: true };
-  };
-
-  const updateValidationState = () => {
-    const name = nameInput?.value.trim() || '';
-    const instructions = instructionsInput?.value.trim() || '';
-    const validation = validateCommandName(name);
-
-    if (nameInput && !nameInput.disabled) {
-      if (name && !validation.valid) {
-        nameInput.classList.add('invalid');
-        if (errorElement) {
-          errorElement.textContent = validation.error || '';
-          errorElement.classList.add('show');
-        }
-        // Always disable save button when validation fails
-        if (saveButton) {
-          saveButton.disabled = true;
-        }
-      } else {
-        nameInput.classList.remove('invalid');
-        if (errorElement) {
-          errorElement.textContent = '';
-          errorElement.classList.remove('show');
-        }
-        // Enable save button only when both name and instructions are valid
-        if (saveButton) {
-          saveButton.disabled = !name || !instructions;
-        }
-      }
-    }
-  };
 
   const updatePreview = () => {
     const name = nameInput?.value || 'command';
     const instructions = instructionsInput?.value || 'Your template here';
-
-    // Update validation state
-    updateValidationState();
 
     if (exampleInput) {
       exampleInput.textContent = `/${name} your arguments here`;
@@ -194,14 +135,7 @@ function setupLivePreview(): void {
   };
 
   nameInput?.addEventListener('input', updatePreview);
-  instructionsInput?.addEventListener('input', () => {
-    updatePreview();
-    // Also update save button state when instructions change
-    updateValidationState();
-  });
-
-  // Also validate on blur for better UX
-  nameInput?.addEventListener('blur', updateValidationState);
+  instructionsInput?.addEventListener('input', updatePreview);
 }
 
 /**
@@ -211,16 +145,9 @@ function showCommandModal(command?: SlashCommand): void {
   const title = document.getElementById('command-modal-title');
   const nameInput = document.getElementById('command-name') as HTMLInputElement;
   const instructionsInput = document.getElementById('command-instructions') as HTMLTextAreaElement;
-  const errorElement = document.getElementById('command-name-error');
+  const form = document.getElementById('command-form') as HTMLFormElement;
 
   if (!nameInput || !instructionsInput) return;
-
-  // Clear any previous validation errors
-  nameInput.classList.remove('invalid');
-  if (errorElement) {
-    errorElement.textContent = '';
-    errorElement.classList.remove('show');
-  }
 
   if (command) {
     // Edit mode
@@ -241,12 +168,11 @@ function showCommandModal(command?: SlashCommand): void {
       },
     });
   } else {
-    // Create mode
+    // Create mode - reset form to clear all validation states
+    form?.reset();
     editingCommandName = null;
     if (title) title.textContent = 'Create Command';
-    nameInput.value = '';
     nameInput.disabled = false;
-    instructionsInput.value = '';
 
     // Setup modal footer without delete for new commands
     setupModalFooter({
@@ -255,8 +181,15 @@ function showCommandModal(command?: SlashCommand): void {
     });
   }
 
-  // Trigger preview update
-  nameInput.dispatchEvent(new Event('input'));
+  // Update preview directly without triggering validation
+  const exampleInput = document.getElementById('example-input');
+  const exampleOutput = document.getElementById('example-output');
+  if (exampleInput && exampleOutput) {
+    const name = nameInput.value || 'command';
+    const instructions = instructionsInput.value || 'Your template here';
+    exampleInput.textContent = `/${name} your arguments here`;
+    exampleOutput.textContent = instructions.replace(/\$ARGUMENTS/g, 'your arguments here');
+  }
 
   openModal('command-modal', () => {
     editingCommandName = null;
@@ -279,55 +212,26 @@ async function editCommand(name: string): Promise<void> {
  * Save command (create or update)
  */
 async function saveCommand(): Promise<void> {
+  const form = document.getElementById('command-form') as HTMLFormElement;
   const nameInput = document.getElementById('command-name') as HTMLInputElement;
   const instructionsInput = document.getElementById('command-instructions') as HTMLTextAreaElement;
 
   const name = nameInput?.value.trim();
+
+  // Set custom validity for conflicts before validation
+  if (nameInput && name) {
+    const conflictError = checkCommandConflicts(name);
+    nameInput.setCustomValidity(conflictError);
+  } else if (nameInput) {
+    // Clear custom validity for empty input
+    nameInput.setCustomValidity('');
+  }
+
+  if (!form.reportValidity()) {
+    return;
+  }
+
   const instructions = instructionsInput?.value.trim();
-
-  if (!name || !instructions) {
-    showStatus('Please fill in all required fields', 'error');
-    return;
-  }
-
-  // Validate command name format
-  if (!commandRegistry.isValidCommandName(name)) {
-    const errorElement = document.getElementById('command-name-error');
-    const nameInput = document.getElementById('command-name') as HTMLInputElement;
-
-    if (nameInput) {
-      nameInput.classList.add('invalid');
-      nameInput.focus();
-    }
-
-    if (errorElement) {
-      let errorMessage = 'Invalid command name. ';
-      if (name.includes('/')) {
-        errorMessage += 'Do not include slashes - they are added automatically.';
-      } else if (name.includes(' ')) {
-        errorMessage += 'Spaces are not allowed. Use hyphens instead.';
-      } else {
-        errorMessage += 'Use only lowercase letters, numbers, and hyphens.';
-      }
-      errorElement.textContent = errorMessage;
-      errorElement.classList.add('show');
-    }
-
-    showStatus('Please fix the command name errors', 'error');
-    return;
-  }
-
-  // Check for built-in command conflicts first
-  if (BUILTIN_COMMANDS.includes(name.toLowerCase())) {
-    showStatus(`Cannot use built-in command name: ${name}`, 'error');
-    return;
-  }
-
-  // Re-validate availability (for new commands only) in case state changed
-  if (!editingCommandName && !commandRegistry.isCommandNameAvailable(name)) {
-    showStatus(`Command /${name} already exists`, 'error');
-    return;
-  }
 
   try {
     // If renaming, get the original command to preserve createdAt

@@ -153,4 +153,143 @@ describe('ConfigStorage', () => {
 
     expect(instance1).toBe(instance2);
   });
+
+  describe('Proxy URL and API Key validation', () => {
+    it('should accept agent with API key and no proxy', async () => {
+      // Mock empty storage initially
+      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+        if (callback) callback({});
+        return Promise.resolve({});
+      });
+
+      const agentData = {
+        name: 'Test Agent',
+        provider: 'openai' as const,
+        apiKey: 'sk-test-key',
+        model: 'gpt-4',
+        systemPrompt: 'Test prompt',
+        temperature: 0.7,
+        maxTokens: 2000,
+      };
+
+      await configStorage.addAgent(agentData);
+
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({
+        config: expect.objectContaining({
+          agents: expect.arrayContaining([
+            expect.objectContaining({
+              apiKey: 'sk-test-key',
+              // endpoint should be undefined or not present
+            }),
+          ]),
+        }),
+      });
+    });
+
+    it('should accept agent with proxy URL and no API key', async () => {
+      // Mock empty storage initially
+      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+        if (callback) callback({});
+        return Promise.resolve({});
+      });
+
+      const agentData = {
+        name: 'Test Proxy Agent',
+        provider: 'openai' as const,
+        apiKey: undefined as any, // No API key (cast to bypass TS check in test)
+        endpoint: 'http://localhost:8080', // Has proxy URL
+        model: 'gpt-4',
+        systemPrompt: 'Test prompt',
+        temperature: 0.7,
+        maxTokens: 2000,
+      };
+
+      await configStorage.addAgent(agentData);
+
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({
+        config: expect.objectContaining({
+          agents: expect.arrayContaining([
+            expect.objectContaining({
+              endpoint: 'http://localhost:8080',
+              // apiKey should be undefined
+            }),
+          ]),
+        }),
+      });
+    });
+
+    it('should accept agent with both proxy URL and API key', async () => {
+      // Mock empty storage initially
+      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+        if (callback) callback({});
+        return Promise.resolve({});
+      });
+
+      const agentData = {
+        name: 'Test Full Agent',
+        provider: 'anthropic' as const,
+        apiKey: 'sk-ant-test', // Has API key
+        endpoint: 'https://proxy.example.com', // Also has proxy
+        model: 'claude-3',
+        systemPrompt: 'Test prompt',
+        temperature: 0.7,
+        maxTokens: 2000,
+      };
+
+      await configStorage.addAgent(agentData);
+
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({
+        config: expect.objectContaining({
+          agents: expect.arrayContaining([
+            expect.objectContaining({
+              apiKey: 'sk-ant-test',
+              endpoint: 'https://proxy.example.com',
+            }),
+          ]),
+        }),
+      });
+    });
+
+    it('should handle agent updates with proxy URL changes', async () => {
+      const existingAgent: AgentConfig = {
+        id: 'test-1',
+        name: 'Test Agent',
+        provider: 'openai',
+        apiKey: 'sk-test',
+        model: 'gpt-4',
+        systemPrompt: 'Test prompt',
+        temperature: 0.7,
+        maxTokens: 2000,
+      };
+
+      // Mock config with existing agent
+      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+        const result = {
+          config: {
+            agents: [existingAgent],
+          },
+        };
+        if (callback) callback(result);
+        return Promise.resolve(result);
+      });
+
+      // Update agent to use proxy URL and remove API key
+      await configStorage.updateAgent('test-1', {
+        apiKey: undefined,
+        endpoint: 'http://proxy.local:3000',
+      });
+
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({
+        config: expect.objectContaining({
+          agents: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'test-1',
+              apiKey: undefined,
+              endpoint: 'http://proxy.local:3000',
+            }),
+          ]),
+        }),
+      });
+    });
+  });
 });

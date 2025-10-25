@@ -265,6 +265,7 @@ function createBuiltinToolCard(tool: BuiltinToolInfo & { enabled: boolean }): HT
 function openCreateModal() {
   editingScriptId = null;
   const modalTitle = document.getElementById('script-modal-title');
+
   if (modalTitle) {
     modalTitle.textContent = 'Create WebMCP Script';
   }
@@ -429,7 +430,7 @@ async function saveScript() {
 
   const code = codeEditor.value.trim();
   if (!code) {
-    showStatus('Please enter script code', 'error');
+    showStatus('Script code is required', 'error');
     return;
   }
 
@@ -437,10 +438,8 @@ async function saveScript() {
   try {
     parseUserScript(code);
   } catch (error) {
-    showStatus(
-      `Invalid script: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      'error'
-    );
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    showStatus(`Invalid script: ${errorMsg}`, 'error');
     return;
   }
 

@@ -56,14 +56,7 @@ export function openModal(modalId: string, onClose?: ModalCallback): void {
   // Show modal
   modal.classList.remove('hidden');
 
-  // Focus first focusable element (accessibility)
-  // eslint-disable-next-line no-undef
-  requestAnimationFrame(() => {
-    const firstInput = modal.querySelector<HTMLElement>(
-      'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled])'
-    );
-    firstInput?.focus();
-  });
+  // Note: Not auto-focusing to prevent triggering validation states
 
   // Track state
   currentModal = {

@@ -316,29 +316,17 @@ header h1 {
   line-height: 1.5;
 }
 
-/* Field error messages */
-.field-error {
-  display: none;
-  font-size: 12px;
-  color: #dc2626;
-  margin-top: 4px;
-}
-
-.field-error.show {
-  display: block;
-}
-
-/* Input validation states */
-input.invalid,
-textarea.invalid,
-select.invalid {
+/* Input validation states - only show after user interaction */
+input:user-invalid,
+textarea:user-invalid,
+select:user-invalid {
   border-color: #dc2626;
   background-color: #fef2f2;
 }
 
-input.invalid:focus,
-textarea.invalid:focus,
-select.invalid:focus {
+input:user-invalid:focus,
+textarea:user-invalid:focus,
+select:user-invalid:focus {
   border-color: #dc2626;
   box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.1);
 }
@@ -353,10 +341,6 @@ select.invalid:focus {
 
 .api-key-hint.valid {
   color: #10b981;
-}
-
-.api-key-hint.invalid {
-  color: #ef4444;
 }
 
 /* Checkbox styling */

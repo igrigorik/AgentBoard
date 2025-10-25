@@ -115,8 +115,10 @@ function setupEventListeners() {
   // Log level selection
   document.getElementById('log-level')?.addEventListener('change', updateLogLevel);
 
-  // API key validation
-  document.getElementById('agent-api-key')?.addEventListener('input', validateCurrentApiKey);
+  // Update API key required state when endpoint changes
+  document.getElementById('agent-endpoint')?.addEventListener('input', () => {
+    updateApiKeyRequirement();
+  });
   document.getElementById('agent-provider')?.addEventListener('change', () => {
     updateModelPlaceholder();
     updateReasoningVisibility();
@@ -148,10 +150,17 @@ function setupEventListeners() {
 function openCreateModal() {
   editingAgentId = null;
   const modalTitle = document.getElementById('modal-title');
+  const form = document.getElementById('agent-form') as HTMLFormElement;
+
   if (modalTitle) {
     modalTitle.textContent = 'New Agent';
   }
-  clearForm();
+
+  // Reset form to clear all validation states
+  form?.reset();
+
+  // Set default values without triggering validation
+  setDefaultFormValues();
 
   // Setup modal footer (no delete for new agents)
   setupModalFooter({
@@ -168,6 +177,7 @@ function openCreateModal() {
 async function openEditModal(agentId: string) {
   editingAgentId = agentId;
   const modalTitle = document.getElementById('modal-title');
+
   if (modalTitle) {
     modalTitle.textContent = 'Edit Agent';
   }
@@ -199,13 +209,16 @@ async function populateForm(agentId: string) {
   const agent = await configStorage.getAgent(agentId);
   if (!agent) return;
 
+  const apiKeyInput = document.getElementById('agent-api-key') as HTMLInputElement;
+  const endpointValue = agent.endpoint || '';
+
   (document.getElementById('agent-name') as HTMLInputElement).value = agent.name;
   (document.getElementById('agent-description') as HTMLInputElement).value =
     agent.description || '';
   (document.getElementById('agent-provider') as HTMLSelectElement).value = agent.provider;
-  (document.getElementById('agent-api-key') as HTMLInputElement).value = agent.apiKey;
+  apiKeyInput.value = agent.apiKey || '';
   (document.getElementById('agent-model') as HTMLInputElement).value = agent.model;
-  (document.getElementById('agent-endpoint') as HTMLInputElement).value = agent.endpoint || '';
+  (document.getElementById('agent-endpoint') as HTMLInputElement).value = endpointValue;
   (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value =
     agent.systemPrompt;
   (document.getElementById('agent-temperature') as HTMLInputElement).value =
@@ -219,45 +232,52 @@ async function populateForm(agentId: string) {
   populateReasoningConfig(agent);
 
   // Update UI state
+  updateApiKeyRequirement();
   updateReasoningVisibility();
-  validateModelReasoning();
 }
 
-function clearForm() {
-  (document.getElementById('agent-name') as HTMLInputElement).value = '';
-  (document.getElementById('agent-description') as HTMLInputElement).value = '';
-  (document.getElementById('agent-provider') as HTMLSelectElement).value = '';
-  (document.getElementById('agent-api-key') as HTMLInputElement).value = '';
-  (document.getElementById('agent-model') as HTMLInputElement).value = '';
-  (document.getElementById('agent-endpoint') as HTMLInputElement).value = '';
-  (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value =
-    'You are an assistant embedded in a browser tab. User prompts typically refer to the current tab unless stated otherwise. Use your tools to query page content when you need it.';
-  (document.getElementById('agent-temperature') as HTMLInputElement).value = '0.7';
-  (document.getElementById('agent-max-tokens') as HTMLInputElement).value = '4000';
-  (document.getElementById('agent-is-default') as HTMLInputElement).checked = false;
+function setDefaultFormValues() {
+  // Set default system prompt
+  const systemPromptEl = document.getElementById('agent-system-prompt') as HTMLTextAreaElement;
+  if (systemPromptEl) {
+    systemPromptEl.value =
+      'You are an assistant embedded in a browser tab. User prompts typically refer to the current tab unless stated otherwise. Use your tools to query page content when you need it.';
+  }
+
+  // Set default temperature
+  const temperatureEl = document.getElementById('agent-temperature') as HTMLInputElement;
+  if (temperatureEl) {
+    temperatureEl.value = '0.7';
+  }
+
+  // Set default max tokens
+  const maxTokensEl = document.getElementById('agent-max-tokens') as HTMLInputElement;
+  if (maxTokensEl) {
+    maxTokensEl.value = '4000';
+  }
 
   // Clear reasoning configuration
   clearReasoningConfig();
 
-  // Clear API key hint
-  const hintEl = document.querySelector('.api-key-hint');
-  if (hintEl) hintEl.textContent = '';
+  // Update API key requirement based on empty endpoint (without triggering validation)
+  updateApiKeyRequirement();
 }
 
 // closeModal is now imported from modal-manager
 
 async function saveAgent() {
   const form = document.getElementById('agent-form') as HTMLFormElement;
-  if (!form.checkValidity()) {
-    form.reportValidity();
+
+  if (!form.reportValidity()) {
     return;
   }
 
-  try {
-    const endpointValue = (
-      document.getElementById('agent-endpoint') as HTMLInputElement
-    ).value.trim();
+  const endpointValue = (
+    document.getElementById('agent-endpoint') as HTMLInputElement
+  ).value.trim();
+  const apiKeyValue = (document.getElementById('agent-api-key') as HTMLInputElement).value.trim();
 
+  try {
     // Collect reasoning configuration
     const reasoningConfig = collectReasoningConfig();
 
@@ -268,7 +288,7 @@ async function saveAgent() {
         undefined,
       provider: (document.getElementById('agent-provider') as HTMLSelectElement)
         .value as AIProvider,
-      apiKey: (document.getElementById('agent-api-key') as HTMLInputElement).value,
+      apiKey: apiKeyValue || undefined, // Set to undefined if empty
       model: (document.getElementById('agent-model') as HTMLInputElement).value.trim(),
       endpoint: endpointValue || undefined,
       systemPrompt: (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value,
@@ -308,21 +328,21 @@ async function saveAgent() {
 
 async function testCurrentAgent() {
   const form = document.getElementById('agent-form') as HTMLFormElement;
-  if (!form.checkValidity()) {
-    form.reportValidity();
+
+  if (!form.reportValidity()) {
     return;
   }
+
+  const endpointValue = (
+    document.getElementById('agent-endpoint') as HTMLInputElement
+  ).value.trim();
+  const apiKeyValue = (document.getElementById('agent-api-key') as HTMLInputElement).value.trim();
 
   showModalStatus('agent-modal', 'Testing connection...', 'info');
 
   try {
-    const endpointValue = (
-      document.getElementById('agent-endpoint') as HTMLInputElement
-    ).value.trim();
-
     const provider = (document.getElementById('agent-provider') as HTMLSelectElement)
       .value as AIProvider;
-    const apiKey = (document.getElementById('agent-api-key') as HTMLInputElement).value;
     const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
 
     // Test the connection directly without saving temp agent
@@ -331,7 +351,7 @@ async function testCurrentAgent() {
         {
           type: 'TEST_NEW_CONNECTION',
           provider,
-          apiKey,
+          apiKey: apiKeyValue || undefined, // Allow undefined for custom endpoints
           model,
           endpoint: endpointValue || undefined,
         } as const,
@@ -407,39 +427,31 @@ async function updateLogLevel() {
   }
 }
 
-function validateCurrentApiKey() {
-  const keyInput = document.getElementById('agent-api-key') as HTMLInputElement;
-  const providerSelect = document.getElementById('agent-provider') as HTMLSelectElement;
+function updateApiKeyRequirement() {
+  const endpointInput = document.getElementById('agent-endpoint') as HTMLInputElement;
+  const apiKeyInput = document.getElementById('agent-api-key') as HTMLInputElement;
   const hintEl = document.querySelector('.api-key-hint') as HTMLElement;
+  const endpoint = endpointInput?.value?.trim();
 
-  const key = keyInput.value;
-  const provider = providerSelect.value;
-
-  if (!key || !provider) {
-    hintEl.textContent = '';
-    return;
+  if (apiKeyInput) {
+    // Toggle required attribute based on endpoint presence
+    if (endpoint) {
+      apiKeyInput.removeAttribute('required');
+    } else {
+      apiKeyInput.setAttribute('required', '');
+    }
   }
 
-  let isValid = true;
-  let hint = '';
-
-  switch (provider) {
-    case 'openai':
-      isValid = key.startsWith('sk-');
-      hint = isValid ? '✓ Valid format' : 'Should start with "sk-"';
-      break;
-    case 'anthropic':
-      isValid = key.includes('sk-ant-');
-      hint = isValid ? '✓ Valid format' : 'Should contain "sk-ant-"';
-      break;
-    case 'google':
-      isValid = key.length > 20;
-      hint = isValid ? '✓ Valid format' : 'API key seems too short';
-      break;
+  // Update hint text
+  if (hintEl) {
+    if (endpoint) {
+      hintEl.textContent = '✓ Optional with proxy URL';
+      hintEl.className = 'api-key-hint valid';
+    } else {
+      hintEl.textContent = '';
+      hintEl.className = 'api-key-hint';
+    }
   }
-
-  hintEl.textContent = hint;
-  hintEl.className = `api-key-hint ${isValid ? 'valid' : 'invalid'}`;
 }
 
 function updateModelPlaceholder() {
@@ -593,19 +605,14 @@ async function testMCPConfig() {
  */
 async function saveMCPConfigWithValidation() {
   const mcpConfigTextarea = document.getElementById('mcp-config') as HTMLTextAreaElement;
-  const errorElement = document.getElementById('mcp-config-error');
-  if (!mcpConfigTextarea || !errorElement) return;
-
-  // Clear previous error
-  errorElement.textContent = '';
-  errorElement.classList.remove('show');
-  mcpConfigTextarea.classList.remove('invalid');
+  if (!mcpConfigTextarea) return;
 
   try {
     const configText = mcpConfigTextarea.value.trim();
 
     // Allow saving empty config
     if (!configText) {
+      mcpConfigTextarea.setCustomValidity('');
       await configStorage.set({ mcpConfig: undefined });
       log.debug('MCP configuration cleared');
       return;
@@ -655,23 +662,25 @@ async function saveMCPConfigWithValidation() {
       }
     }
 
+    // Clear any validation error
+    mcpConfigTextarea.setCustomValidity('');
+
     // Save the configuration
     await configStorage.set({ mcpConfig });
     log.debug('MCP configuration auto-saved');
   } catch (error) {
     log.debug('MCP configuration validation failed:', error);
 
-    // Show inline error
-    mcpConfigTextarea.classList.add('invalid');
-    errorElement.classList.add('show');
-
+    // Set custom validity message
+    let errorMessage = 'Invalid configuration';
     if (error instanceof SyntaxError) {
-      errorElement.textContent = 'Invalid JSON format. Please check your syntax.';
+      errorMessage = 'Invalid JSON format';
     } else if (error instanceof Error) {
-      errorElement.textContent = error.message;
-    } else {
-      errorElement.textContent = 'Invalid configuration';
+      errorMessage = error.message;
     }
+
+    mcpConfigTextarea.setCustomValidity(errorMessage);
+    mcpConfigTextarea.reportValidity();
   }
 }
 
@@ -748,8 +757,6 @@ function updateReasoningVisibility() {
   if (provider) {
     document.getElementById(`reasoning-${provider}`)?.classList.remove('hidden');
   }
-
-  validateModelReasoning();
 }
 
 function validateModelReasoning() {

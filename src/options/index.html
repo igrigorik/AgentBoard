@@ -86,7 +86,6 @@
     }
   }
 }'></textarea>
-          <span class="field-error" id="mcp-config-error"></span>
         </div>
 
         <div id="mcp-status" class="mcp-status hidden">
@@ -147,7 +146,11 @@
         <form id="agent-form" class="modal-body">
           <div class="form-group">
             <label for="agent-name">Agent Name *</label>
-            <input type="text" id="agent-name" placeholder="e.g., Code Assistant, Creative Writer" required>
+            <input type="text" id="agent-name"
+                   placeholder="e.g., Code Assistant, Creative Writer"
+                   pattern="[A-Za-z0-9\s\-_]+"
+                   title="Use only letters, numbers, spaces, hyphens, and underscores"
+                   required>
           </div>
 
           <div class="form-group">
@@ -167,7 +170,7 @@
 
           <div class="form-group">
             <label for="agent-api-key">API Key *</label>
-            <input type="password" id="agent-api-key" placeholder="Your API key" required>
+            <input type="password" id="agent-api-key" placeholder="Your API key">
             <span class="api-key-hint"></span>
           </div>
 
@@ -365,9 +368,13 @@
         <form id="command-form" class="modal-body">
           <div class="form-group">
             <label for="command-name">Command Name *</label>
-            <input type="text" id="command-name" placeholder="e.g., pr-reviewer, sql-expert" required maxlength="50">
-            <span class="field-hint">Lowercase letters, numbers, and hyphens only. No slashes or spaces. (1-50 characters)</span>
-            <span class="field-error" id="command-name-error"></span>
+            <input type="text" id="command-name"
+                   placeholder="e.g., pr-reviewer, sql-expert"
+                   pattern="[A-Za-z0-9\-_]+"
+                   title="Use only letters, numbers, hyphens, and underscores (no slashes or spaces)"
+                   required
+                   maxlength="50">
+            <span class="field-hint">Letters, numbers, hyphens, and underscores only. No slashes or spaces. (1-50 characters)</span>
           </div>
 
           <div class="form-group">

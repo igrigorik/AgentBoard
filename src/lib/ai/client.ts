@@ -169,7 +169,8 @@ export class AIClient {
    */
   async isAgentAvailable(agentId: string): Promise<boolean> {
     const agent = await this.configStorage.getAgent(agentId);
-    return agent !== null && !!agent.apiKey;
+    // Agent is available if it has an API key OR a custom endpoint
+    return agent !== null && (!!agent.apiKey || !!agent.endpoint);
   }
 
   /**
@@ -670,7 +671,7 @@ export class AIClient {
    */
   async testConnectionWithDetails(details: {
     provider: AIProvider;
-    apiKey: string;
+    apiKey?: string;
     model: string;
     endpoint?: string;
   }): Promise<{ success: boolean; message: string }> {
@@ -716,7 +717,7 @@ export class AIClient {
         let receivedData = false;
         for await (const _chunk of result.textStream) {
           receivedData = true;
-          break; // Just need first chunk to verify connection
+          break; // Need first chunk to verify connection
         }
         return receivedData;
       })();
