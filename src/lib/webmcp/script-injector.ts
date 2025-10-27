@@ -7,6 +7,18 @@ import log from '../logger';
 import { ConfigStorage, type UserScript, type UserScriptMetadata } from '../storage/config';
 import { parseUserScript, matchesUrl, ScriptParsingError } from './script-parser';
 
+// Type declarations for Trusted Types policy created in webmcp-polyfill.js
+// TrustedScriptURL is the return type from createScriptURL()
+type TrustedScriptURL = string & { __brand: 'TrustedScriptURL' };
+
+declare global {
+  interface Window {
+    __agentboardTTPolicy?: {
+      createScriptURL: (url: string) => string | TrustedScriptURL;
+    };
+  }
+}
+
 const configStorage = ConfigStorage.getInstance();
 
 export interface InjectionOptions {
@@ -18,13 +30,21 @@ export interface InjectionOptions {
 /**
  * Wraps a user script module for execution in MAIN world
  * Converts ES module exports to window.agent.registerTool() calls
+ * All transformations happen here in the background worker,
+ * not at runtime in the page.
  */
 function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): string {
   // Generate a unique script name for debugging (namespace is now required)
   const scriptName = `${metadata.namespace}:${metadata.name}`;
+  const toolName = `${metadata.namespace}_${metadata.name}`;
 
-  // Wrap module code to execute in MAIN world
-  // Converts ES module exports to tool registration
+  const transformedCode = code
+    .replace(/^[\s\n]*'use webmcp-tool v\d+';[\s\n]*/m, '') // Remove pragma
+    .replace(/export\s+const\s+metadata\s*=/g, 'const metadata =')
+    .replace(/export\s+(async\s+)?function\s+execute/g, '$1function execute')
+    .replace(/export\s+function\s+shouldRegister/g, 'function shouldRegister');
+
+  // Wrap the PRE-TRANSFORMED code for direct execution (no eval/Function needed)
   return `
 (function() {
   'use strict';
@@ -34,59 +54,54 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
     console.log('[WebMCP] Script already injected:', scriptId);
     return;
   }
-  
+
   // Mark as injected
   window.__webmcpInjected = window.__webmcpInjected || {};
   window.__webmcpInjected[scriptId] = true;
-  
-  // Execute module code with export interception
+
+  console.log('[WebMCP] Executing user script: ${scriptName}');
+
   try {
-    // Transform the module code to work in a non-module context
-    const transformedCode = ${JSON.stringify(code)}
-      .replace(/^\\s*'use webmcp-tool v\\d+';\\s*/, '') // Remove pragma
-      .replace(/export\\s+const\\s+metadata\\s*=/g, 'const metadata =')
-      .replace(/export\\s+(async\\s+)?function\\s+execute/g, '$1function execute')
-      .replace(/export\\s+function\\s+shouldRegister/g, 'function shouldRegister');
-    
-    // Use Function constructor instead of eval for better security
-    const moduleFunc = new Function('exports', transformedCode + '; return { metadata, execute, shouldRegister: typeof shouldRegister !== "undefined" ? shouldRegister : undefined };');
-    const moduleExports = moduleFunc({});
-    
-    // Check if tool should be registered (optional export)
-    if (moduleExports.shouldRegister) {
+    ${transformedCode}
+
+    console.log('[WebMCP] User script executed, checking exports:', {
+      hasMetadata: typeof metadata !== 'undefined',
+      hasExecute: typeof execute !== 'undefined',
+      hasShouldRegister: typeof shouldRegister !== 'undefined'
+    });
+
+    if (typeof shouldRegister === 'function') {
       try {
-        const shouldReg = moduleExports.shouldRegister();
-        if (!shouldReg) {
+        if (!shouldRegister()) {
           console.log('[WebMCP] Tool ${scriptName} skipped registration (shouldRegister returned false)');
           return;
         }
       } catch (error) {
-        log.error('[WebMCP] Error in shouldRegister for ${scriptName}:', error);
+        console.error('[WebMCP] Error in shouldRegister for ${scriptName}:', error);
         // Continue with registration if shouldRegister throws (fail-open)
       }
     }
-    
-    // Register tool with window.agent using namespace_name format
-    if (window.agent && moduleExports.metadata && moduleExports.execute) {
-      const toolName = moduleExports.metadata.namespace + '_' + moduleExports.metadata.name;
+
+    if (window.agent && typeof metadata !== 'undefined' && typeof execute !== 'undefined') {
       const tool = {
-        name: toolName,
-        description: moduleExports.metadata.description || '${metadata.description || ''}',
-        inputSchema: moduleExports.metadata.inputSchema,
-        execute: moduleExports.execute
+        name: '${toolName}',
+        description: metadata.description || '${metadata.description || ''}',
+        inputSchema: metadata.inputSchema || { type: 'object', properties: {} },
+        execute: execute
       };
-      
+
       window.agent.registerTool(tool);
-      console.log('[WebMCP] Registered tool ' + toolName + ' v${metadata.version}');
+      console.log('[WebMCP] Registered tool ${toolName} v${metadata.version}');
     } else {
-      log.error('[WebMCP] Failed to register tool ${scriptName}:', {
+      console.error('[WebMCP] Failed to register ${scriptName}:', {
         hasAgent: !!window.agent,
-        hasMetadata: !!moduleExports.metadata,
-        hasExecute: !!moduleExports.execute
+        hasMetadata: typeof metadata !== 'undefined',
+        hasExecute: typeof execute !== 'undefined'
       });
     }
+
   } catch (error) {
-    log.error('[WebMCP] Error executing script ${scriptName}:', error);
+    console.error('[WebMCP] Error executing script ${scriptName}:', error);
   }
 })();
 //# sourceURL=webmcp-script:${scriptName}.js`;
@@ -156,13 +171,53 @@ async function injectSingleScript(
     // Always inject at document_idle for consistent behavior
     const injectImmediately = false;
 
-    // Create an injection function that Chrome can serialize
-    // We'll pass the wrapped code as an argument to avoid string replacement issues
     const injectionFunc = (codeToInject: string) => {
-      const script = document.createElement('script');
-      script.textContent = codeToInject;
-      (document.head || document.documentElement).appendChild(script);
-      script.remove();
+      console.warn('[WebMCP] Creating blob URL for user script injection');
+
+      try {
+        // Create a Blob with the script code
+        const blob = new Blob([codeToInject], { type: 'application/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+
+        console.warn('[WebMCP] Blob URL created:', blobUrl);
+
+        // Load script from blob: URL (external source, not inline)
+        const script = document.createElement('script');
+
+        // Try to set src - may need Trusted Types policy on strict sites
+        try {
+          // Use TT policy if available (created by webmcp-polyfill.js)
+          if (window.__agentboardTTPolicy) {
+            console.warn('[WebMCP] Using Trusted Types policy for user script');
+            script.src = window.__agentboardTTPolicy.createScriptURL(blobUrl);
+          } else {
+            script.src = blobUrl;
+          }
+        } catch (trustedTypesError) {
+          console.error('[WebMCP] ❌ Trusted Types blocked user script injection');
+          console.error('[WebMCP] This site requires TrustedScriptURL but policy creation failed');
+          console.error('[WebMCP] Possible reasons:');
+          console.error('[WebMCP]   1. CSP restricts policy names (trusted-types directive)');
+          console.error('[WebMCP]   2. Site blocks all dynamic policy creation');
+          console.error('[WebMCP] Technical details:', trustedTypesError);
+
+          URL.revokeObjectURL(blobUrl);
+          return;
+        }
+
+        script.onload = () => {
+          console.warn('[WebMCP] ✅ User script loaded successfully via blob URL');
+          URL.revokeObjectURL(blobUrl);
+        };
+        script.onerror = (e) => {
+          console.error('[WebMCP] ❌ Failed to load script from blob URL:', e);
+          URL.revokeObjectURL(blobUrl);
+        };
+
+        (document.head || document.documentElement).appendChild(script);
+      } catch (error) {
+        console.error('[WebMCP] ❌ Unexpected error during blob injection:', error);
+      }
     };
 
     // Inject the script

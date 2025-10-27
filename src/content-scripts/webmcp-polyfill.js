@@ -276,4 +276,25 @@
     ValidationError,
     ExecutionError
   };
+
+  // Create Trusted Types policy for user script injection
+  if (typeof trustedTypes !== 'undefined') {
+    try {
+      window.__agentboardTTPolicy = trustedTypes.createPolicy('agentboard-user-scripts', {
+        createScriptURL: (url) => {
+          // Only allow same-origin blob: URLs (defense-in-depth)
+          // Blob URLs are origin-bound by construction: blob:https://site.com/uuid
+          const expectedPrefix = `blob:${window.location.origin}/`;
+          if (url.startsWith(expectedPrefix)) {
+            return url;
+          }
+          throw new TypeError(`AgentBoard policy only allows same-origin blob: URLs (expected ${expectedPrefix})`);
+        }
+      });
+      console.log('[WebMCP] Created Trusted Types policy for user scripts');
+    } catch (error) {
+      console.warn('[WebMCP] Could not create Trusted Types policy:', error.message);
+      console.warn('[WebMCP] User scripts may not work on this site due to Trusted Types');
+    }
+  }
 })();
