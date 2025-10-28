@@ -228,8 +228,11 @@ describe('WebMCP Integration - Sidebar ↔ Tab Communication', () => {
         },
       });
 
-      // Get request ID
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Get request ID (skip tools/list request from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       // Step 3: Simulate page executing tool and returning result
@@ -271,9 +274,13 @@ describe('WebMCP Integration - Sidebar ↔ Tab Communication', () => {
       // Call a tool that will fail
       const responsePromise = lifecycleManager.callTool(123, 'failing-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0]?.[0];
+      // Find the tools/call message (skip tools/list request from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex]?.[0];
       if (!request) {
-        throw new Error('No message sent to port');
+        throw new Error('No tool call message sent to port');
       }
       const requestId = request.payload.id;
 

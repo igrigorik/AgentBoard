@@ -482,6 +482,20 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           tabId = (await getBoundTabIdForSidebar(sender)) ?? undefined;
         }
 
+        // If we have a tab ID but no tools registered (SW hibernation recovery),
+        // request tools from the page and wait for response
+        if (tabId && !webmcp.getToolRegistry(tabId)) {
+          log.debug(`[Background] No tools cached for tab ${tabId}, requesting from page`);
+          try {
+            // Wait for actual tools/listChanged response
+            await webmcp.requestToolsAndWait(tabId);
+            log.debug(`[Background] Tools received for tab ${tabId}`);
+          } catch (error) {
+            log.error(`[Background] Failed to get tools for tab ${tabId}:`, error);
+            // Continue anyway - will return system tools only
+          }
+        }
+
         // Get all tool registries to access original schemas
         const registries = webmcp.getAllRegistries();
         const toolsArray: Array<{ name: string; description: string; inputSchema?: unknown }> = [];

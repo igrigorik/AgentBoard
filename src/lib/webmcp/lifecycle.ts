@@ -39,6 +39,11 @@ export class TabManager {
   private pendingPromises = new Map<string, PendingPromise>();
   private toolRegistries = new Map<number, ToolRegistry>();
   private pendingInjections = new Set<number>();
+  // Track pending tools/list requests that need responses
+  private pendingToolsRequests = new Map<
+    number,
+    { resolve: (tools: ToolRegistry['tools']) => void; reject: (error: Error) => void }
+  >();
 
   constructor() {
     this.setupPortHandler();
@@ -88,6 +93,12 @@ export class TabManager {
         this.pendingMessages.delete(tabId);
       }
 
+      // Request current tools from page to handle service worker wake-up scenarios
+      // Chrome hibernates service workers after ~30s, losing all in-memory state.
+      // By requesting tools on every port connection, we ensure tools are re-registered
+      // even if the service worker lost its toolRegistries Map.
+      this.requestToolsFromTab(tabId);
+
       // Handle messages from content script
       port.onMessage.addListener((msg) => {
         this.handleContentMessage(tabId, msg);
@@ -106,6 +117,72 @@ export class TabManager {
           this.cancelPendingCallsForTab(tabId);
         }
       });
+    });
+  }
+
+  /**
+   * Request current tool list from a tab
+   * Critical for handling service worker hibernation where in-memory
+   * state is lost but page/content scripts remain alive.
+   */
+  private requestToolsFromTab(tabId: number): void {
+    const port = this.contentPorts.get(tabId);
+    if (!port) return;
+
+    const request = {
+      type: 'webmcp',
+      payload: {
+        jsonrpc: JSONRPC,
+        id: globalThis.crypto.randomUUID(),
+        method: 'tools/list',
+        params: {},
+      },
+    };
+
+    try {
+      port.postMessage(request);
+      log.debug(`[WebMCP Lifecycle] Requested tools list from tab ${tabId}`);
+    } catch (e) {
+      log.error(`[WebMCP Lifecycle] Failed to request tools from tab ${tabId}:`, e);
+    }
+  }
+
+  /**
+   * Request tools from a tab and wait for the response
+   * Returns the tools array when tools/listChanged notification arrives
+   */
+  async requestToolsAndWait(
+    tabId: number,
+    timeoutMs: number = 5000
+  ): Promise<ToolRegistry['tools']> {
+    // If we already have tools, return them immediately
+    const existing = this.toolRegistries.get(tabId);
+    if (existing && existing.tools.length > 0) {
+      return existing.tools;
+    }
+
+    // Create a promise that will be resolved when tools/listChanged arrives
+    return new Promise((resolve, reject) => {
+      // Set up timeout
+      const timeout = setTimeout(() => {
+        this.pendingToolsRequests.delete(tabId);
+        reject(new Error(`Timeout waiting for tools from tab ${tabId}`));
+      }, timeoutMs);
+
+      // Store the promise handlers
+      this.pendingToolsRequests.set(tabId, {
+        resolve: (tools) => {
+          clearTimeout(timeout);
+          resolve(tools);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+
+      // Send the request
+      this.requestToolsFromTab(tabId);
     });
   }
 
@@ -165,6 +242,13 @@ export class TabManager {
     // Update unified registry with WebMCP tools
     const unifiedRegistry = getToolRegistry();
     unifiedRegistry.updateWebMCPTools(tabId, registry.tools, registry.origin);
+
+    // Resolve any pending tools/list requests for this tab
+    const pending = this.pendingToolsRequests.get(tabId);
+    if (pending) {
+      pending.resolve(registry.tools);
+      this.pendingToolsRequests.delete(tabId);
+    }
   }
 
   /**
@@ -203,6 +287,13 @@ export class TabManager {
       this.pendingMessages.delete(tabId);
       this.toolRegistries.delete(tabId);
       this.cancelPendingCallsForTab(tabId);
+
+      // Reject any pending tools requests
+      const pendingTools = this.pendingToolsRequests.get(tabId);
+      if (pendingTools) {
+        pendingTools.reject(new Error('Tab closed'));
+        this.pendingToolsRequests.delete(tabId);
+      }
 
       // Remove tools from unified registry for this tab
       const unifiedRegistry = getToolRegistry();

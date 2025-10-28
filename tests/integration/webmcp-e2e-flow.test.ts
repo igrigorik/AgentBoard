@@ -310,8 +310,11 @@ describe('WebMCP E2E Message Flow', () => {
         }),
       });
 
-      // Get request ID
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Get request ID (find tools/call message, skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       // Step 3: Simulate page executing tool and returning result
@@ -380,8 +383,11 @@ describe('WebMCP E2E Message Flow', () => {
       // Execute tool
       const executePromise = lifecycleManager.callTool(tabId, 'error-tool', {});
 
-      // Get request ID
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Get request ID (find tools/call message, skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       // Return error
@@ -455,7 +461,11 @@ describe('WebMCP E2E Message Flow', () => {
 
       // Step 4: Execute a tool
       const toolPromise = lifecycleManager.callTool(tabId, 'tab-tool', {});
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
 
       // Return result
       if (portMessageHandler) {

@@ -72,7 +72,7 @@
       }
     });
 
-    // Listen for tool call requests from extension
+    // Listen for requests from extension
     window.addEventListener('message', async (event) => {
       // Only accept messages from same window
       if (event.source !== window) return;
@@ -83,43 +83,82 @@
 
       const msg = event.data;
 
-      // Only handle tool calls with an ID (requests, not notifications)
-      if (msg.method !== 'tools/call' || !msg.id) return;
+      // Only handle requests with an ID (not notifications)
+      if (!msg.id) return;
 
-      console.log('[WebMCP Bridge] Received tool call request:', msg.params?.name);
+      // Handle tools/list request (for service worker wake-up scenarios)
+      if (msg.method === 'tools/list') {
+        console.log('[WebMCP Bridge] Received tools/list request');
 
-      const { name, arguments: args } = msg.params || {};
+        try {
+          const tools = window.agent.listTools();
 
-      try {
-        // Delegate to window.agent
-        const result = await window.agent.callTool(name, args || {});
-
-        // Send success response
-        postToExtension({
-          jsonrpc: JSONRPC,
-          id: msg.id,
-          result
-        });
-
-        console.log('[WebMCP Bridge] Tool call succeeded:', name);
-      } catch (error) {
-        // Send error response
-        const errorResponse = {
-          jsonrpc: JSONRPC,
-          id: msg.id,
-          error: {
-            code: -32000,
-            message: error?.message || String(error),
-            data: {
-              name: error?.name,
-              toolName: error?.toolName
+          // Send tools via notification (not a response to preserve protocol semantics)
+          postToExtension({
+            jsonrpc: JSONRPC,
+            method: 'tools/listChanged',
+            params: {
+              tools,
+              origin: location.origin,
+              timestamp: Date.now(),
+              requested: true // Flag to indicate this was explicitly requested
             }
-          }
-        };
+          });
 
-        postToExtension(errorResponse);
+          console.log('[WebMCP Bridge] Sent tools list:', tools.length, 'tools');
+        } catch (error) {
+          console.error('[WebMCP Bridge] Failed to list tools:', error);
+          // Send error response
+          postToExtension({
+            jsonrpc: JSONRPC,
+            id: msg.id,
+            error: {
+              code: -32603,
+              message: error?.message || 'Failed to list tools'
+            }
+          });
+        }
+        return;
+      }
 
-        console.error('[WebMCP Bridge] Tool call failed:', name, error);
+      // Handle tools/call request
+      if (msg.method === 'tools/call') {
+        console.log('[WebMCP Bridge] Received tool call request:', msg.params?.name);
+
+        const { name, arguments: args } = msg.params || {};
+
+        try {
+          // Delegate to window.agent
+          const result = await window.agent.callTool(name, args || {});
+
+          // Send success response
+          postToExtension({
+            jsonrpc: JSONRPC,
+            id: msg.id,
+            result
+          });
+
+          console.log('[WebMCP Bridge] Tool call succeeded:', name);
+        } catch (error) {
+          // Send error response
+          const errorResponse = {
+            jsonrpc: JSONRPC,
+            id: msg.id,
+            error: {
+              code: -32000,
+              message: error?.message || String(error),
+              data: {
+                name: error?.name,
+                toolName: error?.toolName
+              }
+            }
+          };
+
+          postToExtension(errorResponse);
+
+          console.error('[WebMCP Bridge] Tool call failed:', name, error);
+        }
+        return;
       }
     });
 

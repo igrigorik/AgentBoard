@@ -276,18 +276,28 @@ describe('WebMCP Navigation Integration', () => {
       // Tool call should use new port
       const callPromise = lifecycleManager.callTool(123, 'test-tool', { input: 'test' });
 
+      // Port2 should receive tools/list request + tool call
       expect(mockPort2.postMessage).toHaveBeenCalled();
-      expect(mockPort1.postMessage).not.toHaveBeenCalled();
+      // Port1 might have received tools/list on first connection, but not the new tool call
+      const port1ToolCalls = mockPort1.postMessage.mock.calls.filter(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      );
+      expect(port1ToolCalls).toHaveLength(0);
 
       // Simulate response to prevent timeout
-      const request = mockPort2.postMessage.mock.calls[0][0];
+      // Find the tools/call request (not tools/list)
+      const toolCallRequest = mockPort2.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      );
+      expect(toolCallRequest).toBeDefined();
+
       const messageHandler = mockPort2.onMessage.addListener.mock.calls[0]?.[0];
       if (messageHandler) {
         messageHandler({
           type: 'webmcp',
           payload: {
             jsonrpc: '2.0',
-            id: request.payload.id,
+            id: toolCallRequest![0].payload.id,
             result: { success: true },
           },
         });
@@ -426,14 +436,17 @@ describe('WebMCP Navigation Integration', () => {
       const tabId = 567;
       const messages: string[] = [];
 
-      // Mock port that logs messages
+      // Mock port that logs messages (filter out tools/list requests)
       const createMockPort = (id: string) => ({
         name: 'webmcp-content-script',
         sender: { tab: { id: tabId } },
         onMessage: { addListener: vi.fn() },
         onDisconnect: { addListener: vi.fn() },
         postMessage: vi.fn((msg) => {
-          messages.push(`${id}:${msg.payload.params.name}`);
+          // Only log tool calls, not tools/list requests
+          if (msg.payload.method === 'tools/call') {
+            messages.push(`${id}:${msg.payload.params.name}`);
+          }
         }),
         disconnect: vi.fn(),
       });

@@ -100,7 +100,11 @@ describe('WebMCP Tool Execution Integration', () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'string-tool', { input: 'test' });
 
       // Get request ID from sent message
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       // Simulate string response
@@ -122,7 +126,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle number return values', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'math-tool', { x: 5, y: 3 });
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -143,7 +151,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle boolean return values', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'check-tool', { condition: 'test' });
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -164,7 +176,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle null return values', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'null-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -187,7 +203,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle object return values', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'object-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       const complexObject = {
@@ -217,7 +237,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle array return values', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'array-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       const arrayResult = [
@@ -244,7 +268,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle MCP-style content blocks', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'content-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       const mcpContent = {
@@ -273,7 +301,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle deeply nested structures', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'nested-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       const deeplyNested = {
@@ -311,7 +343,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle tool execution errors', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'error-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -337,7 +373,11 @@ describe('WebMCP Tool Execution Integration', () => {
         invalidArg: true,
       });
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -362,7 +402,11 @@ describe('WebMCP Tool Execution Integration', () => {
     it('should handle tool not found errors', async () => {
       const toolCallPromise = lifecycleManager.callTool(123, 'nonexistent-tool', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -403,11 +447,13 @@ describe('WebMCP Tool Execution Integration', () => {
       const promise2 = lifecycleManager.callTool(123, 'tool2', { arg: 'b' });
       const promise3 = lifecycleManager.callTool(123, 'tool3', { arg: 'c' });
 
-      // Get all request IDs
-      const requests = mockPort.postMessage.mock.calls.map((call: any) => ({
-        id: call[0].payload.id,
-        name: call[0].payload.params.name,
-      }));
+      // Get all tool call request IDs (skip tools/list from requestToolsFromTab)
+      const requests = mockPort.postMessage.mock.calls
+        .filter((call: any) => call[0].payload.method === 'tools/call')
+        .map((call: any) => ({
+          id: call[0].payload.id,
+          name: call[0].payload.params.name,
+        }));
 
       // Respond to all in different order
       if (portMessageHandler) {
@@ -454,11 +500,13 @@ describe('WebMCP Tool Execution Integration', () => {
       const promise2 = lifecycleManager.callTool(123, 'tool2', {});
       const promise3 = lifecycleManager.callTool(123, 'tool3', {});
 
-      // Get all request IDs
-      const requests = mockPort.postMessage.mock.calls.map((call: any) => ({
-        id: call[0].payload.id,
-        name: call[0].payload.params.name,
-      }));
+      // Get all tool call request IDs (skip tools/list from requestToolsFromTab)
+      const requests = mockPort.postMessage.mock.calls
+        .filter((call: any) => call[0].payload.method === 'tools/call')
+        .map((call: any) => ({
+          id: call[0].payload.id,
+          name: call[0].payload.params.name,
+        }));
 
       if (portMessageHandler) {
         // tool1 succeeds
@@ -506,7 +554,11 @@ describe('WebMCP Tool Execution Integration', () => {
 
       const toolCallPromise = lifecycleManager.callTool(123, 'large-tool', { data: largeString });
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       // Return large string
@@ -535,7 +587,11 @@ describe('WebMCP Tool Execution Integration', () => {
 
       const toolCallPromise = lifecycleManager.callTool(123, 'array-processor', {});
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -565,7 +621,11 @@ describe('WebMCP Tool Execution Integration', () => {
 
       const toolCallPromise = lifecycleManager.callTool(123, 'unicode-tool', unicodeData);
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {
@@ -592,7 +652,11 @@ describe('WebMCP Tool Execution Integration', () => {
 
       const toolCallPromise = lifecycleManager.callTool(123, 'html-tool', htmlContent);
 
-      const request = mockPort.postMessage.mock.calls[0][0];
+      // Find tools/call message (skip tools/list from requestToolsFromTab)
+      const toolCallIndex = mockPort.postMessage.mock.calls.findIndex(
+        (call: any) => call[0].payload.method === 'tools/call'
+      );
+      const request = mockPort.postMessage.mock.calls[toolCallIndex][0];
       const requestId = request.payload.id;
 
       if (portMessageHandler) {

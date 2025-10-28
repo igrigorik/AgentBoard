@@ -186,10 +186,19 @@ describe('TabManager', () => {
       // Connect port
       portHandlers.onConnect(mockPort);
 
-      // Messages should be flushed
-      expect(mockPort.postMessage).toHaveBeenCalledTimes(2);
+      // Messages should be flushed + tools/list request = 3 total
+      expect(mockPort.postMessage).toHaveBeenCalledTimes(3);
       expect(mockPort.postMessage).toHaveBeenNthCalledWith(1, { type: 'test1' });
       expect(mockPort.postMessage).toHaveBeenNthCalledWith(2, { type: 'test2' });
+
+      // Third call should be tools/list request
+      const thirdCall = mockPort.postMessage.mock.calls[2][0];
+      expect(thirdCall).toMatchObject({
+        type: 'webmcp',
+        payload: {
+          method: 'tools/list',
+        },
+      });
     });
   });
 
@@ -390,8 +399,13 @@ describe('TabManager', () => {
       // Start tool call
       const promise = lifecycle.callTool(123, 'test-tool', { param: 'value' });
 
-      // Verify request sent
-      expect(mockPort.postMessage).toHaveBeenCalledWith({
+      // Find the tools/call request (first call is tools/list, second is tools/call)
+      const toolCallRequest = mockPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      );
+
+      expect(toolCallRequest).toBeDefined();
+      expect(toolCallRequest![0]).toMatchObject({
         type: 'webmcp',
         payload: {
           jsonrpc: '2.0',
@@ -405,8 +419,7 @@ describe('TabManager', () => {
       });
 
       // Get the request ID
-      const call = mockPort.postMessage.mock.calls[0][0];
-      const requestId = call.payload.id;
+      const requestId = toolCallRequest![0].payload.id;
 
       // Send response
       if (messageHandler) {
@@ -448,8 +461,13 @@ describe('TabManager', () => {
 
       const promise = lifecycle.callTool(123, 'failing-tool', {});
 
-      const call = mockPort.postMessage.mock.calls[0][0];
-      const requestId = call.payload.id;
+      // Find the tools/call request (not the tools/list request)
+      const toolCallRequest = mockPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      );
+
+      expect(toolCallRequest).toBeDefined();
+      const requestId = toolCallRequest![0].payload.id;
 
       // Send error response
       if (messageHandler) {
@@ -557,6 +575,262 @@ describe('TabManager', () => {
 
       // The promise should be rejected with cancellation
       await expect(promise).rejects.toThrow('Tool call cancelled');
+    });
+  });
+
+  describe('Service Worker Hibernation Recovery', () => {
+    it('should request tools when port connects to recover from hibernation', () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: {
+          tab: { id: 123 },
+        },
+        onMessage: {
+          addListener: vi.fn(),
+        },
+        onDisconnect: {
+          addListener: vi.fn(),
+        },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+
+      portHandlers.onConnect(mockPort);
+
+      // Should send tools/list request after connection
+      // The first call is for pending messages flush, second is tools/list request
+      const toolsListCall = mockPort.postMessage.mock.calls.find((call) => {
+        return call[0]?.payload?.method === 'tools/list';
+      });
+
+      expect(toolsListCall).toBeDefined();
+      expect(toolsListCall![0]).toMatchObject({
+        type: 'webmcp',
+        payload: {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          params: {},
+        },
+      });
+    });
+
+    it('should recover tools after service worker hibernation', () => {
+      // Simulate initial connection with tools
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: {
+          tab: { id: 123 },
+        },
+        onMessage: {
+          addListener: vi.fn(),
+        },
+        onDisconnect: {
+          addListener: vi.fn(),
+        },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+
+      let messageHandler: Function | null = null;
+      mockPort.onMessage.addListener = vi.fn((handler) => {
+        messageHandler = handler;
+      });
+
+      // First connection
+      portHandlers.onConnect(mockPort);
+
+      // Page sends tools
+      if (messageHandler) {
+        (messageHandler as Function)({
+          type: 'webmcp',
+          payload: {
+            method: 'tools/listChanged',
+            params: {
+              tools: [
+                { name: 'tool1', description: 'First tool' },
+                { name: 'tool2', description: 'Second tool' },
+              ],
+              origin: 'https://example.com',
+              timestamp: Date.now(),
+            },
+          },
+        });
+      }
+
+      // Verify tools are registered
+      let registry = lifecycle.getToolRegistry(123);
+      expect(registry).toBeDefined();
+      expect(registry?.tools).toHaveLength(2);
+
+      // SIMULATE SERVICE WORKER HIBERNATION
+      // Create a new TabManager instance (simulates SW restart with empty state)
+      lifecycle = new TabManager();
+
+      // Registry should be empty now (state lost)
+      registry = lifecycle.getToolRegistry(123);
+      expect(registry).toBeUndefined();
+
+      // Port reconnects (content script still alive)
+      const newPort = {
+        name: 'webmcp-content-script',
+        sender: {
+          tab: { id: 123 },
+        },
+        onMessage: {
+          addListener: vi.fn(),
+        },
+        onDisconnect: {
+          addListener: vi.fn(),
+        },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+
+      let reconnectHandler: Function | null = null;
+      newPort.onMessage.addListener = vi.fn((handler) => {
+        reconnectHandler = handler;
+      });
+
+      portHandlers.onConnect(newPort);
+
+      // Should have requested tools
+      const toolsRequest = newPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/list'
+      );
+      expect(toolsRequest).toBeDefined();
+
+      // Page responds with tools
+      if (reconnectHandler) {
+        (reconnectHandler as Function)({
+          type: 'webmcp',
+          payload: {
+            method: 'tools/listChanged',
+            params: {
+              tools: [
+                { name: 'tool1', description: 'First tool' },
+                { name: 'tool2', description: 'Second tool' },
+              ],
+              origin: 'https://example.com',
+              timestamp: Date.now(),
+              requested: true,
+            },
+          },
+        });
+      }
+
+      // Tools should be recovered!
+      registry = lifecycle.getToolRegistry(123);
+      expect(registry).toBeDefined();
+      expect(registry?.tools).toHaveLength(2);
+      expect(registry?.tools[0].name).toBe('tool1');
+    });
+
+    it('should wait for tools when requesting with requestToolsAndWait', async () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: {
+          tab: { id: 123 },
+        },
+        onMessage: {
+          addListener: vi.fn(),
+        },
+        onDisconnect: {
+          addListener: vi.fn(),
+        },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+
+      let messageHandler: Function | null = null;
+      mockPort.onMessage.addListener = vi.fn((handler) => {
+        messageHandler = handler;
+      });
+
+      // Connect port
+      portHandlers.onConnect(mockPort);
+
+      // Clear the initial tools/list request
+      mockPort.postMessage.mockClear();
+
+      // Request tools and wait for response
+      const toolsPromise = lifecycle.requestToolsAndWait(123);
+
+      // Verify tools/list request was sent
+      expect(mockPort.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webmcp',
+          payload: expect.objectContaining({
+            method: 'tools/list',
+          }),
+        })
+      );
+
+      // Simulate page sending tools
+      if (messageHandler) {
+        (messageHandler as Function)({
+          type: 'webmcp',
+          payload: {
+            method: 'tools/listChanged',
+            params: {
+              tools: [
+                { name: 'tool1', description: 'First tool' },
+                { name: 'tool2', description: 'Second tool' },
+              ],
+              origin: 'https://example.com',
+              timestamp: Date.now(),
+            },
+          },
+        });
+      }
+
+      // Promise should resolve with tools
+      const tools = await toolsPromise;
+      expect(tools).toHaveLength(2);
+      expect(tools[0].name).toBe('tool1');
+    });
+
+    it('should request tools on every port connection', () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: {
+          tab: { id: 123 },
+        },
+        onMessage: {
+          addListener: vi.fn(),
+        },
+        onDisconnect: {
+          addListener: vi.fn(),
+        },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+
+      // First connection
+      portHandlers.onConnect(mockPort);
+
+      const firstCallCount = mockPort.postMessage.mock.calls.filter(
+        (call) => call[0]?.payload?.method === 'tools/list'
+      ).length;
+
+      expect(firstCallCount).toBe(1);
+
+      // Disconnect and reconnect
+      const disconnectHandler = mockPort.onDisconnect.addListener.mock.calls[0][0];
+      disconnectHandler();
+
+      const mockPort2 = {
+        ...mockPort,
+        postMessage: vi.fn(),
+      };
+
+      portHandlers.onConnect(mockPort2);
+
+      // Should send tools/list request on every connection
+      const secondCallCount = mockPort2.postMessage.mock.calls.filter(
+        (call) => call[0]?.payload?.method === 'tools/list'
+      ).length;
+
+      expect(secondCallCount).toBe(1);
     });
   });
 

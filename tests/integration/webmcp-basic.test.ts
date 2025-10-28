@@ -142,8 +142,12 @@ describe('WebMCP Basic Integration', () => {
     // Call a tool
     const resultPromise = lifecycleManager.callTool(123, 'test-tool', { input: 'test' });
 
-    // Verify message was sent
-    expect(mockPort.postMessage).toHaveBeenCalledWith({
+    // Find the tools/call message (first message is tools/list request)
+    const toolCallMsg = mockPort.postMessage.mock.calls.find(
+      (call) => call[0]?.payload?.method === 'tools/call'
+    );
+    expect(toolCallMsg).toBeDefined();
+    expect(toolCallMsg![0]).toMatchObject({
       type: 'webmcp',
       payload: expect.objectContaining({
         jsonrpc: '2.0',
@@ -155,9 +159,8 @@ describe('WebMCP Basic Integration', () => {
       }),
     });
 
-    // Simulate response
-    const request = mockPort.postMessage.mock.calls[0][0];
-    const requestId = request.payload.id;
+    // Simulate response using the correct request ID from tools/call
+    const requestId = toolCallMsg![0].payload.id;
 
     if (messageHandler) {
       (messageHandler as Function)({
