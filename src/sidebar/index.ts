@@ -55,6 +55,9 @@ const attachedTabId = (() => {
 
 log.info('[Sidebar] Initialized for tab:', attachedTabId);
 
+// Track available tools count for logging
+let availableToolsCount = 0;
+
 // Smart scroll management helpers
 function checkIfUserAtBottom(): boolean {
   const threshold = 10; // Allow some margin for rounding errors
@@ -102,6 +105,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load agents and set up initial state
   await loadAgents();
 
+  // Fetch initial tool list (Recommendation 1)
+  await refreshAvailableTools();
+
   // Add initial assistant message
   const welcomeMsg: ChatMessage = {
     id: globalThis.crypto.randomUUID(),
@@ -123,6 +129,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadConfiguration() {
   // This function is kept for compatibility but agents are loaded separately
   await loadAgents();
+}
+
+/**
+ * Refresh available tools from the tool registry
+ * This requests the current tool list from the background service worker
+ */
+async function refreshAvailableTools(): Promise<void> {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'WEBMCP_GET_TOOLS',
+      tabId: attachedTabId || undefined,
+    });
+
+    if (response?.success && Array.isArray(response.data)) {
+      availableToolsCount = response.data.length;
+      log.info(
+        `[Sidebar] Available tools: ${availableToolsCount}`,
+        response.data.map((t: { name: string }) => t.name)
+      );
+    } else {
+      log.warn('[Sidebar] Failed to get tools:', response);
+    }
+  } catch (error) {
+    log.error('[Sidebar] Error fetching tools:', error);
+  }
 }
 
 async function loadAgents() {
@@ -196,6 +227,13 @@ function setupMessageListener() {
     } else if (request.type === 'PING') {
       // PING is tab-agnostic, always respond
       // This is handled by the background script
+      sendResponse({ received: true });
+    } else if (request.type === 'TOOLS_UPDATED') {
+      // Tool registry has been updated (Recommendation 2)
+      log.debug('[Sidebar] Received TOOLS_UPDATED notification');
+      refreshAvailableTools().catch((err) => {
+        log.error('[Sidebar] Failed to refresh tools on update:', err);
+      });
       sendResponse({ received: true });
     } else {
       // Don't respond to unknown messages - let other handlers deal with them

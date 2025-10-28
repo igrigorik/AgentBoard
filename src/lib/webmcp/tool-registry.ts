@@ -191,6 +191,7 @@ export class ToolRegistryManager {
 
   /**
    * Notify all listeners of tool changes
+   * Also broadcasts to all open sidebars via message passing
    */
   private notifyListeners(): void {
     const tools = this.getAllTools();
@@ -201,6 +202,17 @@ export class ToolRegistryManager {
         log.error('[ToolRegistry] Error in listener:', error);
       }
     }
+
+    // Broadcast tool updates to all open sidebars
+    chrome.runtime
+      .sendMessage({
+        type: 'TOOLS_UPDATED',
+        timestamp: Date.now(),
+      })
+      .catch(() => {
+        // Sidebars might not be open, ignore errors
+        log.debug('[ToolRegistry] No sidebars listening for tool updates (this is normal)');
+      });
   }
 
   /**
