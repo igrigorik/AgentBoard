@@ -683,10 +683,13 @@ chrome.runtime.onConnect.addListener((port) => {
           log.debug('[Background] Agent is ready');
 
           // Convert messages to CoreMessage format
-          const coreMessages: CoreMessage[] = messages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          }));
+          const coreMessages: CoreMessage[] = messages.map(
+            (m) =>
+              ({
+                role: m.role,
+                content: m.content,
+              }) as CoreMessage
+          );
 
           log.debug(
             '[Background] Calling streamChat with messages:',

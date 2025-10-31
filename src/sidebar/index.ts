@@ -5,7 +5,7 @@
 
 import log from '../lib/logger';
 import './styles.css';
-import type { ChatMessage, ToolCall } from '../types';
+import type { ChatMessage, ToolCall, MessageContent, MessagePart } from '../types';
 import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
 import { ToolCallBox } from './ToolCallBox';
 import { ReasoningBox } from './ReasoningBox';
@@ -39,12 +39,156 @@ let messageHistory: ChatMessage[] = [];
 let currentSession: StreamingSession | null = null;
 const configStorage = ConfigStorage.getInstance();
 
+// Image attachment state
+interface ImageAttachment {
+  id: string;
+  dataUrl: string;
+  mimeType: string;
+  size: number;
+  filename: string;
+}
+
+let pendingAttachments: ImageAttachment[] = [];
+
 // Command system
 let commandRegistry: CommandRegistry;
 let commandProcessor: CommandProcessor;
 
 // Scroll management state
 let isUserAtBottom = true; // Initially at bottom
+
+/**
+ * Resize image if it exceeds max dimensions
+ * Maintains aspect ratio and converts to JPEG for efficiency
+ * @param file Original image file
+ * @param maxDimension Max width/height (default 1920px)
+ * @param quality JPEG quality 0-1 (default 0.85)
+ * @returns Resized data URL
+ */
+async function resizeImageIfNeeded(
+  file: File,
+  maxDimension = 1920,
+  quality = 0.85
+): Promise<{ dataUrl: string; sizeKB: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      reject(new Error('Failed to create canvas context'));
+      return;
+    }
+
+    img.onload = () => {
+      let { width, height } = img;
+
+      // Check if resize needed
+      const needsResize = width > maxDimension || height > maxDimension;
+
+      if (!needsResize && file.size < 1024 * 1024) {
+        // Small enough, return original
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          const sizeKB = (dataUrl.length * 0.75) / 1024;
+          resolve({ dataUrl, sizeKB });
+        };
+        reader.onerror = () => reject(new Error(`Failed to read file: ${file.name}`));
+        reader.readAsDataURL(file);
+        return;
+      }
+
+      // Calculate new dimensions (maintain aspect ratio)
+      if (width > height) {
+        if (width > maxDimension) {
+          height = (height * maxDimension) / width;
+          width = maxDimension;
+        }
+      } else {
+        if (height > maxDimension) {
+          width = (width * maxDimension) / height;
+          height = maxDimension;
+        }
+      }
+
+      // Resize
+      canvas.width = width;
+      canvas.height = height;
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Convert to JPEG with quality control
+      const resizedDataUrl = canvas.toDataURL('image/jpeg', quality);
+      const sizeKB = (resizedDataUrl.length * 0.75) / 1024;
+      resolve({ dataUrl: resizedDataUrl, sizeKB });
+    };
+
+    img.onerror = () => reject(new Error('Failed to load image'));
+
+    // Load original
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => reject(new Error(`Failed to read file: ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Attach an image file to pending attachments
+ * Automatically resizes large images to 1920px max dimension
+ */
+async function attachImage(file: File): Promise<void> {
+  // Validate file type
+  if (!file.type.startsWith('image/')) {
+    addMessage('error', `Invalid file type: ${file.type}. Please select an image file.`);
+    return;
+  }
+
+  try {
+    // Resize if needed (1920px max, 85% quality)
+    const { dataUrl, sizeKB } = await resizeImageIfNeeded(file);
+
+    pendingAttachments.push({
+      id: globalThis.crypto.randomUUID(),
+      dataUrl,
+      mimeType: 'image/jpeg', // Always JPEG after resize
+      size: Math.round(sizeKB * 1024),
+      filename: file.name,
+    });
+
+    updateAttachmentIndicator();
+    log.info('[Sidebar] Attached image:', file.name, `(${sizeKB.toFixed(0)}KB)`);
+  } catch (error) {
+    log.error('[Sidebar] Failed to attach image:', error);
+    addMessage(
+      'error',
+      `Failed to attach image: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+/**
+ * Update attachment indicator display
+ */
+function updateAttachmentIndicator(): void {
+  const indicator = document.getElementById('attachment-indicator');
+  if (!indicator) return;
+
+  if (pendingAttachments.length === 0) {
+    indicator.style.display = 'none';
+  } else {
+    indicator.style.display = 'block';
+    const count = pendingAttachments.length;
+    indicator.textContent = `🖼️ ${count} image${count > 1 ? 's' : ''} attached - Press ESC to clear`;
+
+    // Tooltip shows filenames
+    indicator.title = pendingAttachments
+      .map((a) => `${a.filename} (${(a.size / 1024).toFixed(1)}KB)`)
+      .join('\n');
+  }
+}
 
 // Parse the attached tab ID from the URL hash
 const attachedTabId = (() => {
@@ -258,6 +402,45 @@ function setupEventListeners() {
     }
   });
 
+  // Attach button click - open file picker
+  const attachButton = document.getElementById('attach-button') as HTMLButtonElement;
+  attachButton.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/gif,image/webp';
+    input.multiple = true; // Allow multi-select
+    input.onchange = async (e) => {
+      const files = (e.target as HTMLInputElement).files;
+      if (files) {
+        for (const file of Array.from(files)) {
+          await attachImage(file);
+        }
+      }
+    };
+    input.click();
+  });
+
+  // Clipboard paste for images
+  messageInput.addEventListener('paste', async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    // Check for images in clipboard
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault(); // Don't paste as text
+
+        const file = item.getAsFile();
+        if (file) {
+          await attachImage(file);
+        }
+        return;
+      }
+    }
+
+    // Fall through to default text paste
+  });
+
   // Agent switching
   agentSelect.addEventListener('change', async (e) => {
     const selectedAgentId = (e.target as HTMLSelectElement).value;
@@ -310,60 +493,92 @@ function setupEventListeners() {
 }
 
 async function handleSendMessage() {
-  const message = messageInput.value.trim();
-  if (!message || isLoading) return;
+  const text = messageInput.value.trim();
+
+  // Require either text or attachments
+  if (!text && pendingAttachments.length === 0) return;
+  if (isLoading) return;
 
   // Clear input immediately for better UX
   messageInput.value = '';
   messageInput.style.height = '88px';
 
-  // Process slash commands
-  const processed = await commandProcessor.process(message);
+  // Process slash commands (only if there's text)
+  if (text) {
+    const processed = await commandProcessor.process(text);
 
-  if (processed) {
-    if (processed.type === 'action' && processed.action) {
-      // Execute built-in command (doesn't send to LLM)
-      try {
-        processed.action();
-      } catch (error) {
-        log.error('[Sidebar] Command execution error:', error);
-        addMessage('error', `Command failed: ${error}`);
+    if (processed) {
+      if (processed.type === 'action' && processed.action) {
+        // Execute built-in command (doesn't send to LLM)
+        try {
+          processed.action();
+        } catch (error) {
+          log.error('[Sidebar] Command execution error:', error);
+          addMessage('error', `Command failed: ${error}`);
+        }
+        return;
+      } else if (processed.type === 'text' && processed.content) {
+        // Replace message with expanded template and continue with attachments
+        const expandedMessage = processed.content;
+        await createAndSendMessage(expandedMessage);
+        return;
       }
-      return;
-    } else if (processed.type === 'text' && processed.content) {
-      // Replace message with expanded template
-      const expandedMessage = processed.content;
-
-      // Create and add user message with expanded text
-      const userMsg: ChatMessage = {
-        id: globalThis.crypto.randomUUID(),
-        role: 'user',
-        content: expandedMessage,
-        timestamp: Date.now(),
-      };
-      messageHistory.push(userMsg);
-      addMessage('user', expandedMessage);
-
-      // Continue to send to LLM
-      await sendToAI(expandedMessage);
-      return;
     }
   }
 
   // Regular message (not a command)
+  await createAndSendMessage(text);
+}
+
+/**
+ * Helper to create message with attachments and send to AI
+ */
+async function createAndSendMessage(text: string) {
+  // Build multi-part content
+  const content: MessagePart[] = [];
+
+  if (text) {
+    content.push({ type: 'text', text });
+  }
+
+  for (const attachment of pendingAttachments) {
+    content.push({
+      type: 'image',
+      image: attachment.dataUrl,
+      mimeType: attachment.mimeType,
+    });
+  }
+
+  // Create message
   const userMsg: ChatMessage = {
     id: globalThis.crypto.randomUUID(),
     role: 'user',
-    content: message,
+    content:
+      content.length === 1 && content[0].type === 'text'
+        ? (content[0].text ?? '') // Keep as string if text-only (backward compatible)
+        : content, // Use multi-part for images
     timestamp: Date.now(),
+    metadata: {
+      hasAttachments: pendingAttachments.length > 0,
+    },
   };
-  messageHistory.push(userMsg);
-  addMessage('user', message);
 
-  await sendToAI(message);
+  messageHistory.push(userMsg);
+  addMessage('user', userMsg.content);
+
+  // Clear attachments
+  const hadAttachments = pendingAttachments.length > 0;
+  pendingAttachments = [];
+  updateAttachmentIndicator();
+
+  if (hadAttachments) {
+    log.info('[Sidebar] Sending message with attachments to AI');
+  }
+
+  await sendToAI();
 }
 
-async function sendToAI(message: string) {
+async function sendToAI() {
   // When user sends a message, assume they want to see the response
   isUserAtBottom = true;
 
@@ -386,8 +601,8 @@ async function sendToAI(message: string) {
       return;
     }
 
-    // Start streaming from AI
-    await streamAIResponse(message);
+    // Start streaming from AI (uses messageHistory)
+    await streamAIResponse();
   } catch (error) {
     addMessage('error', 'Failed to send message. Please try again.');
     log.error('[Sidebar] Send message error:', error);
@@ -397,7 +612,7 @@ async function sendToAI(message: string) {
   }
 }
 
-async function streamAIResponse(_userMessage: string) {
+async function streamAIResponse() {
   log.debug('[Sidebar] Starting streamAIResponse for agent:', currentAgent?.name);
 
   if (!currentAgentId || !currentAgent) {
@@ -631,7 +846,7 @@ async function streamAIResponse(_userMessage: string) {
           break;
         }
 
-        case 'STREAM_ERROR':
+        case 'STREAM_ERROR': {
           // Handle streaming error
           log.error('[Sidebar] Stream error:', msg.error);
 
@@ -649,12 +864,34 @@ async function streamAIResponse(_userMessage: string) {
             currentSession = null;
           }
 
-          addMessage('error', msg.error || 'Streaming failed');
+          // Enhanced error messages for multi-modal issues
+          let errorMessage = msg.error || 'Streaming failed';
+
+          // Check for common multi-modal errors
+          if (
+            errorMessage.toLowerCase().includes('image') ||
+            errorMessage.toLowerCase().includes('vision')
+          ) {
+            errorMessage +=
+              '\n\nNote: Make sure your agent supports vision (GPT-4V, Claude 3+, Gemini).';
+          }
+          if (
+            errorMessage.toLowerCase().includes('size') ||
+            errorMessage.toLowerCase().includes('too large')
+          ) {
+            errorMessage += '\n\nTry sending fewer or smaller images.';
+          }
+          if (errorMessage.toLowerCase().includes('format')) {
+            errorMessage += '\n\nSupported formats: PNG, JPEG, GIF, WebP.';
+          }
+
+          addMessage('error', errorMessage);
           // Don't pop from history since we didn't add it yet
           isLoading = false;
           updateSendButton();
           reject(new Error(msg.error));
           break;
+        }
       }
     });
 
@@ -671,7 +908,17 @@ async function streamAIResponse(_userMessage: string) {
 
     // Send messages to stream (exclude empty messages)
     const messagesToSend = messageHistory
-      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() !== '')
+      .filter((m) => {
+        if (m.role !== 'user' && m.role !== 'assistant') return false;
+
+        // Handle string content
+        if (typeof m.content === 'string') {
+          return m.content.trim() !== '';
+        }
+
+        // Handle multi-part content (images count as non-empty)
+        return m.content.length > 0;
+      })
       .map((m) => ({ role: m.role, content: m.content }));
 
     log.debug('[Sidebar] Sending messages to stream:', {
@@ -697,7 +944,7 @@ async function streamAIResponse(_userMessage: string) {
 
 function addMessage(
   role: 'user' | 'assistant' | 'system' | 'error',
-  content: string,
+  content: MessageContent,
   isStreaming = false
 ): HTMLDivElement {
   const messageDiv = document.createElement('div');
@@ -709,14 +956,39 @@ function addMessage(
   const contentDiv = document.createElement('div');
   contentDiv.className = 'message-content';
 
-  // Support markdown formatting
-  if (role === 'assistant' && content) {
-    StreamingMarkdownRenderer.renderComplete(contentDiv, content);
-  } else if (role === 'assistant' && isStreaming) {
-    // Empty content for streaming, will be filled incrementally
-    contentDiv.innerHTML = '';
+  // Handle string content (backward compatible)
+  if (typeof content === 'string') {
+    // Support markdown formatting
+    if (role === 'assistant' && content) {
+      StreamingMarkdownRenderer.renderComplete(contentDiv, content);
+    } else if (role === 'assistant' && isStreaming) {
+      // Empty content for streaming, will be filled incrementally
+      contentDiv.innerHTML = '';
+    } else {
+      contentDiv.textContent = content;
+    }
   } else {
-    contentDiv.textContent = content;
+    // Handle multi-part content
+    const textParts = content.filter((p) => p.type === 'text');
+    const imageParts = content.filter((p) => p.type === 'image');
+
+    // Render text parts
+    if (textParts.length > 0) {
+      const textContent = textParts.map((p) => p.text).join('\n');
+      if (role === 'assistant') {
+        StreamingMarkdownRenderer.renderComplete(contentDiv, textContent);
+      } else {
+        contentDiv.textContent = textContent;
+      }
+    }
+
+    // Add attachment badge for images
+    if (imageParts.length > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'attachment-badge';
+      badge.textContent = `📎 ${imageParts.length} image${imageParts.length > 1 ? 's' : ''}`;
+      contentDiv.appendChild(badge);
+    }
   }
 
   messageDiv.appendChild(contentDiv);
@@ -803,10 +1075,19 @@ function cancelCurrentStream() {
   }
 }
 
-// Cancel current stream on Escape
+// Cancel current stream on Escape OR clear attachments
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && currentSession) {
-    cancelCurrentStream();
+  if (e.key === 'Escape') {
+    // Priority 1: Cancel active stream
+    if (currentSession) {
+      cancelCurrentStream();
+    }
+    // Priority 2: Clear pending attachments
+    else if (pendingAttachments.length > 0) {
+      pendingAttachments = [];
+      updateAttachmentIndicator();
+      log.info('[Sidebar] Cleared pending attachments');
+    }
   }
 });
 

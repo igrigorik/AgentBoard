@@ -170,12 +170,30 @@ export interface ToolCall {
 }
 
 // Chat message types
+
+/**
+ * Message content can be simple text or multi-part (text + images)
+ * Backward compatible: string content still works everywhere
+ */
+export type MessageContent = string | MessagePart[];
+
+/**
+ * Individual part of a multi-modal message
+ * Currently supports text and image parts
+ */
+export interface MessagePart {
+  type: 'text' | 'image';
+  text?: string;
+  image?: string; // Data URL (base64 encoded)
+  mimeType?: string; // e.g., 'image/png', 'image/jpeg'
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
+  content: MessageContent;
   timestamp: number;
-  toolCalls?: ToolCall[]; // Array of tool calls associated with this message
+  toolCalls?: ToolCall[];
   metadata?: {
     provider?: string;
     model?: string;
@@ -183,6 +201,7 @@ export interface ChatMessage {
     toolResult?: unknown;
     agentId?: string;
     agentName?: string;
+    hasAttachments?: boolean;
   };
 }
 
@@ -225,7 +244,7 @@ interface PortStreamChatMessage {
   tabId?: number; // The tab this sidebar is associated with (for tool scoping)
   messages: Array<{
     role: 'user' | 'assistant';
-    content: string;
+    content: MessageContent;
   }>;
 }
 

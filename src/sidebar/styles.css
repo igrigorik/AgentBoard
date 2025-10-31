@@ -207,6 +207,24 @@ body {
   border: 1px solid var(--border);
 }
 
+/* Attachment badge for messages with images */
+.attachment-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: rgba(74, 144, 226, 0.15);
+  border-radius: 12px;
+  font-size: 11px;
+  color: var(--accent-primary);
+  vertical-align: middle;
+  font-weight: 500;
+}
+
+.message-user .attachment-badge {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-secondary);
+}
+
 /* Assistant messages - left aligned, no background */
 .message-assistant {
   align-items: flex-start;
@@ -565,9 +583,21 @@ body {
   z-index: 10;
 }
 
+/* Attachment indicator */
+.attachment-indicator {
+  padding: 6px 12px;
+  background: rgba(6, 174, 213, 0.1);
+  border: 1px solid rgba(6, 174, 213, 0.3);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--accent-teal);
+  margin-bottom: 8px;
+  pointer-events: auto;
+}
+
 #message-input {
   width: 100%;
-  padding: 10px 44px 10px 14px; /* Right padding for floating button */
+  padding: 10px 80px 10px 14px; /* Right padding for two buttons */
   border: 1px solid var(--border-color);
   border-radius: 12px;
   resize: none;
@@ -584,13 +614,51 @@ body {
   transition:
     border-color 0.2s ease,
     background-color 0.2s ease;
-  pointer-events: auto; /* Re-enable clicks on input */
+  pointer-events: auto;
 }
 
 #message-input:focus {
   outline: none;
   border-color: var(--accent-teal);
   background: var(--bg-primary);
+}
+
+/* Attach button - positioned next to send button */
+#attach-button {
+  position: absolute;
+  right: 54px; /* Leave space for send button */
+  bottom: 16px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+#attach-button:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--accent-teal);
+  transform: scale(1.05);
+}
+
+#attach-button:active {
+  transform: scale(0.95);
+}
+
+#attach-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
 }
 
 #send-button {
@@ -612,7 +680,7 @@ body {
   justify-content: center;
   font-size: 17px;
   z-index: 3;
-  pointer-events: auto; /* Re-enable clicks on button */
+  pointer-events: auto;
 }
 
 #send-button:hover:not(:disabled) {
@@ -642,7 +710,7 @@ body {
   color: var(--error-color);
   background: rgba(239, 68, 68, 0.1);
   border-color: transparent;
-  font-size: 14px; /* Smaller size for better centering */
+  font-size: 14px;
   line-height: 1;
   display: flex;
   align-items: center;
