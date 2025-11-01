@@ -125,7 +125,7 @@ export class AIClient {
     switch (agent.provider) {
       case 'openai': {
         const openai = createOpenAI({
-          apiKey: agent.apiKey,
+          apiKey: agent.apiKey || 'no-key-provided',
           baseURL: agent.endpoint,
         });
         return () => openai(agent.model);
@@ -133,7 +133,7 @@ export class AIClient {
 
       case 'anthropic': {
         const anthropic = createAnthropic({
-          apiKey: agent.apiKey,
+          apiKey: agent.apiKey || 'no-key-provided',
           baseURL: agent.endpoint,
           headers: {
             'anthropic-dangerous-direct-browser-access': 'true',
@@ -153,7 +153,7 @@ export class AIClient {
 
       case 'google': {
         const google = createGoogleGenerativeAI({
-          apiKey: agent.apiKey,
+          apiKey: agent.apiKey || 'no-key-provided',
           baseURL: agent.endpoint,
         });
         return () => google(agent.model);
@@ -196,9 +196,10 @@ export class AIClient {
       throw new Error(`Agent ${agentId} not found. Please check your configuration.`);
     }
 
-    if (!agent.apiKey) {
+    // Require API key unless custom endpoint is provided
+    if (!agent.apiKey && !agent.endpoint) {
       throw new Error(
-        `No API key configured for agent "${agent.name}". Please update in settings.`
+        `No API key or custom endpoint configured for agent "${agent.name}". Please update in settings.`
       );
     }
 

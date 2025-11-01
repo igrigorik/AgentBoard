@@ -593,10 +593,11 @@ async function sendToAI() {
       return;
     }
 
-    if (!currentAgent.apiKey) {
+    // Require API key unless custom endpoint is provided
+    if (!currentAgent.apiKey && !currentAgent.endpoint) {
       addMessage(
         'error',
-        `Agent "${currentAgent.name}" needs an API key. Please configure it in settings.`
+        `Agent "${currentAgent.name}" needs an API key or custom endpoint. Please configure it in settings.`
       );
       return;
     }
