@@ -8,7 +8,6 @@ import './styles.css';
 import {
   ConfigStorage,
   type AgentConfig,
-  type AIProvider,
   type MCPConfig,
   type ReasoningConfig,
 } from '../lib/storage/config';
@@ -25,6 +24,7 @@ import {
   type Badge,
   type Detail,
 } from './card-component';
+import { inferProviderFromModel, getProviderDisplay } from '../lib/ai/provider-utils';
 
 // Get config storage instance
 const configStorage = ConfigStorage.getInstance();
@@ -72,10 +72,21 @@ async function renderAgents() {
 }
 
 function createAgentCard(agent: AgentConfig): HTMLElement {
+  // Infer provider from model if not explicitly set
+  const inferredProvider = inferProviderFromModel(agent.model);
+  const providerDisplay = getProviderDisplay(inferredProvider);
+
+  // Show provider with proxy indicator if using custom endpoint
+  const hasProxy = !!agent.endpoint;
+  const providerText = hasProxy
+    ? `🌐 ${providerDisplay.name}`.toUpperCase()
+    : providerDisplay.name.toUpperCase();
+
   const badges: Badge[] = [
     {
-      text: agent.provider.toUpperCase(),
-      className: `provider-badge provider-${agent.provider}`,
+      text: providerText,
+      className: `provider-badge provider-${inferredProvider}`,
+      title: hasProxy ? `Using ${agent.endpoint}` : undefined,
     },
   ];
 
@@ -91,6 +102,15 @@ function createAgentCard(agent: AgentConfig): HTMLElement {
     { label: 'Temperature:', value: agent.temperature.toString() },
     { label: 'Max Tokens:', value: agent.maxTokens.toString() },
   ];
+
+  // Add endpoint info if present
+  if (agent.endpoint) {
+    details.push({
+      label: 'Endpoint:',
+      value: agent.endpoint,
+      valueClassName: 'endpoint-url',
+    });
+  }
 
   return createCard({
     id: agent.id,
@@ -118,12 +138,20 @@ function setupEventListeners() {
   // Update API key required state when endpoint changes
   document.getElementById('agent-endpoint')?.addEventListener('input', () => {
     updateApiKeyRequirement();
+    updateOpenAICompatibleVisibility();
   });
-  document.getElementById('agent-provider')?.addEventListener('change', () => {
-    updateModelPlaceholder();
-    updateReasoningVisibility();
+
+  // Track when user explicitly sets the OpenAI-compatible checkbox
+  document.getElementById('agent-openai-compatible')?.addEventListener('change', (e) => {
+    const checkbox = e.target as HTMLInputElement;
+    // Mark that the user has explicitly set this value
+    checkbox.setAttribute('data-user-set', 'true');
   });
+
+  // Update inferred provider when model changes
   document.getElementById('agent-model')?.addEventListener('input', () => {
+    updateInferredProvider();
+    updateReasoningVisibility();
     validateModelReasoning();
   });
 
@@ -168,6 +196,19 @@ function openCreateModal() {
     onSave: saveAgent,
     onTest: testCurrentAgent,
   });
+
+  // Hide inferred provider for new agent (no model entered yet)
+  const inferredProviderDiv = document.getElementById('inferred-provider');
+  if (inferredProviderDiv) {
+    inferredProviderDiv.classList.add('hidden');
+  }
+
+  // Clear OpenAI-compatible checkbox state for new agent
+  const compatibleCheckbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
+  if (compatibleCheckbox) {
+    compatibleCheckbox.checked = false;
+    compatibleCheckbox.removeAttribute('data-user-set');
+  }
 
   openModal('agent-modal', () => {
     editingAgentId = null;
@@ -215,10 +256,24 @@ async function populateForm(agentId: string) {
   (document.getElementById('agent-name') as HTMLInputElement).value = agent.name;
   (document.getElementById('agent-description') as HTMLInputElement).value =
     agent.description || '';
-  (document.getElementById('agent-provider') as HTMLSelectElement).value = agent.provider;
   apiKeyInput.value = agent.apiKey || '';
   (document.getElementById('agent-model') as HTMLInputElement).value = agent.model;
   (document.getElementById('agent-endpoint') as HTMLInputElement).value = endpointValue;
+
+  // Set OpenAI-compatible checkbox - only check if explicitly set by user
+  const compatibleCheckbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
+  if (compatibleCheckbox) {
+    if (endpointValue && agent.openaiCompatible !== undefined) {
+      // User has explicitly set this value
+      compatibleCheckbox.checked = agent.openaiCompatible;
+      compatibleCheckbox.setAttribute('data-user-set', 'true');
+    } else {
+      // No explicit value set - leave unchecked and clear the attribute
+      compatibleCheckbox.checked = false;
+      compatibleCheckbox.removeAttribute('data-user-set');
+    }
+  }
+
   (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value =
     agent.systemPrompt;
   (document.getElementById('agent-temperature') as HTMLInputElement).value =
@@ -232,7 +287,9 @@ async function populateForm(agentId: string) {
   populateReasoningConfig(agent);
 
   // Update UI state
+  updateInferredProvider();
   updateApiKeyRequirement();
+  updateOpenAICompatibleVisibility();
   updateReasoningVisibility();
 }
 
@@ -281,16 +338,25 @@ async function saveAgent() {
     // Collect reasoning configuration
     const reasoningConfig = collectReasoningConfig();
 
+    const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
+    const provider = inferProviderFromModel(model);
+
     const agentData: Omit<AgentConfig, 'id'> = {
       name: (document.getElementById('agent-name') as HTMLInputElement).value.trim(),
       description:
         (document.getElementById('agent-description') as HTMLInputElement).value.trim() ||
         undefined,
-      provider: (document.getElementById('agent-provider') as HTMLSelectElement)
-        .value as AIProvider,
+      provider,
       apiKey: apiKeyValue || undefined, // Set to undefined if empty
-      model: (document.getElementById('agent-model') as HTMLInputElement).value.trim(),
+      model,
       endpoint: endpointValue || undefined,
+      openaiCompatible: (() => {
+        if (!endpointValue) return undefined;
+        const checkbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
+        // Only save the value if the user explicitly set it
+        // Otherwise, let the backend use smart detection
+        return checkbox?.hasAttribute('data-user-set') ? checkbox.checked : undefined;
+      })(),
       systemPrompt: (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value,
       temperature: parseFloat(
         (document.getElementById('agent-temperature') as HTMLInputElement).value
@@ -341,9 +407,8 @@ async function testCurrentAgent() {
   showModalStatus('agent-modal', 'Testing connection...', 'info');
 
   try {
-    const provider = (document.getElementById('agent-provider') as HTMLSelectElement)
-      .value as AIProvider;
     const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
+    const provider = inferProviderFromModel(model);
 
     // Test the connection directly without saving temp agent
     const result = await new Promise<{ success: boolean; message: string }>((resolve, reject) => {
@@ -454,18 +519,48 @@ function updateApiKeyRequirement() {
   }
 }
 
-function updateModelPlaceholder() {
-  const providerSelect = document.getElementById('agent-provider') as HTMLSelectElement;
+function updateOpenAICompatibleVisibility() {
+  const endpointInput = document.getElementById('agent-endpoint') as HTMLInputElement;
+  const compatibleGroup = document.getElementById('openai-compatible-group') as HTMLDivElement;
+  const compatibleCheckbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
+  const endpoint = endpointInput?.value?.trim();
+
+  if (compatibleGroup) {
+    if (endpoint) {
+      // Show checkbox when endpoint is set
+      compatibleGroup.style.display = 'block';
+
+      // Don't auto-check based on smart detection - let user decide
+      // The backend will use smart detection if the value is undefined
+    } else {
+      // Hide when no endpoint
+      compatibleGroup.style.display = 'none';
+      // Clear the user-set attribute when endpoint is removed
+      if (compatibleCheckbox) {
+        compatibleCheckbox.removeAttribute('data-user-set');
+      }
+    }
+  }
+}
+
+function updateInferredProvider() {
   const modelInput = document.getElementById('agent-model') as HTMLInputElement;
+  const inferredProviderDiv = document.getElementById('inferred-provider');
+  const inferredProviderText = document.getElementById('inferred-provider-text');
 
-  const provider = providerSelect.value;
-  const placeholders = {
-    openai: 'e.g., gpt-5, gpt-5-mini, gpt-4o, o1-preview',
-    anthropic: 'e.g., claude-opus-4-20250514, claude-sonnet-4-20250514, claude-3-5-sonnet',
-    google: 'e.g., gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash',
-  };
+  if (!modelInput || !inferredProviderDiv || !inferredProviderText) return;
 
-  modelInput.placeholder = placeholders[provider as keyof typeof placeholders] || '';
+  const model = modelInput.value.trim();
+  if (!model) {
+    inferredProviderDiv.classList.add('hidden');
+    return;
+  }
+
+  const provider = inferProviderFromModel(model);
+  const providerDisplay = getProviderDisplay(provider);
+
+  inferredProviderText.textContent = providerDisplay.name;
+  inferredProviderDiv.classList.remove('hidden');
 }
 
 function showStatus(message: string, type: 'success' | 'error' | 'info') {
@@ -747,14 +842,16 @@ function toggleReasoningSettings() {
 }
 
 function updateReasoningVisibility() {
-  const provider = (document.getElementById('agent-provider') as HTMLSelectElement)?.value;
+  const modelInput = document.getElementById('agent-model') as HTMLInputElement;
+  const model = modelInput?.value.trim() || '';
 
   // Hide all provider-specific sections
   document.getElementById('reasoning-openai')?.classList.add('hidden');
   document.getElementById('reasoning-anthropic')?.classList.add('hidden');
   document.getElementById('reasoning-google')?.classList.add('hidden');
 
-  if (provider) {
+  if (model) {
+    const provider = inferProviderFromModel(model);
     document.getElementById(`reasoning-${provider}`)?.classList.remove('hidden');
   }
 }
@@ -831,7 +928,10 @@ function collectReasoningConfig(): ReasoningConfig | undefined {
     return undefined;
   }
 
-  const provider = (document.getElementById('agent-provider') as HTMLSelectElement)?.value;
+  const modelInput = document.getElementById('agent-model') as HTMLInputElement;
+  const model = modelInput?.value.trim() || '';
+  const provider = inferProviderFromModel(model);
+
   const config: ReasoningConfig = {
     enabled: true,
     autoExpand: (document.getElementById('reasoning-auto-expand') as HTMLInputElement)?.checked,

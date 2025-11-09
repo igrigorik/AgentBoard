@@ -159,25 +159,94 @@
           </div>
 
           <div class="form-group">
-            <label for="agent-provider">Provider *</label>
-            <select id="agent-provider" required>
-              <option value="">Select provider</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="google">Google</option>
-            </select>
+            <label for="agent-model">Model *</label>
+            <input type="text" id="agent-model" placeholder="e.g., gpt-4o, claude-3-5-sonnet-20241022" required>
+            <span class="field-hint">Enter the exact model name</span>
+            <div id="inferred-provider" class="inferred-provider hidden">
+              Provider: <span id="inferred-provider-text"></span>
+            </div>
+          </div>
+
+          <!-- Reasoning Configuration -->
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="reasoning-enabled">
+              <span class="checkmark"></span>
+              Enable and show thinking process before responding
+            </label>
+          </div>
+
+          <div id="reasoning-settings" class="reasoning-settings hidden">
+            <!-- Provider-specific reasoning controls will be populated dynamically -->
+            <div id="reasoning-openai" class="provider-reasoning hidden">
+              <div class="form-group">
+                <label for="reasoning-effort">Reasoning Effort</label>
+                <select id="reasoning-effort">
+                  <option value="minimal">Minimal - Quick analysis</option>
+                  <option value="low">Low - Basic reasoning</option>
+                  <option value="medium" selected>Medium - Balanced thinking</option>
+                  <option value="high">High - Deep analysis</option>
+                </select>
+                <span class="field-hint">Higher effort uses more tokens but provides deeper insights</span>
+              </div>
+              <div class="form-group">
+                <label for="reasoning-summary">Reasoning Summary</label>
+                <select id="reasoning-summary">
+                  <option value="auto" selected>Auto - Model decides</option>
+                  <option value="detailed">Detailed - Full thinking trace</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="reasoning-anthropic" class="provider-reasoning hidden">
+              <div class="form-group">
+                <label for="thinking-budget">Thinking Budget (tokens)</label>
+                <input type="number" id="thinking-budget" min="1000" max="20000" value="12000">
+                <span class="field-hint">Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span>
+              </div>
+            </div>
+
+            <div id="reasoning-google" class="provider-reasoning hidden">
+              <div class="form-group">
+                <label for="thinking-budget-google">Thinking Budget</label>
+                <input type="number" id="thinking-budget-google" min="-1" max="24576" value="8192">
+                <span class="field-hint">Token budget (0-24576, -1 for dynamic). Flash models only</span>
+              </div>
+              <div class="form-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="include-thoughts" checked>
+                  <span class="checkmark"></span>
+                  Include Thought Summaries
+                </label>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="reasoning-auto-expand" checked>
+                <span class="checkmark"></span>
+                Auto-expand reasoning when streaming
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-endpoint">Custom provider endpoint / proxy (optional)</label>
+            <input type="url" id="agent-endpoint">
+          </div>
+
+          <div class="form-group" id="openai-compatible-group" style="display: none;">
+            <label class="checkbox-label">
+              <input type="checkbox" id="agent-openai-compatible">
+              <span class="checkmark"></span>
+              Endpoint uses OpenAI-compatible format
+            </label>
           </div>
 
           <div class="form-group">
             <label for="agent-api-key">API Key *</label>
             <input type="password" id="agent-api-key" placeholder="Your API key">
             <span class="api-key-hint"></span>
-          </div>
-
-          <div class="form-group">
-            <label for="agent-model">Model *</label>
-            <input type="text" id="agent-model" placeholder="e.g., gpt-4o, claude-3-5-sonnet-20241022" required>
-            <span class="field-hint">Enter the exact model name</span>
           </div>
 
           <div class="form-group">
@@ -200,86 +269,11 @@
           </div>
 
           <div class="form-group">
-            <label for="agent-endpoint">Custom API Endpoint (optional)</label>
-            <input type="url" id="agent-endpoint" placeholder="e.g., http://localhost:11434/v1 for Ollama">
-            <span class="field-hint">Leave empty to use default provider endpoint</span>
-          </div>
-
-          <div class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" id="agent-is-default">
               <span class="checkmark"></span>
               Set as default agent
             </label>
-          </div>
-
-          <!-- Reasoning Configuration Section -->
-          <div class="form-section">
-            <h4>Reasoning Configuration</h4>
-            
-            <div class="form-group">
-              <label class="checkbox-label">
-                <input type="checkbox" id="reasoning-enabled">
-                <span class="checkmark"></span>
-                Enable Chain-of-Thought Reasoning
-              </label>
-              <span class="field-hint">Model will show its thinking process before responding</span>
-            </div>
-
-            <div id="reasoning-settings" class="reasoning-settings hidden">
-              <!-- Provider-specific reasoning controls will be populated dynamically -->
-              <div id="reasoning-openai" class="provider-reasoning hidden">
-                <div class="form-group">
-                  <label for="reasoning-effort">Reasoning Effort</label>
-                  <select id="reasoning-effort">
-                    <option value="minimal">Minimal - Quick analysis</option>
-                    <option value="low">Low - Basic reasoning</option>
-                    <option value="medium" selected>Medium - Balanced thinking</option>
-                    <option value="high">High - Deep analysis</option>
-                  </select>
-                  <span class="field-hint">Higher effort uses more tokens but provides deeper insights</span>
-                </div>
-                <div class="form-group">
-                  <label for="reasoning-summary">Reasoning Summary</label>
-                  <select id="reasoning-summary">
-                    <option value="auto" selected>Auto - Model decides</option>
-                    <option value="detailed">Detailed - Full thinking trace</option>
-                  </select>
-                </div>
-              </div>
-
-              <div id="reasoning-anthropic" class="provider-reasoning hidden">
-                <div class="form-group">
-                  <label for="thinking-budget">Thinking Budget (tokens)</label>
-                  <input type="number" id="thinking-budget" min="1000" max="20000" value="12000">
-                  <span class="field-hint">Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span>
-                </div>
-              </div>
-
-              <div id="reasoning-google" class="provider-reasoning hidden">
-                <div class="form-group">
-                  <label for="thinking-budget-google">Thinking Budget</label>
-                  <input type="number" id="thinking-budget-google" min="-1" max="24576" value="8192">
-                  <span class="field-hint">Token budget (0-24576, -1 for dynamic). Flash models only</span>
-                </div>
-                <div class="form-group">
-                  <label class="checkbox-label">
-                    <input type="checkbox" id="include-thoughts" checked>
-                    <span class="checkmark"></span>
-                    Include Thought Summaries
-                  </label>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="reasoning-auto-expand" checked>
-                  <span class="checkmark"></span>
-                  Auto-expand reasoning when streaming
-                </label>
-              </div>
-            </div>
-
           </div>
         </form>
 

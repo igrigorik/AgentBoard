@@ -156,6 +156,24 @@ header h1 {
   letter-spacing: 0.5px;
 }
 
+.proxy-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #e0e7ff;
+  color: #4338ca;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.endpoint-url {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #6b7280;
+  word-break: break-all;
+}
+
 /* Empty state - unified styling */
 .no-agents,
 .no-commands,
@@ -314,6 +332,25 @@ header h1 {
   margin-top: 4px;
   margin-bottom: 4px;
   line-height: 1.5;
+}
+
+.inferred-provider {
+  display: block;
+  font-size: 13px;
+  color: #059669;
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #f0fdf4;
+  border-radius: 6px;
+  border: 1px solid #bbf7d0;
+}
+
+.inferred-provider.hidden {
+  display: none;
+}
+
+.inferred-provider span {
+  font-weight: 600;
 }
 
 /* Input validation states - only show after user interaction */
@@ -531,6 +568,13 @@ select:user-invalid:focus {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+}
+
+.modal-separator {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 20px 0;
+  width: 100%;
 }
 
 /* Built-in tool banner */

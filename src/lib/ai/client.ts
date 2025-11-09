@@ -14,6 +14,7 @@ import type { AgentConfig } from '../storage/config';
 import type { AIProvider, ToolCall } from '../../types';
 import { ConfigStorage } from '../storage/config';
 import { getToolRegistry } from '../webmcp/tool-registry';
+import { inferProviderFromModel, isLikelyOpenAICompatible } from './provider-utils';
 
 // Interface for API error objects that may have additional properties
 interface APIError extends Error {
@@ -120,25 +121,61 @@ export class AIClient {
 
   /**
    * Create a provider instance for a specific agent
+   *
+   * Flexible proxy strategy:
+   * - Support both OpenAI-compatible and native format proxies
+   * - Infer provider from model name when needed
+   * - Show visual indicators for proxy connections
    */
   private createProviderForAgent(agent: AgentConfig): () => LanguageModel {
-    switch (agent.provider) {
-      case 'openai': {
+    // When custom endpoint is set, determine format
+    if (agent.endpoint) {
+      // Determine if we should use OpenAI format
+      // Priority: explicit setting > smart default
+      const useOpenAIFormat = agent.openaiCompatible ?? isLikelyOpenAICompatible(agent.endpoint);
+
+      if (useOpenAIFormat) {
+        log.warn(
+          `[AIClient] Using OpenAI-compatible format for endpoint: ${agent.endpoint} (model: ${agent.model})`
+        );
         const openai = createOpenAI({
           apiKey: agent.apiKey || 'no-key-provided',
           baseURL: agent.endpoint,
+        });
+        // Use .chat() to force /v1/chat/completions (not /v1/responses)
+        return () => openai.chat(agent.model);
+      }
+
+      // Native format with custom endpoint
+      log.warn(`[AIClient] Using native ${agent.provider} format for endpoint: ${agent.endpoint}`);
+      // Fall through to native SDK creation with custom endpoint
+    }
+
+    // Use provider field if set, otherwise infer from model
+    const effectiveProvider = agent.provider || inferProviderFromModel(agent.model);
+
+    // Create provider SDK (either direct or with custom endpoint)
+    switch (effectiveProvider) {
+      case 'openai': {
+        const openai = createOpenAI({
+          apiKey: agent.apiKey || 'no-key-provided',
+          baseURL: agent.endpoint, // undefined for direct, custom for native proxy
         });
         return () => openai(agent.model);
       }
 
       case 'anthropic': {
-        const anthropic = createAnthropic({
+        const anthropicConfig: Parameters<typeof createAnthropic>[0] = {
           apiKey: agent.apiKey || 'no-key-provided',
           baseURL: agent.endpoint,
-          headers: {
+        };
+
+        // Only add CORS headers for direct API (no custom endpoint)
+        if (!agent.endpoint) {
+          anthropicConfig.headers = {
             'anthropic-dangerous-direct-browser-access': 'true',
-          },
-          fetch: async (url, options) => {
+          };
+          anthropicConfig.fetch = async (url, options) => {
             return globalThis.fetch(url, {
               ...options,
               headers: {
@@ -146,8 +183,10 @@ export class AIClient {
                 'anthropic-dangerous-direct-browser-access': 'true',
               },
             });
-          },
-        });
+          };
+        }
+
+        const anthropic = createAnthropic(anthropicConfig);
         return () => anthropic(agent.model);
       }
 
@@ -159,8 +198,15 @@ export class AIClient {
         return () => google(agent.model);
       }
 
-      default:
-        throw new Error(`Unsupported provider: ${agent.provider}`);
+      default: {
+        // For unknown providers, default to OpenAI SDK (most compatible)
+        log.warn(`[AIClient] Unknown provider "${effectiveProvider}", using OpenAI SDK`);
+        const openai = createOpenAI({
+          apiKey: agent.apiKey || 'no-key-provided',
+          baseURL: agent.endpoint,
+        });
+        return () => openai(agent.model);
+      }
     }
   }
 

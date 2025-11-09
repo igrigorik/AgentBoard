@@ -6,6 +6,7 @@
 export interface Badge {
   text: string;
   className: string;
+  title?: string; // Optional tooltip for badge
 }
 
 export interface Detail {
@@ -67,6 +68,9 @@ export function createCard(config: CardConfig): HTMLElement {
       const badgeEl = document.createElement('span');
       badgeEl.className = badge.className;
       badgeEl.textContent = badge.text;
+      if (badge.title) {
+        badgeEl.title = badge.title;
+      }
       badgesContainer.appendChild(badgeEl);
     });
     headerActions.appendChild(badgesContainer);
