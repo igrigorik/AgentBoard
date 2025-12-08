@@ -51,4 +51,11 @@ export const COMPILED_TOOLS: CompiledToolInfo[] = [
     description:
       'Dynamically discovers and registers Shopify MCP tools for searching merchant catalog and managing cart.',
   },
+  {
+    id: 'agentboard_youtube_transcript',
+    file: 'tools/agentboard_youtube_transcript.js',
+    match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
+    version: '1.0.0',
+    description: 'Extract transcript/captions and metadata from current YouTube video.',
+  },
 ];
