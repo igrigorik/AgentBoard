@@ -22,7 +22,8 @@ export default [
       'vitest.config.ts',  // Exclude from TypeScript project parsing
       'vite.config.ts',    // Exclude from TypeScript project parsing
       'scripts/**/*.js',
-      'local/**'  // Exclude local documentation and notes
+      'local/**',   // Exclude local documentation and notes
+      'examples/**' // Example scripts run in browser, not linted
     ]
   },
 
