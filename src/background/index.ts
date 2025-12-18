@@ -496,15 +496,14 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           }
         }
 
-        // Get all tool registries to access original schemas
-        const registries = webmcp.getAllRegistries();
         const toolsArray: Array<{ name: string; description: string; inputSchema?: unknown }> = [];
 
-        // Collect WebMCP tools with original schemas from all tabs
-        for (const [_tid, registry] of registries) {
-          for (const tool of registry.tools) {
-            // Check if we already have this tool (dedup by name)
-            if (!toolsArray.some((t) => t.name === tool.name)) {
+        // Get WebMCP tools only from the current tab (not all tabs)
+        // Each tab has its own URL-filtered set of tools
+        if (tabId) {
+          const currentTabRegistry = webmcp.getToolRegistry(tabId);
+          if (currentTabRegistry) {
+            for (const tool of currentTabRegistry.tools) {
               toolsArray.push({
                 name: tool.name,
                 description: tool.description || 'No description available',
@@ -514,15 +513,16 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           }
         }
 
-        // Also get MCP tools from unified registry (they might have different schema format)
+        // Also get system/remote MCP tools from unified registry
+        // Use getToolsForTab to get tab-scoped tools + global (remote/system) tools
         const unifiedRegistry = getToolRegistry();
-        const allTools = unifiedRegistry.getAllTools();
+        const scopedTools = tabId
+          ? unifiedRegistry.getToolsForTab(tabId)
+          : unifiedRegistry.getAllTools();
 
-        // Add any MCP/remote tools not already in the list
-        for (const [name, tool] of Object.entries(allTools)) {
+        // Add any MCP/remote/system tools not already in the list
+        for (const [name, tool] of Object.entries(scopedTools)) {
           if (!toolsArray.some((t) => t.name === name)) {
-            // For MCP tools, we might need to extract schema differently
-            // For now, just mark them as having no accessible schema
             toolsArray.push({
               name,
               description: tool.description || 'No description available',
