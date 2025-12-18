@@ -21,6 +21,7 @@ import {
   createCard,
   setupModalFooter,
   showModalStatus,
+  generateDuplicateName,
   type Badge,
   type Detail,
 } from './card-component';
@@ -227,11 +228,12 @@ async function openEditModal(agentId: string) {
   // Get agent for delete confirmation
   const agent = await configStorage.getAgent(agentId);
 
-  // Setup modal footer with delete button for editing
+  // Setup modal footer with delete and duplicate buttons for editing
   setupModalFooter({
     modalId: 'agent-modal',
     onSave: saveAgent,
     onTest: testCurrentAgent,
+    onDuplicate: duplicateAgent,
     onDelete: agent
       ? () => {
           if (window.confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) {
@@ -389,6 +391,73 @@ async function saveAgent() {
   } catch (error) {
     log.error('Failed to save agent:', error);
     showStatus('Failed to save agent', 'error');
+  }
+}
+
+async function duplicateAgent() {
+  const form = document.getElementById('agent-form') as HTMLFormElement;
+
+  if (!form.reportValidity()) {
+    return;
+  }
+
+  const endpointValue = (
+    document.getElementById('agent-endpoint') as HTMLInputElement
+  ).value.trim();
+  const apiKeyValue = (document.getElementById('agent-api-key') as HTMLInputElement).value.trim();
+
+  try {
+    const reasoningConfig = collectReasoningConfig();
+    const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
+    const provider = inferProviderFromModel(model);
+    const currentName = (document.getElementById('agent-name') as HTMLInputElement).value.trim();
+
+    // Get all existing agent names and generate a unique name
+    const allAgents = await configStorage.getAgents();
+    const existingNames = allAgents.map((a) => a.name);
+    const newName = generateDuplicateName(currentName, existingNames);
+
+    const agentData: Omit<AgentConfig, 'id'> = {
+      name: newName,
+      description:
+        (document.getElementById('agent-description') as HTMLInputElement).value.trim() ||
+        undefined,
+      provider,
+      apiKey: apiKeyValue || undefined,
+      model,
+      endpoint: endpointValue || undefined,
+      openaiCompatible: (() => {
+        if (!endpointValue) return undefined;
+        const checkbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
+        return checkbox?.hasAttribute('data-user-set') ? checkbox.checked : undefined;
+      })(),
+      systemPrompt: (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value,
+      temperature: parseFloat(
+        (document.getElementById('agent-temperature') as HTMLInputElement).value
+      ),
+      maxTokens: parseInt(
+        (document.getElementById('agent-max-tokens') as HTMLInputElement).value,
+        10
+      ),
+      isDefault: false, // Duplicated agent should not be default
+      reasoning: reasoningConfig,
+    };
+
+    await configStorage.addAgent(agentData);
+    showStatus(`Agent duplicated as "${newName}"`, 'success');
+
+    // Notify background script of config change
+    const newConfig = await configStorage.get();
+    await chrome.runtime.sendMessage({
+      type: 'SAVE_CONFIG',
+      config: newConfig,
+    } as const);
+
+    closeModal('agent-modal');
+    await renderAgents();
+  } catch (error) {
+    log.error('Failed to duplicate agent:', error);
+    showStatus('Failed to duplicate agent', 'error');
   }
 }
 

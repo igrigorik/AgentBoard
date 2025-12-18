@@ -148,6 +148,7 @@ export interface ModalFooterConfig {
   onSave: () => void;
   onDelete?: () => void;
   onTest?: () => void;
+  onDuplicate?: () => void;
   deleteLabel?: string;
 }
 
@@ -182,6 +183,15 @@ export function setupModalFooter(config: ModalFooterConfig): void {
     testBtn.textContent = 'Test';
     testBtn.addEventListener('click', config.onTest);
     footer.appendChild(testBtn);
+  }
+
+  // Right side: Duplicate button (optional)
+  if (config.onDuplicate) {
+    const duplicateBtn = document.createElement('button');
+    duplicateBtn.className = 'button button-secondary modal-duplicate-btn';
+    duplicateBtn.textContent = 'Duplicate';
+    duplicateBtn.addEventListener('click', config.onDuplicate);
+    footer.appendChild(duplicateBtn);
   }
 
   // Right side: Save button
@@ -222,4 +232,25 @@ export function escapeHtml(text: string): string {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+const DUPLICATE_SUFFIX_REGEX = /^(.+?)\s*\((\d+)\)$/;
+
+/**
+ * Generate a duplicate name with incrementing suffix
+ * "agent" -> "agent (1)", "agent (1)" -> "agent (2)", etc.
+ */
+export function generateDuplicateName(originalName: string, existingNames: string[]): string {
+  const match = originalName.match(DUPLICATE_SUFFIX_REGEX);
+  const baseName = match ? match[1].trim() : originalName;
+
+  let maxNum = 0;
+  for (const name of existingNames) {
+    const existingMatch = name.match(DUPLICATE_SUFFIX_REGEX);
+    if (existingMatch && existingMatch[1].trim() === baseName) {
+      maxNum = Math.max(maxNum, parseInt(existingMatch[2], 10));
+    }
+  }
+
+  return `${baseName} (${maxNum + 1})`;
 }
