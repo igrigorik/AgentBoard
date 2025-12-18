@@ -3,9 +3,9 @@
 export const metadata = {
   name: 'video_context',
   namespace: 'google_drive',
-  version: '0.2.0',
+  version: '0.4.1',
   description:
-    'Extract transcript from a Google Drive video. Returns timestamped segments.',
+    'For drive.google.com: Extract transcript from video being viewed. Works from any Drive page (file view, search results, folder view) as long as a video preview is open. Try it when user mentions a video or requests context about current page - tool will detect if video is present. Requires captions (auto-generated or uploaded).',
   match: 'https://drive.google.com/*',
   inputSchema: {
     type: 'object',
@@ -34,25 +34,31 @@ export async function execute(args = {}) {
     .replace(/ - Google Drive$/, '')
     .trim();
 
-  // Fetch transcript via timedtext export
-  const transcriptUrl = `https://drive.google.com/uc?authuser=0&ttlang=${language}&ttkind=asr&id=${videoId}&export=timedtext`;
+  let segments;
 
-  const response = await fetch(transcriptUrl, { credentials: 'include' });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch transcript: ${response.status}`);
+  // Check video info first to determine best caption source
+  // cc_asr=1 means ASR captions exist and player endpoint will work
+  const videoInfo = await getVideoInfo(videoId);
+
+  if (videoInfo?.ccAsr && videoInfo?.ttsurl) {
+    // Player endpoint - works when export API returns 403
+    segments = await fetchPlayerCaptions(videoInfo.ttsurl, language);
   }
 
-  const vttContent = await response.text();
-
-  if (!vttContent.startsWith('WEBVTT')) {
-    throw new Error('No transcript available for this video. Does it have auto-generated captions?');
+  // Fallback: export API (for Drive-native captions without ASR flag)
+  if (!segments || segments.length === 0) {
+    segments = await fetchExportCaptions(videoId, language);
   }
 
-  // Parse VTT into segments
-  const segments = parseVTT(vttContent);
-
-  if (segments.length === 0) {
-    throw new Error('Transcript is empty.');
+  if (!segments || segments.length === 0) {
+    throw new Error(
+      'No captions available for this video. To generate captions:\n' +
+        '1. Right-click the video in Google Drive\n' +
+        '2. Select "Manage caption tracks"\n' +
+        '3. Click "Generate automatic captions"\n' +
+        '4. Wait a few minutes for processing to complete\n' +
+        '5. Try this tool again'
+    );
   }
 
   const totalDuration = segments[segments.length - 1]?.end || 0;
@@ -67,6 +73,59 @@ export async function execute(args = {}) {
       totalDuration,
     },
   };
+}
+
+/** Fetches video metadata including caption availability and ttsurl. */
+async function getVideoInfo(videoId) {
+  try {
+    const resp = await fetch(`/u/0/get_video_info?docid=${videoId}`, {
+      credentials: 'include',
+    });
+    if (!resp.ok) return null;
+
+    const params = new URLSearchParams(await resp.text());
+    return {
+      ccAsr: params.get('cc_asr') === '1',
+      ttsurl: params.get('ttsurl'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Fetches captions via player's timedtext endpoint (requires ttsurl from getVideoInfo). */
+async function fetchPlayerCaptions(ttsurl, language) {
+  try {
+    const url = new URL(ttsurl);
+    url.searchParams.set('type', 'track');
+    url.searchParams.set('lang', language);
+    url.searchParams.set('kind', 'asr');
+    url.searchParams.set('name', '');
+    url.searchParams.set('fmt', 'json3');
+
+    const resp = await fetch(url.toString(), { credentials: 'include' });
+    if (!resp.ok) return null;
+
+    return parseJSON3(await resp.json());
+  } catch {
+    return null;
+  }
+}
+
+/** Fetches captions via Drive's export API (works for Drive-native captions). */
+async function fetchExportCaptions(videoId, language) {
+  try {
+    const url = `https://drive.google.com/uc?authuser=0&ttlang=${language}&ttkind=asr&id=${videoId}&export=timedtext`;
+    const resp = await fetch(url, { credentials: 'include' });
+    if (!resp.ok) return null;
+
+    const vtt = await resp.text();
+    if (!vtt.startsWith('WEBVTT')) return null;
+
+    return parseVTT(vtt);
+  } catch {
+    return null;
+  }
 }
 
 function getVideoId() {
@@ -125,4 +184,31 @@ function parseVTT(vtt) {
 function parseTimestamp(ts) {
   const [h, m, s] = ts.split(':');
   return parseFloat(h) * 3600 + parseFloat(m) * 60 + parseFloat(s);
+}
+
+/**
+ * Parses YouTube/Drive JSON3 caption format.
+ * Format: { events: [{ tStartMs, dDurationMs?, segs: [{ utf8 }] }] }
+ */
+function parseJSON3(data) {
+  if (!data?.events) return [];
+
+  const segments = [];
+  for (const event of data.events) {
+    if (!event.segs) continue;
+
+    const text = event.segs.map((s) => s.utf8 || '').join('');
+    if (!text.trim()) continue;
+
+    const start = (event.tStartMs || 0) / 1000;
+    const duration = (event.dDurationMs || 0) / 1000;
+
+    segments.push({
+      start,
+      end: start + duration,
+      text: text.trim(),
+    });
+  }
+
+  return segments;
 }
