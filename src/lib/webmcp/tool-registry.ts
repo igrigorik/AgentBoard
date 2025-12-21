@@ -124,20 +124,46 @@ export class ToolRegistryManager {
   /**
    * Get tools scoped to a specific tab (for tab-specific sidebars)
    * Includes both tab-specific tools AND global tools (remote, system)
+   *
+   * Tool Ordering Strategy:
+   * Site-specific tools are returned FIRST to signal higher relevance to the model.
+   * Models tend to prefer tools that appear earlier in the list.
+   * Order: site (current tab) → user → remote → system
    */
   getToolsForTab(tabId: number): Record<string, AISDKTool> {
-    const result: Record<string, AISDKTool> = {};
     const targetOrigin = `tab-${tabId}`;
+
+    // Collect tools by source for ordered insertion
+    const siteTools: Array<[string, ToolWithMetadata]> = [];
+    const userTools: Array<[string, ToolWithMetadata]> = [];
+    const remoteTools: Array<[string, ToolWithMetadata]> = [];
+    const systemTools: Array<[string, ToolWithMetadata]> = [];
 
     for (const [name, meta] of this.tools.entries()) {
       // Include tools from this specific tab OR global tools (remote/system)
-      if (meta.origin === targetOrigin || meta.source === 'remote' || meta.source === 'system') {
-        result[name] = meta.tool;
+      if (meta.origin === targetOrigin) {
+        if (meta.source === 'site') {
+          siteTools.push([name, meta]);
+        } else if (meta.source === 'user') {
+          userTools.push([name, meta]);
+        }
+      } else if (meta.source === 'remote') {
+        remoteTools.push([name, meta]);
+      } else if (meta.source === 'system') {
+        systemTools.push([name, meta]);
       }
     }
 
+    // Build result with site-specific tools first (higher precedence)
+    // JavaScript objects maintain insertion order
+    const result: Record<string, AISDKTool> = {};
+    for (const [name, meta] of [...siteTools, ...userTools, ...remoteTools, ...systemTools]) {
+      result[name] = meta.tool;
+    }
+
     log.warn(
-      `[ToolRegistry] Providing ${Object.keys(result).length} tools for tab ${tabId}`,
+      `[ToolRegistry] Providing ${Object.keys(result).length} tools for tab ${tabId} ` +
+        `(site: ${siteTools.length}, user: ${userTools.length}, remote: ${remoteTools.length}, system: ${systemTools.length})`,
       Object.keys(result)
     );
 
