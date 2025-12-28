@@ -1,6 +1,6 @@
 {
   "name": "ai-sidebar-extension",
-  "version": "0.5.0",
+  "version": "0.4.9",
   "description": "Chrome extension AI sidebar with LLM providers and MCP support",
   "private": true,
   "type": "module",
