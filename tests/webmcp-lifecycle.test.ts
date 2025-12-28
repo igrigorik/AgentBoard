@@ -262,9 +262,9 @@ describe('TabManager', () => {
       // Wait for async injection
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Should inject: relay + polyfill + 3 matching tools + bridge = 6 scripts
+      // Should inject: relay + polyfill + 2 matching tools + bridge = 5 scripts
       // (youtube_transcript only matches youtube.com, not example.com)
-      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(6);
+      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(5);
 
       // Check relay injection (FIRST - critical for race condition fix!)
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledWith({
@@ -863,11 +863,11 @@ describe('TabManager', () => {
         files: ['content-scripts/webmcp-polyfill.js'],
       });
 
-      // 3-5. Three matching compiled tools (in MAIN world, after polyfill)
+      // 3-4. Two matching compiled tools (in MAIN world, after polyfill)
       // (We won't check each one individually, just verify they're injected)
 
-      // 6. Bridge LAST (after relay is ready and tools are registered)
-      expect(calls[5][0]).toEqual({
+      // 5. Bridge LAST (after relay is ready and tools are registered)
+      expect(calls[4][0]).toEqual({
         target: { tabId: 123, frameIds: [0] },
         world: 'MAIN',
         injectImmediately: false,

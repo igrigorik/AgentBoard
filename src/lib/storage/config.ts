@@ -88,7 +88,7 @@ export interface BuiltinScript {
  * Base system prompt for browser copilot functionality.
  * Provides tool selection guidance and grounds model in page context.
  */
-const BASE_SYSTEM_PROMPT = `You are a browser copilot with visual and tool access to the current tab.
+export const BASE_SYSTEM_PROMPT = `You are a browser copilot with visual and tool access to the current tab.
 
 Each message includes <page_context> with the current URL and title.
 

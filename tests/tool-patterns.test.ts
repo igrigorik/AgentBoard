@@ -29,14 +29,9 @@ describe('tool-patterns', () => {
         expect(score).toBeLessThan(70);
       });
 
-      it('scores agentboard_page_info low (30) due to <all_urls> pattern', () => {
+      it('scores agentboard_get_full_page_context low (30) due to <all_urls> pattern', () => {
         // Pattern: <all_urls> has 0 literal chars
-        const score = calculateSpecificityScore('agentboard_page_info', 'site');
-        expect(score).toBe(30);
-      });
-
-      it('scores agentboard_dom_readability low (30) due to <all_urls> pattern', () => {
-        const score = calculateSpecificityScore('agentboard_dom_readability', 'site');
+        const score = calculateSpecificityScore('agentboard_get_full_page_context', 'site');
         expect(score).toBe(30);
       });
 
@@ -76,7 +71,10 @@ describe('tool-patterns', () => {
           'site'
         );
         const userMedium = calculateSpecificityScore('user_medium', 'site');
-        const genericInjected = calculateSpecificityScore('agentboard_page_info', 'site');
+        const genericInjected = calculateSpecificityScore(
+          'agentboard_get_full_page_context',
+          'site'
+        );
         const system = calculateSpecificityScore('fetch_url', 'system');
         const remote = calculateSpecificityScore('mcp_tool', 'remote');
 
@@ -93,7 +91,7 @@ describe('tool-patterns', () => {
         const tools = [
           { name: 'remote_tool', source: 'remote' as const },
           { name: 'fetch_url', source: 'system' as const },
-          { name: 'agentboard_page_info', source: 'site' as const },
+          { name: 'agentboard_get_full_page_context', source: 'site' as const },
           { name: 'agentboard_youtube_transcript', source: 'site' as const },
           { name: 'site_tool', source: 'site' as const }, // Not in registry = site-provided
         ];
@@ -108,7 +106,7 @@ describe('tool-patterns', () => {
         const names = scored.map((t) => t.name);
         expect(names[0]).toBe('site_tool'); // 100
         expect(names[1]).toBe('agentboard_youtube_transcript'); // ~65
-        expect(names[2]).toBe('agentboard_page_info'); // 30
+        expect(names[2]).toBe('agentboard_get_full_page_context'); // 30
         expect(names[3]).toBe('fetch_url'); // 20
         expect(names[4]).toBe('remote_tool'); // 10
       });

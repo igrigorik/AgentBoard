@@ -122,8 +122,14 @@ The agent can call any remote MCP server, as long as it supports HTTP streaming.
 
 export const metadata = {
   name: 'extract_prices',
-  description: 'Extract all prices from the current page',
-  match: 'example.com',
+  description:
+    'Extract product prices from the current page. Returns price text and structured value for each element. Use for price comparison, deal finding, or cart analysis.',
+  match: '*://example.com/*',
+  inputSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
 };
 
 export async function execute() {
@@ -136,14 +142,14 @@ export async function execute() {
 }
 ```
 
-Save in Settings → My Tools. AI can now call it when you prompt your agent to find prices when on example.com.
+Save in Settings → My Tools. The AI can now call it when you ask about prices on example.com. See [examples/](examples/) for more complete tool implementations.
 
 **Built-in WebMCP tools:**
 
-- `agentboard_dom_query` - CSS selector extraction
-- `agentboard_page_info` - Page metadata and OpenGraph
-- `agentboard_fetch_url` - URL fetching with optional markdown conversion
-- `agentboard_dom_readability` - Extracts readable content in Markdown format
+- `agentboard_get_full_page_context` - Article extraction with metadata (title, author, Open Graph, Twitter Cards)
+- `agentboard_dom_query` - Query specific elements via CSS selectors with visibility/bounds info
+- `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
+- `agentboard_fetch_url` - Fetch external URLs with optional markdown conversion
 
 ## Commands
 

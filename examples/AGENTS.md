@@ -46,13 +46,27 @@ The tool ID becomes `{namespace}_{name}` (e.g., `myapp_get_context`).
 
 ### `description` (required)
 
-- The LLM reads this to decide when to use the tool
-- Be specific about what it extracts/does
-- Mention when to prefer this tool over others
+The LLM reads this to decide when to use your tool. A good description answers three questions:
 
-**Good:** "Fetch conversation messages from the current channel or thread. When available, always use this tool over generic page context tools."
+1. **What does it do?** Be specific about the action and target
+2. **What does it return?** Mention key fields in the response
+3. **When to use it?** Differentiate from other tools, especially generic ones
 
-**Bad:** "Gets app data"
+**Best practices:**
+
+- For site-specific tools, add "Always prefer this over generic page tools for [site]"
+- Mention key return values (e.g., "with timestamps", "with author names")
+- Keep under 300 characters - LLMs process many tool descriptions
+
+**Good examples:**
+
+```
+"Fetch Slack conversation from the current channel, DM, or thread. Returns messages with author names, timestamps, reactions, and nested thread replies. Always prefer this over generic page tools for Slack context."
+
+"Query specific DOM elements using CSS selectors. Returns element metadata (tag, class, visibility, bounds) for each match. Use extractText/extractHtml params for content."
+```
+
+**Bad:** "Gets app data" (vague, no return info, no guidance)
 
 ### `match` (required)
 

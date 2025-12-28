@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { parseUserScript } from '../src/lib/webmcp/script-parser';
-import readabilityScript from '../src/lib/webmcp/tools/dom_readability/script.js?raw';
+import readabilityScript from '../src/lib/webmcp/tools/get_full_page_context/script.js?raw';
 
-describe('WebMCP Readability Tool', () => {
+describe('WebMCP Full Page Context Tool', () => {
   beforeEach(() => {
     // Reset DOM
     document.body.innerHTML = '';
@@ -17,9 +17,9 @@ describe('WebMCP Readability Tool', () => {
     it('should parse readability tool metadata correctly', () => {
       const parsed = parseUserScript(readabilityScript, false);
 
-      expect(parsed.metadata.name).toBe('dom_readability');
+      expect(parsed.metadata.name).toBe('get_full_page_context');
       expect(parsed.metadata.namespace).toBe('agentboard');
-      expect(parsed.metadata.version).toBe('2.1.0');
+      expect(parsed.metadata.version).toBe('3.0.0');
       expect(parsed.metadata.description).toBeTruthy();
       expect(parsed.metadata.description?.length).toBeGreaterThan(0);
       expect(parsed.metadata.match).toEqual(['<all_urls>']);

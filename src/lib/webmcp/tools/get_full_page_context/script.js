@@ -2331,10 +2331,10 @@ if (typeof window !== 'undefined') {
 /* eslint-enable */
 
 export const metadata = {
-  name: 'dom_readability',
+  name: 'get_full_page_context',
   namespace: 'agentboard',
-  version: '2.1.0',
-  description: 'Extract readable content from current tab: metadata such as title, author, published time, etc; markdown content presented to the user.',
+  version: '3.0.0',
+  description: 'Get full page context beyond the default <page_context>. Returns comprehensive metadata and, where possible, page content extracted as clean markdown. Use when URL/title from <page_context> is insufficient.',
   match: ['<all_urls>'],
   inputSchema: {
     type: 'object',
@@ -2528,11 +2528,28 @@ function htmlToMarkdown(html, options = {}) {
  * Consolidates metadata extraction to avoid repetition
  */
 function extractPageMetadata() {
+  // Collect Twitter Card tags
+  const twitterCard = {};
+  document.querySelectorAll('meta[name^="twitter:"]').forEach(meta => {
+    const name = meta.getAttribute('name');
+    twitterCard[name] = meta.content;
+  });
+
+  // Get canonical URL
+  const canonicalEl = document.querySelector('link[rel="canonical"]');
+  const canonical = canonicalEl ? canonicalEl.href : null;
+
+  // Get favicon
+  const faviconEl = document.querySelector('link[rel*="icon"]');
+  const favicon = faviconEl ? faviconEl.href : null;
+
   return {
     // Basic page info
     url: window.location.href,
     title: document.title,
     domain: window.location.hostname,
+    canonical,
+    favicon,
 
     // Meta tags
     description: document.querySelector('meta[name="description"]')?.content || null,
@@ -2545,6 +2562,9 @@ function extractPageMetadata() {
     ogImage: document.querySelector('meta[property="og:image"]')?.content || null,
     ogType: document.querySelector('meta[property="og:type"]')?.content || null,
     ogSiteName: document.querySelector('meta[property="og:site_name"]')?.content || null,
+
+    // Twitter Card metadata
+    twitterCard: Object.keys(twitterCard).length > 0 ? twitterCard : null,
 
     // Article-specific metadata
     publishedTime: document.querySelector('meta[property="article:published_time"]')?.content || null,
@@ -2628,8 +2648,7 @@ export async function execute(args = {}) {
       hint: 'The page may be a navigation page, interactive application, or contain primarily non-textual content.',
       metadata: {
         ...pageMetadata,
-        siteName: pageMetadata.ogSiteName || pageMetadata.domain,
-        readabilityConfig: config
+        siteName: pageMetadata.ogSiteName || pageMetadata.domain
       },
       markdownContent: null
     };
@@ -2653,8 +2672,7 @@ export async function execute(args = {}) {
         hint: 'The page structure may not be compatible with article extraction.',
         metadata: {
           ...pageMetadata,
-          siteName: pageMetadata.ogSiteName || pageMetadata.domain,
-          readabilityConfig: config
+          siteName: pageMetadata.ogSiteName || pageMetadata.domain
         },
         markdownContent: null
       };
@@ -2695,10 +2713,7 @@ export async function execute(args = {}) {
       direction: article.dir || pageMetadata.direction,
 
       // Keep both author sources if different
-      author: article.byline || pageMetadata.author,
-
-      // Add config for transparency
-      readabilityConfig: config
+      author: article.byline || pageMetadata.author
     };
 
     // Build self-contained markdown with metadata header
@@ -2750,8 +2765,7 @@ export async function execute(args = {}) {
       error: error.message,
       metadata: {
         ...pageMetadata,
-        siteName: pageMetadata.ogSiteName || pageMetadata.domain,
-        readabilityConfig: config
+        siteName: pageMetadata.ogSiteName || pageMetadata.domain
       },
       markdownContent: null
     };

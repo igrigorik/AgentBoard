@@ -26,22 +26,16 @@ export const COMPILED_TOOLS: CompiledToolInfo[] = [
     file: 'tools/agentboard_dom_query.js',
     match: ['<all_urls>'],
     version: '1.0.0',
-    description: 'Extract DOM elements from current tab using CSS selectors.',
-  },
-  {
-    id: 'agentboard_dom_readability',
-    file: 'tools/agentboard_dom_readability.js',
-    match: ['<all_urls>'],
-    version: '2.1.0',
     description:
-      'Extract readable content from current tab: metadata such as title, author, published time, etc; markdown content presented to the user.',
+      'Query specific DOM elements using CSS selectors. Returns element metadata (tag, class, visibility, bounds) for each match. Use extractText/extractHtml params for content. Best for targeted scraping of specific elements; use get_full_page_context for article/page content extraction.',
   },
   {
-    id: 'agentboard_page_info',
-    file: 'tools/agentboard_page_info.js',
+    id: 'agentboard_get_full_page_context',
+    file: 'tools/agentboard_get_full_page_context.js',
     match: ['<all_urls>'],
-    version: '1.0.0',
-    description: 'Extract metadata, title, and Open Graph tags from current tab.',
+    version: '3.0.0',
+    description:
+      'Get full page context beyond the default <page_context>. Returns comprehensive metadata and, where possible, page content extracted as clean markdown. Use when URL/title from <page_context> is insufficient.',
   },
   {
     id: 'agentboard_youtube_transcript',

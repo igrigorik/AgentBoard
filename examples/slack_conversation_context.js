@@ -4,7 +4,7 @@ export const metadata = {
   name: "conversation_context",
   namespace: "slack",
   version: "0.4.0",
-  description: "Fetch Slack conversation from the current channel, DM, thread. When available always use this tool over other page context tools to obtain the most complete context.",
+  description: "Fetch Slack conversation from the current channel, DM, or thread. Returns messages with author names, timestamps, reactions, and nested thread replies. Always prefer this over generic page tools for Slack context.",
   match: "https://app.slack.com/*",
   inputSchema: {
     type: "object",

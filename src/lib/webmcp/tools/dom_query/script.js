@@ -4,7 +4,7 @@ export const metadata = {
   name: 'dom_query',
   namespace: 'agentboard',
   version: '1.0.0',
-  description: 'Extract DOM elements from current tab using CSS selectors.',
+  description: 'Query specific DOM elements using CSS selectors. Returns element metadata (tag, class, visibility, bounds) for each match. Use extractText/extractHtml params for content. Best for targeted scraping of specific elements; use get_full_page_context for article/page content extraction.',
   match: ['<all_urls>'],
   inputSchema: {
     type: 'object',

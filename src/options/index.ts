@@ -7,6 +7,7 @@ import log from '../lib/logger';
 import './styles.css';
 import {
   ConfigStorage,
+  BASE_SYSTEM_PROMPT,
   type AgentConfig,
   type MCPConfig,
   type ReasoningConfig,
@@ -297,8 +298,7 @@ function setDefaultFormValues() {
   // Set default system prompt
   const systemPromptEl = document.getElementById('agent-system-prompt') as HTMLTextAreaElement;
   if (systemPromptEl) {
-    systemPromptEl.value =
-      'You are an assistant embedded in a browser tab. User prompts typically refer to the current tab unless stated otherwise. Use your tools to query page content when you need it.';
+    systemPromptEl.value = BASE_SYSTEM_PROMPT;
   }
 
   // Set default temperature
