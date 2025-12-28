@@ -22,6 +22,7 @@ import {
   createCard,
   setupModalFooter,
   showModalStatus,
+  generateDuplicateName,
   type Badge,
   type Detail,
 } from './card-component';
@@ -228,7 +229,7 @@ async function openEditModal(agentId: string) {
   // Get agent for delete confirmation
   const agent = await configStorage.getAgent(agentId);
 
-  // Setup modal footer with delete button for editing
+  // Setup modal footer with delete and duplicate buttons for editing
   setupModalFooter({
     modalId: 'agent-modal',
     onSave: saveAgent,
@@ -240,6 +241,7 @@ async function openEditModal(agentId: string) {
           }
         }
       : undefined,
+    onDuplicate: agent ? duplicateAgent : undefined,
   });
 
   openModal('agent-modal', () => {
@@ -463,6 +465,46 @@ async function deleteAgent(agentId: string) {
   } catch (error) {
     log.error('Failed to delete agent:', error);
     showStatus('Failed to delete agent', 'error');
+  }
+}
+
+/**
+ * Duplicate current agent by cloning saved state with a new name.
+ * Avoids duplicating form collection logic - just clones the persisted agent.
+ */
+async function duplicateAgent() {
+  if (!editingAgentId) return;
+
+  try {
+    const agent = await configStorage.getAgent(editingAgentId);
+    if (!agent) {
+      showStatus('Agent not found', 'error');
+      return;
+    }
+
+    const allAgents = await configStorage.getAgents();
+    const newName = generateDuplicateName(
+      agent.name,
+      allAgents.map((a) => a.name)
+    );
+
+    // Clone agent without id and isDefault
+    const { id: _id, isDefault: _isDefault, ...agentData } = agent;
+    await configStorage.addAgent({ ...agentData, name: newName, isDefault: false });
+
+    // Notify background script of config change
+    const newConfig = await configStorage.get();
+    await chrome.runtime.sendMessage({
+      type: 'SAVE_CONFIG',
+      config: newConfig,
+    } as const);
+
+    showStatus(`Agent duplicated as "${newName}"`, 'success');
+    closeModal('agent-modal');
+    await renderAgents();
+  } catch (error) {
+    log.error('Failed to duplicate agent:', error);
+    showStatus('Failed to duplicate agent', 'error');
   }
 }
 

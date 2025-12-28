@@ -141,12 +141,13 @@ export function createCard(config: CardConfig): HTMLElement {
 
 /**
  * Setup modal footer with consistent action layout
- * Layout: [Delete (left)] ... [Test (optional)] [Save (right)]
+ * Layout: [Delete (left)] [Duplicate] ... [Test (optional)] [Save (right)]
  */
 export interface ModalFooterConfig {
   modalId: string;
   onSave: () => void;
   onDelete?: () => void;
+  onDuplicate?: () => void;
   onTest?: () => void;
   deleteLabel?: string;
 }
@@ -168,6 +169,15 @@ export function setupModalFooter(config: ModalFooterConfig): void {
     deleteBtn.textContent = config.deleteLabel || 'Delete';
     deleteBtn.addEventListener('click', config.onDelete);
     footer.appendChild(deleteBtn);
+  }
+
+  // Left side: Duplicate button (if applicable)
+  if (config.onDuplicate) {
+    const duplicateBtn = document.createElement('button');
+    duplicateBtn.className = 'button button-secondary modal-duplicate-btn';
+    duplicateBtn.textContent = 'Duplicate';
+    duplicateBtn.addEventListener('click', config.onDuplicate);
+    footer.appendChild(duplicateBtn);
   }
 
   // Spacer to push right-side buttons
@@ -222,4 +232,26 @@ export function escapeHtml(text: string): string {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+/**
+ * Generate a unique duplicate name by appending (1), (2), etc.
+ * Handles existing numbered duplicates: "Foo (1)" -> "Foo (2)"
+ */
+export function generateDuplicateName(baseName: string, existingNames: string[]): string {
+  const existingSet = new Set(existingNames);
+
+  // Strip existing (N) suffix if present to get base
+  const baseMatch = baseName.match(/^(.+?)\s*\((\d+)\)$/);
+  const cleanBase = baseMatch ? baseMatch[1].trim() : baseName;
+
+  // Find next available number
+  let counter = 1;
+  let candidate = `${cleanBase} (${counter})`;
+  while (existingSet.has(candidate)) {
+    counter++;
+    candidate = `${cleanBase} (${counter})`;
+  }
+
+  return candidate;
 }
