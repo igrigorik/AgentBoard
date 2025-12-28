@@ -9,6 +9,27 @@ import type { Tool, CallToolResult, Resource } from '@modelcontextprotocol/sdk/t
 import log from '../logger';
 import type { MCPServerConfig } from '../storage/config';
 
+/**
+ * Suppress ajv schema compilation errors during an async operation.
+ * The MCP SDK uses ajv which calls `new Function()` for schema validation,
+ * blocked by extension CSP. The SDK catches these errors gracefully but
+ * ajv still logs to console.error - this wrapper silences that noise.
+ */
+async function withSuppressedAjvErrors<T>(fn: () => Promise<T>): Promise<T> {
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes('Error compiling schema')) {
+      return; // Swallow ajv's CSP-induced error
+    }
+    originalError.apply(console, args);
+  };
+  try {
+    return await fn();
+  } finally {
+    console.error = originalError;
+  }
+}
+
 export interface MCPClientStatus {
   connected: boolean;
   serverName: string;
@@ -110,7 +131,10 @@ export class MCPClientService {
     };
 
     try {
-      const result = await this.client.callTool(toolCallPayload);
+      // Wrap in ajv error suppressor - the SDK validates output schemas using ajv
+      // which fails under extension CSP but catches errors gracefully
+      const client = this.client;
+      const result = await withSuppressedAjvErrors(() => client.callTool(toolCallPayload));
       return result as CallToolResult;
     } catch (error) {
       log.error(`Failed to call tool ${name}:`, error);
