@@ -84,6 +84,21 @@ export interface BuiltinScript {
   // Future: per-tool configuration (timeouts, limits, etc.)
 }
 
+/**
+ * Base system prompt for browser copilot functionality.
+ * Provides tool selection guidance and grounds model in page context.
+ */
+const BASE_SYSTEM_PROMPT = `You are a browser copilot with visual and tool access to the current tab.
+
+Each message includes <page_context> with the current URL and title.
+
+TOOL SELECTION:
+Tools are filtered by URL and ordered by relevance (most specific first).
+Tool names reflect their target site - match against <page_context> URL.
+Prefer site-specific tools over generic ones (agentboard_*).
+
+Ground responses in acquired context. Never hallucinate page content.`;
+
 // Default agents to create on first install
 export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
   {
@@ -91,7 +106,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     description: 'General purpose assistant powered by OpenAI',
     provider: 'openai',
     model: 'gpt-5',
-    systemPrompt: 'You are a helpful AI assistant powered by OpenAI.',
+    systemPrompt: BASE_SYSTEM_PROMPT,
     temperature: 0.7,
     maxTokens: 4000,
     isDefault: true,
@@ -107,7 +122,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     description: 'Thoughtful assistant powered by Anthropic',
     provider: 'anthropic',
     model: 'claude-opus-4-20250514',
-    systemPrompt: 'You are Claude, a helpful AI assistant powered by Anthropic.',
+    systemPrompt: BASE_SYSTEM_PROMPT,
     temperature: 0.7,
     maxTokens: 4096,
     reasoning: {
@@ -122,7 +137,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     description: 'Creative assistant powered by Google',
     provider: 'google',
     model: 'gemini-2.5-flash',
-    systemPrompt: 'You are a helpful AI assistant powered by Gemini.',
+    systemPrompt: BASE_SYSTEM_PROMPT,
     temperature: 0.8,
     maxTokens: 2048,
     reasoning: {

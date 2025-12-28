@@ -199,6 +199,34 @@ const attachedTabId = (() => {
 
 log.info('[Sidebar] Initialized for tab:', attachedTabId);
 
+/**
+ * Get current page context (URL, title) for the attached tab.
+ * Returns null if no tab attached or tab info unavailable.
+ */
+async function getPageContext(): Promise<{ url: string; title: string } | null> {
+  if (!attachedTabId) return null;
+  try {
+    const tab = await chrome.tabs.get(attachedTabId);
+    return { url: tab.url || '', title: tab.title || '' };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build XML context string to prepend to user messages.
+ * Provides page awareness to the model without tool calls.
+ */
+function buildPageContextXml(ctx: { url: string; title: string }): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<page_context>
+<url>${esc(ctx.url)}</url>
+<title>${esc(ctx.title)}</title>
+</page_context>
+
+`;
+}
+
 // Smart scroll management helpers
 function checkIfUserAtBottom(): boolean {
   const threshold = 10; // Allow some margin for rounding errors
@@ -643,6 +671,10 @@ async function streamAIResponse() {
     metadata: { agentId: currentAgentId, agentName: currentAgent.name },
   };
 
+  // Get page context to prepend to user messages (gives model URL/title awareness)
+  const pageContext = await getPageContext();
+  const contextPrefix = pageContext ? buildPageContextXml(pageContext) : '';
+
   return new Promise<void>((resolve, reject) => {
     if (!currentSession) {
       reject(new Error('Session not created'));
@@ -908,6 +940,7 @@ async function streamAIResponse() {
     });
 
     // Send messages to stream (exclude empty messages)
+    // Prepend page context to user messages so model knows current page
     const messagesToSend = messageHistory
       .filter((m) => {
         if (m.role !== 'user' && m.role !== 'assistant') return false;
@@ -920,7 +953,27 @@ async function streamAIResponse() {
         // Handle multi-part content (images count as non-empty)
         return m.content.length > 0;
       })
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => {
+        // Prepend context to user messages only
+        if (m.role === 'user' && contextPrefix) {
+          if (typeof m.content === 'string') {
+            return { role: m.role, content: contextPrefix + m.content };
+          }
+          // Multi-part: prepend to first text part or add new text part
+          const parts = [...m.content];
+          const firstTextIdx = parts.findIndex((p) => p.type === 'text');
+          if (firstTextIdx >= 0 && parts[firstTextIdx].text) {
+            parts[firstTextIdx] = {
+              ...parts[firstTextIdx],
+              text: contextPrefix + parts[firstTextIdx].text,
+            };
+          } else {
+            parts.unshift({ type: 'text', text: contextPrefix });
+          }
+          return { role: m.role, content: parts };
+        }
+        return { role: m.role, content: m.content };
+      });
 
     log.debug('[Sidebar] Sending messages to stream:', {
       agentId: currentAgentId,

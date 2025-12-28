@@ -3400,8 +3400,9 @@ import { z } from 'zod';
 export const FETCH_URL_TOOL_NAME = 'agentboard_fetch_url';
 const TOOL_VERSION = '1.0.0';
 const TOOL_DESCRIPTION =
-  'Fetch content from any URL. Returns raw content (HTML, JSON, etc.) by default, ' +
-  'or, optionally, convert to markdown format optimized for LLM consumption. ';
+  'Fetch content from external URLs (not the current page). ' +
+  'For current page content, use site-specific or agentboard_dom_* tools instead. ' +
+  'Returns raw content (HTML, JSON, etc.) or optionally converts to markdown.';
 
 const PARAM_DESCRIPTIONS = {
   url: 'URL to fetch (supports http, https, localhost, private IPs)',
