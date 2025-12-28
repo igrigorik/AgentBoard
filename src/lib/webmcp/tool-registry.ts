@@ -16,6 +16,7 @@ import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
 import { ConfigStorage } from '../storage/config'; // Still needed for remote MCP tools
 import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
+import { calculateSpecificityScore } from './tool-patterns';
 
 export type ToolSourceType = 'site' | 'user' | 'remote' | 'system';
 // AI SDK tool type - both MCP and WebMCP converters return the same shape
@@ -107,64 +108,54 @@ export class ToolRegistryManager {
   }
 
   /**
-   * Get all tools as a record for AI SDK consumption
+   * Collect, score, and sort tools by specificity.
+   * Returns tools as Record (ordered by score descending) plus debug info.
    */
-  getAllTools(): Record<string, AISDKTool> {
-    const result: Record<string, AISDKTool> = {};
+  private getToolsSortedBySpecificity(filter?: (name: string, meta: ToolWithMetadata) => boolean): {
+    tools: Record<string, AISDKTool>;
+    debug: string[];
+  } {
+    const scored: Array<[string, AISDKTool, number]> = [];
 
     for (const [name, meta] of this.tools.entries()) {
-      result[name] = meta.tool;
+      if (!filter || filter(name, meta)) {
+        scored.push([name, meta.tool, calculateSpecificityScore(name, meta.source)]);
+      }
     }
 
-    log.warn(`[ToolRegistry] Providing ${this.tools.size} tools for AI`, this.getToolSummary());
+    scored.sort((a, b) => b[2] - a[2]);
 
-    return result;
+    return {
+      tools: Object.fromEntries(scored.map(([name, tool]) => [name, tool])),
+      debug: scored.map(([name, , score]) => `${name}:${score}`),
+    };
+  }
+
+  /**
+   * Get all tools as a record for AI SDK consumption
+   * Ordered by specificity score (descending)
+   */
+  getAllTools(): Record<string, AISDKTool> {
+    const { tools, debug } = this.getToolsSortedBySpecificity();
+    log.info(`[ToolRegistry] Providing ${debug.length} tools (all):`, debug);
+    return tools;
   }
 
   /**
    * Get tools scoped to a specific tab (for tab-specific sidebars)
    * Includes both tab-specific tools AND global tools (remote, system)
+   *
+   * Tool Ordering: Tools are sorted by specificity score (descending).
+   * Higher scores appear first, leveraging LLM positional bias.
+   * See tool-patterns.ts for scoring logic.
    */
   getToolsForTab(tabId: number): Record<string, AISDKTool> {
-    const result: Record<string, AISDKTool> = {};
-    const targetOrigin = `tab-${tabId}`;
-
-    for (const [name, meta] of this.tools.entries()) {
-      // Include tools from this specific tab OR global tools (remote/system)
-      if (meta.origin === targetOrigin || meta.source === 'remote' || meta.source === 'system') {
-        result[name] = meta.tool;
-      }
-    }
-
-    log.warn(
-      `[ToolRegistry] Providing ${Object.keys(result).length} tools for tab ${tabId}`,
-      Object.keys(result)
+    const { tools, debug } = this.getToolsSortedBySpecificity(
+      (_, meta) =>
+        meta.origin === `tab-${tabId}` || meta.source === 'remote' || meta.source === 'system'
     );
-
-    return result;
-  }
-
-  /**
-   * Get summary of tools by source
-   */
-  getToolSummary() {
-    const summary = {
-      total: this.tools.size,
-      bySource: {
-        site: 0,
-        user: 0,
-        remote: 0,
-        system: 0,
-      },
-      tools: [] as string[],
-    };
-
-    for (const [name, meta] of this.tools.entries()) {
-      summary.bySource[meta.source]++;
-      summary.tools.push(name);
-    }
-
-    return summary;
+    log.info(`[ToolRegistry] Providing ${debug.length} tools for tab ${tabId}:`, debug);
+    return tools;
   }
 
   /**
