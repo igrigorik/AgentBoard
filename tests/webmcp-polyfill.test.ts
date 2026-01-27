@@ -1,5 +1,9 @@
 /**
- * Tests for WebMCP Polyfill (window.agent API)
+ * Tests for WebMCP Polyfill
+ *
+ * Per WebMCP spec: https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md
+ * - Primary API: navigator.modelContext
+ * - Backward compat: window.agent (alias)
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -7,6 +11,395 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import fs from 'fs';
 import path from 'path';
+
+describe('WebMCP Polyfill - API Location', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+  });
+
+  it('should expose navigator.modelContext (page-side API per WebMCP spec)', () => {
+    expect((window as any).navigator.modelContext).toBeDefined();
+    // Page-side methods only
+    expect(typeof (window as any).navigator.modelContext.provideContext).toBe('function');
+    expect(typeof (window as any).navigator.modelContext.registerTool).toBe('function');
+    expect(typeof (window as any).navigator.modelContext.unregisterTool).toBe('function');
+    expect(typeof (window as any).navigator.modelContext.clearContext).toBe('function');
+    // Agent-side methods should NOT be on modelContext
+    expect((window as any).navigator.modelContext.callTool).toBeUndefined();
+    expect((window as any).navigator.modelContext.listTools).toBeUndefined();
+  });
+
+  it('should expose navigator.modelContextTesting (agent-side API)', () => {
+    expect((window as any).navigator.modelContextTesting).toBeDefined();
+    expect(typeof (window as any).navigator.modelContextTesting.listTools).toBe('function');
+    expect(typeof (window as any).navigator.modelContextTesting.executeTool).toBe('function');
+    expect(typeof (window as any).navigator.modelContextTesting.registerToolsChangedCallback).toBe(
+      'function'
+    );
+  });
+
+  it('should expose window.agent as backward-compat combined API', () => {
+    expect((window as any).agent).toBeDefined();
+    // Should have both page-side and agent-side methods for legacy compat
+    expect(typeof (window as any).agent.registerTool).toBe('function');
+    expect(typeof (window as any).agent.listTools).toBe('function');
+    expect(typeof (window as any).agent.callTool).toBe('function');
+  });
+});
+
+describe('WebMCP Polyfill - unregisterTool', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  it('should unregister a tool by name', () => {
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    expect(modelContextTesting.listTools().length).toBe(1);
+
+    const removed = modelContext.unregisterTool('test_tool');
+    expect(removed).toBe(true);
+    expect(modelContextTesting.listTools().length).toBe(0);
+  });
+
+  it('should return false when unregistering non-existent tool', () => {
+    const removed = modelContext.unregisterTool('non_existent');
+    expect(removed).toBe(false);
+  });
+});
+
+describe('WebMCP Polyfill - clearContext', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  it('should clear all tools', () => {
+    modelContext.registerTool({
+      name: 'tool1',
+      description: 'Tool 1',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+    modelContext.registerTool({
+      name: 'tool2',
+      description: 'Tool 2',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    expect(modelContextTesting.listTools().length).toBe(2);
+
+    modelContext.clearContext();
+
+    expect(modelContextTesting.listTools().length).toBe(0);
+  });
+
+  it('should trigger toolsChangedCallback', async () => {
+    const callback = vi.fn();
+    modelContextTesting.registerToolsChangedCallback(callback);
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    // Wait for microtask
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    callback.mockClear();
+
+    modelContext.clearContext();
+
+    // Wait for microtask
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callback).toHaveBeenCalled();
+  });
+});
+
+describe('WebMCP Polyfill - modelContextTesting (agent-side API)', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  it('should expose navigator.modelContextTesting', () => {
+    expect(modelContextTesting).toBeDefined();
+    expect(typeof modelContextTesting.listTools).toBe('function');
+    expect(typeof modelContextTesting.executeTool).toBe('function');
+    expect(typeof modelContextTesting.registerToolsChangedCallback).toBe('function');
+  });
+
+  it('should have ModelContextTesting as Symbol.toStringTag', () => {
+    expect(modelContextTesting[Symbol.toStringTag]).toBe('ModelContextTesting');
+  });
+
+  it('listTools() should return tools registered via modelContext', () => {
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    const tools = modelContextTesting.listTools();
+    expect(tools.length).toBe(1);
+    expect(tools[0].name).toBe('test_tool');
+  });
+
+  it('executeTool() should call tools with JSON string args (Chrome native format)', async () => {
+    const executeFn = vi.fn().mockResolvedValue('result');
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: { input: { type: 'string' } } },
+      execute: executeFn,
+    });
+
+    // Chrome's native API passes args as JSON string
+    const result = await modelContextTesting.executeTool('test_tool', '{"input":"hello"}');
+    expect(result).toBe('result');
+    expect(executeFn).toHaveBeenCalledWith({ input: 'hello' }, expect.any(Object));
+  });
+
+  it('executeTool() should also accept object args for convenience', async () => {
+    const executeFn = vi.fn().mockResolvedValue('result');
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: { input: { type: 'string' } } },
+      execute: executeFn,
+    });
+
+    // Also support object for backward compat
+    const result = await modelContextTesting.executeTool('test_tool', { input: 'hello' });
+    expect(result).toBe('result');
+    expect(executeFn).toHaveBeenCalledWith({ input: 'hello' }, expect.any(Object));
+  });
+
+  it('registerToolsChangedCallback() should be called when tools change', async () => {
+    const callback = vi.fn();
+    modelContextTesting.registerToolsChangedCallback(callback);
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    // Wait for microtask
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callback).toHaveBeenCalled();
+  });
+
+  it('registerToolsChangedCallback() should be called on unregisterTool', async () => {
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    // Wait for initial registration callback
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const callback = vi.fn();
+    modelContextTesting.registerToolsChangedCallback(callback);
+
+    modelContext.unregisterTool('test_tool');
+
+    // Wait for microtask
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callback).toHaveBeenCalled();
+  });
+
+  it('registerToolsChangedCallback() should be called on clearContext', async () => {
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    // Wait for initial registration callback
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const callback = vi.fn();
+    modelContextTesting.registerToolsChangedCallback(callback);
+
+    modelContext.clearContext();
+
+    // Wait for microtask
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callback).toHaveBeenCalled();
+  });
+});
+
+describe('WebMCP Polyfill - agent context in execute', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  it('should pass agent context with requestUserInteraction to execute', async () => {
+    let receivedAgent: any = null;
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: (_args: any, agent: any) => {
+        receivedAgent = agent;
+        return { success: true };
+      },
+    });
+
+    await modelContextTesting.executeTool('test_tool', '{}');
+
+    expect(receivedAgent).toBeDefined();
+    expect(typeof receivedAgent.requestUserInteraction).toBe('function');
+  });
+
+  it('should execute requestUserInteraction callback', async () => {
+    let interactionCalled = false;
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (_args: any, agent: any) => {
+        const result = await agent.requestUserInteraction(async () => {
+          interactionCalled = true;
+          return 'user_confirmed';
+        });
+        return { result };
+      },
+    });
+
+    const result = await modelContextTesting.executeTool('test_tool', '{}');
+
+    expect(interactionCalled).toBe(true);
+    expect(result.result).toBe('user_confirmed');
+  });
+});
 
 describe('WebMCP Polyfill - JSON Schema Validation', () => {
   let dom: JSDOM;
@@ -32,6 +425,7 @@ describe('WebMCP Polyfill - JSON Schema Validation', () => {
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
 
+    // Use window.agent (backward compat API with both page-side and agent-side methods)
     agent = (window as any).agent;
   });
 

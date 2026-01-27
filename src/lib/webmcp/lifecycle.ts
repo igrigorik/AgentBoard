@@ -226,8 +226,22 @@ export class TabManager {
    * Update tool registry for a tab
    */
   private updateToolRegistry(tabId: number, params: ToolsListChangedParams): void {
+    // Parse inputSchema if it's a JSON string (Chrome's native API returns it as string)
+    const normalizedTools = (params.tools || []).map((tool) => {
+      let inputSchema = tool.inputSchema;
+      if (typeof inputSchema === 'string') {
+        try {
+          inputSchema = JSON.parse(inputSchema);
+          log.debug(`[WebMCP Lifecycle] Parsed inputSchema for tool "${tool.name}"`);
+        } catch (e) {
+          log.warn(`[WebMCP Lifecycle] Failed to parse inputSchema for tool "${tool.name}":`, e);
+        }
+      }
+      return { ...tool, inputSchema };
+    });
+
     const registry: ToolRegistry = {
-      tools: params.tools || [],
+      tools: normalizedTools,
       origin: params.origin || '',
       timestamp: params.timestamp ?? Date.now(),
     };

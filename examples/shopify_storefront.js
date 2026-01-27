@@ -146,15 +146,19 @@ function registerShopifyTool(toolSchema, mcpEndpoint) {
     inputSchema: toolSchema.inputSchema || { type: 'object', properties: {} },
 
     // Create an execute function that proxies to MCP
+    // Per WebMCP spec: execute receives (args, agent)
     execute: createExecutor(toolSchema.name, mcpEndpoint)
   };
 
-  // Register with the agent
-  if (window.agent && typeof window.agent.registerTool === 'function') {
-    window.agent.registerTool(tool);
+  // Register with modelContext (per WebMCP spec)
+  // Falls back to window.agent for backward compat
+  const modelContext = ('modelContext' in navigator) ? navigator.modelContext : window.agent;
+  
+  if (modelContext && typeof modelContext.registerTool === 'function') {
+    modelContext.registerTool(tool);
     console.log(`[Shopify Bootstrap] ✅ Successfully registered: ${toolName}`);
   } else {
-    throw new Error('window.agent.registerTool not available');
+    throw new Error('navigator.modelContext.registerTool not available');
   }
 }
 
