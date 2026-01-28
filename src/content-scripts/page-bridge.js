@@ -1,7 +1,10 @@
 /**
  * WebMCP Page Bridge (MAIN World)
- * Bridges window.agent events to the extension via postMessage
+ * Bridges navigator.modelContext events to the extension via postMessage
  * Executes in MAIN world with full access to page runtime
+ *
+ * Aligns with WebMCP proposed spec:
+ * https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md
  */
 (function () {
   'use strict';
@@ -24,18 +27,52 @@
   }
 
   /**
-   * Initialize bridge if window.agent exists
+   * Get the agent-side API for discovering and executing tools
+   * 
+   * Chrome's WebMCP implementation:
+   * - navigator.modelContextTesting = agent-side (listTools, executeTool, registerToolsChangedCallback)
+   * - navigator.modelContext = page-side (registerTool, unregisterTool, provideContext)
+   * 
+   * Our polyfill provides the same separation.
+   */
+  function getAgentAPI() {
+    // Use modelContextTesting (agent-side API) - either native Chrome or our polyfill
+    if ('modelContextTesting' in navigator) {
+      return {
+        native: !Object.prototype.hasOwnProperty.call(navigator.modelContextTesting, 'errors'), // Native won't have our errors property
+        listTools: () => navigator.modelContextTesting.listTools(),
+        // executeTool expects args as JSON string
+        executeTool: (name, args) => navigator.modelContextTesting.executeTool(name, JSON.stringify(args)),
+        registerToolsChangedCallback: (callback) => navigator.modelContextTesting.registerToolsChangedCallback(callback)
+      };
+    }
+    // Legacy fallback: window.agent (backward compat API)
+    if ('agent' in window) {
+      return {
+        native: false,
+        listTools: () => window.agent.listTools(),
+        executeTool: (name, args) => window.agent.callTool(name, args),
+        registerToolsChangedCallback: (callback) => window.agent.addEventListener('tools/listChanged', callback)
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Initialize bridge using the agent-side API
    */
   function initBridge() {
-    if (!window.agent || typeof window.agent.addEventListener !== 'function') {
-      console.warn('[WebMCP Bridge] window.agent not found or invalid');
+    const agentAPI = getAgentAPI();
+
+    if (!agentAPI) {
+      console.warn('[WebMCP Bridge] No WebMCP API found (modelContextTesting, modelContext, or agent)');
       return;
     }
 
-    console.log('[WebMCP Bridge] Initializing in MAIN world');
+    console.log('[WebMCP Bridge] Initializing in MAIN world', agentAPI.native ? '(native Chrome API)' : '(polyfill)');
 
     // Get current tools immediately - in case any were registered before we got here
-    const currentTools = window.agent.listTools();
+    const currentTools = agentAPI.listTools();
     console.log('[WebMCP Bridge] Current tools on init:', currentTools);
 
     // Send initial snapshot if there are already tools
@@ -54,9 +91,9 @@
     }
 
     // Subscribe to tool registry changes
-    window.agent.addEventListener('tools/listChanged', () => {
+    agentAPI.registerToolsChangedCallback(() => {
       try {
-        const tools = window.agent.listTools();
+        const tools = agentAPI.listTools();
         postToExtension({
           jsonrpc: JSONRPC,
           method: 'tools/listChanged',
@@ -91,7 +128,7 @@
         console.log('[WebMCP Bridge] Received tools/list request');
 
         try {
-          const tools = window.agent.listTools();
+          const tools = agentAPI.listTools();
 
           // Send tools via notification (not a response to preserve protocol semantics)
           postToExtension({
@@ -128,8 +165,8 @@
         const { name, arguments: args } = msg.params || {};
 
         try {
-          // Delegate to window.agent
-          const result = await window.agent.callTool(name, args || {});
+          // Delegate to agent API
+          const result = await agentAPI.executeTool(name, args || {});
 
           // Send success response
           postToExtension({
@@ -165,12 +202,13 @@
     console.log('[WebMCP Bridge] Ready and listening');
   }
 
-  // Initialize immediately if window.agent exists
-  if (window.agent) {
+  // Initialize immediately if any WebMCP API exists
+  const agentAPI = getAgentAPI();
+  if (agentAPI) {
     initBridge();
   } else {
-    // If window.agent doesn't exist yet, it might be loaded later
+    // If no API exists yet, it might be loaded later
     // This shouldn't happen if polyfill is injected at document_start
-    console.warn('[WebMCP Bridge] window.agent not found at injection time');
+    console.warn('[WebMCP Bridge] No WebMCP API found at injection time');
   }
 })();

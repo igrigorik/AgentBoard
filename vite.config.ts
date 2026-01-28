@@ -21,6 +21,9 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
       '@lib': path.resolve(__dirname, './src/lib'),
       '@types': path.resolve(__dirname, './src/types'),
+      // Use CSP-safe Ajv shim - real Ajv uses new Function() which violates extension CSP
+      // Also fixes ESM import issue (ajv doesn't have default export in ESM)
+      ajv: path.resolve(__dirname, 'src/lib/ajv-csp-safe.js'),
     },
   },
   build: {
@@ -72,6 +75,6 @@ export default defineConfig({
   },
   // Chrome extension specific optimizations
   optimizeDeps: {
-    exclude: ['@modelcontextprotocol/sdk'],
+    // With our CSP-safe ajv shim, we can pre-bundle normally
   },
 });

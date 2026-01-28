@@ -2,6 +2,8 @@
 
 This guide covers how to create custom WebMCP tools that run in the browser context and are available to the LLM for execution.
 
+> **Spec Alignment**: This implementation aligns with the [WebMCP proposed spec](https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md).
+
 ## Basic Structure
 
 Every WebMCP tool is a JavaScript file with two required exports:
@@ -24,8 +26,10 @@ export const metadata = {
   },
 };
 
-export async function execute(args = {}) {
+// Per WebMCP spec: execute receives (args, agent) where agent provides requestUserInteraction()
+export async function execute(args = {}, agent) {
   // Tool implementation - has full DOM/window access
+  // Use agent.requestUserInteraction() for user confirmation flows
   // Return result object
 }
 ```
@@ -129,8 +133,13 @@ inputSchema: {
 
 ## The `execute` Function
 
+Per the WebMCP spec, execute receives two arguments:
+
+- `args` - The tool arguments from the LLM
+- `agent` - An agent context object with `requestUserInteraction()` for user confirmation flows
+
 ```javascript
-export async function execute(args = {}) {
+export async function execute(args = {}, agent) {
   // Destructure with defaults
   const { limit = 100, format = 'full' } = args;
 
@@ -140,6 +149,36 @@ export async function execute(args = {}) {
   return { ... };
 }
 ```
+
+### Requesting User Interaction
+
+For tools that perform sensitive actions (purchases, deletions, etc.), use `agent.requestUserInteraction()`:
+
+```javascript
+export async function execute(args = {}, agent) {
+  const { productId } = args;
+
+  // Request user confirmation before sensitive action
+  const confirmed = await agent.requestUserInteraction(async () => {
+    return confirm(`Purchase product ${productId}?\nClick OK to confirm.`);
+  });
+
+  if (!confirmed) {
+    throw new Error('Purchase cancelled by user.');
+  }
+
+  // Proceed with action...
+  await executePurchase(productId);
+  return { success: true, productId };
+}
+```
+
+The `requestUserInteraction` API:
+
+- Takes an async function that performs the UI interaction
+- Returns the result of that function
+- Allows tools to prompt for confirmation, input, or any other user interaction
+- The agent (browser) handles pausing execution while waiting for user input
 
 ### Available in `execute`:
 
@@ -414,6 +453,50 @@ Single-page apps may not update `window.location` when navigating. Your tool may
 - Detect context from DOM state, not just URL
 - Handle cases where URL shows one view but DOM shows another
 
+## Programmatic Tool Registration
+
+For advanced use cases (like dynamically discovering tools), you can register tools programmatically:
+
+```javascript
+// Per WebMCP spec: navigator.modelContext is the primary API
+// window.agent is also available as a backward-compatible alias
+
+if ('modelContext' in navigator) {
+  // Register a single tool
+  navigator.modelContext.registerTool({
+    name: 'my_tool',
+    description: 'Does something useful',
+    inputSchema: { type: 'object', properties: {} },
+    execute: async (args, agent) => {
+      return { result: 'success' };
+    }
+  });
+
+  // Unregister a tool
+  navigator.modelContext.unregisterTool('my_tool');
+
+  // Clear all tools
+  navigator.modelContext.clearContext();
+
+  // Replace all tools at once
+  navigator.modelContext.provideContext({
+    tools: [
+      { name: 'tool1', description: '...', inputSchema: {...}, execute: async (args, agent) => {...} },
+      { name: 'tool2', description: '...', inputSchema: {...}, execute: async (args, agent) => {...} }
+    ]
+  });
+}
+```
+
+**API methods:**
+
+- `provideContext({ tools })` - Replace entire tool set (clears existing)
+- `registerTool(tool)` - Add/replace a single tool
+- `unregisterTool(name)` - Remove a tool by name
+- `clearContext()` - Remove all tools
+- `listTools()` - Get current tool definitions (without execute functions)
+- `callTool(name, args)` - Invoke a tool (used by the agent, not typically by tools)
+
 ## Testing Your Tool
 
 1. Open browser DevTools console on the target site
@@ -447,7 +530,8 @@ export const metadata = {
   },
 };
 
-export async function execute() {
+// agent param is optional if not using requestUserInteraction
+export async function execute(args = {}, agent) {
   const docId = getDocId();
   if (!docId) {
     throw new Error('Could not extract document ID from URL.');
@@ -473,6 +557,52 @@ function getDocId() {
 }
 ```
 
+## Example: Tool with User Interaction
+
+```javascript
+'use webmcp-tool v1';
+
+export const metadata = {
+  name: 'delete_item',
+  namespace: 'myapp',
+  version: '1.0.0',
+  description: 'Delete an item after user confirmation.',
+  match: 'https://app.example.com/*',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      itemId: { type: 'string', description: 'ID of item to delete' },
+    },
+    required: ['itemId'],
+    additionalProperties: false,
+  },
+};
+
+export async function execute(args = {}, agent) {
+  const { itemId } = args;
+
+  // Request user confirmation before destructive action
+  const confirmed = await agent.requestUserInteraction(async () => {
+    return confirm(`Are you sure you want to delete item ${itemId}?`);
+  });
+
+  if (!confirmed) {
+    return { cancelled: true, message: 'Deletion cancelled by user.' };
+  }
+
+  const response = await fetch(`https://app.example.com/api/items/${itemId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Delete failed: ${response.status}`);
+  }
+
+  return { success: true, itemId };
+}
+```
+
 ## Example: Tool with API Calls and Entity Resolution
 
 ```javascript
@@ -493,7 +623,7 @@ export const metadata = {
   },
 };
 
-export async function execute(args = {}) {
+export async function execute(args = {}, agent) {
   const { limit = 50 } = args;
 
   const threadId = getThreadId();
