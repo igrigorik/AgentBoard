@@ -126,9 +126,9 @@ describe('WebMCP Script Injection Timing', () => {
       // Inject scripts
       await lifecycleManager.ensureContentScriptReady(tabId);
 
-      // Verify: relay + polyfill + 2 matching tools + bridge = 5 scripts
+      // Verify: relay + polyfill + 1 matching tool + bridge = 4 scripts
       // (youtube_transcript only matches YouTube URLs, not example.com)
-      expect(injectionLog).toHaveLength(5);
+      expect(injectionLog).toHaveLength(4);
 
       // 1. Relay FIRST (CRITICAL: must be listening before bridge sends initial snapshot)
       expect(injectionLog[0]).toEqual({
@@ -146,15 +146,13 @@ describe('WebMCP Script Injection Timing', () => {
         files: ['content-scripts/webmcp-polyfill.js'],
       });
 
-      // 3-4. Two matching compiled tools (inject after polyfill)
-      for (let i = 2; i < 4; i++) {
-        expect(injectionLog[i]?.world).toBe('MAIN');
-        expect(injectionLog[i]?.timing).toBe('document_idle');
-        expect(injectionLog[i]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
-      }
+      // 3. One matching compiled tool (inject after polyfill)
+      expect(injectionLog[2]?.world).toBe('MAIN');
+      expect(injectionLog[2]?.timing).toBe('document_idle');
+      expect(injectionLog[2]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
 
-      // 5. Bridge LAST (sends initial snapshot to relay)
-      expect(injectionLog[4]).toEqual({
+      // 4. Bridge LAST (sends initial snapshot to relay)
+      expect(injectionLog[3]).toEqual({
         type: 'script',
         timing: 'document_idle',
         world: 'MAIN',
@@ -499,7 +497,7 @@ describe('WebMCP Script Injection Timing', () => {
       // NEW order: relay → polyfill → tools → bridge (fixed for race condition)
       expect(injectionLog[0].files).toEqual(['content-scripts/relay.js']);
       expect(injectionLog[1].files).toEqual(['content-scripts/webmcp-polyfill.js']);
-      expect(injectionLog[4].files).toEqual(['content-scripts/page-bridge.js']);
+      expect(injectionLog[3].files).toEqual(['content-scripts/page-bridge.js']);
     });
 
     it('should handle rapid navigations without double injection', async () => {

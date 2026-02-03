@@ -147,7 +147,6 @@ Save in Settings → My Tools. The AI can now call it when you ask about prices 
 **Built-in WebMCP tools:**
 
 - `agentboard_get_full_page_context` - Article extraction with metadata (title, author, Open Graph, Twitter Cards)
-- `agentboard_dom_query` - Query specific elements via CSS selectors with visibility/bounds info
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
 - `agentboard_fetch_url` - Fetch external URLs with optional markdown conversion
 

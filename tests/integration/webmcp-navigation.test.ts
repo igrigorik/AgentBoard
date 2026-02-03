@@ -146,9 +146,9 @@ describe('WebMCP Navigation Integration', () => {
         });
       }
 
-      // Verify scripts were injected: relay + polyfill + 2 matching tools + bridge = 5
+      // Verify scripts were injected: relay + polyfill + 1 matching tool + bridge = 4
       // (youtube_transcript only matches youtube.com, not example.com)
-      const expectedScriptCount = 5; // 3 core scripts + 2 matching tools
+      const expectedScriptCount = 4; // 3 core scripts + 1 matching tool
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(expectedScriptCount);
 
       // Check relay injection FIRST (critical for race condition fix)
@@ -167,8 +167,8 @@ describe('WebMCP Navigation Integration', () => {
         files: ['content-scripts/webmcp-polyfill.js'],
       });
 
-      // Check bridge injection LAST (call #5 - after 2 matching tools)
-      expect(mockChrome.scripting.executeScript).toHaveBeenNthCalledWith(5, {
+      // Check bridge injection LAST (call #4 - after 1 matching tool)
+      expect(mockChrome.scripting.executeScript).toHaveBeenNthCalledWith(4, {
         target: { tabId, frameIds: [0] },
         world: 'MAIN',
         injectImmediately: false,
@@ -206,8 +206,8 @@ describe('WebMCP Navigation Integration', () => {
         });
       }
 
-      // Should inject only once: relay + polyfill + 2 matching tools + bridge = 5
-      const expectedScriptCount = 5; // 3 core scripts + 2 matching tools
+      // Should inject only once: relay + polyfill + 1 matching tool + bridge = 4
+      const expectedScriptCount = 4; // 3 core scripts + 1 matching tool
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(expectedScriptCount);
     });
 

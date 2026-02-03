@@ -121,30 +121,20 @@ console.log(notes);
 console.log('─'.repeat(60));
 console.log('');
 
-// Prepare gh release command
-// Create as draft so you can review before publishing
-const cmd = [
-  'gh', 'release', 'create', tag,
-  zipFile,
-  '--title', `AgentBoard ${tag}`,
-  '--notes', notes,
-  '--draft'
-].map(arg => {
-  // Quote arguments with spaces or special chars
-  if (arg.includes(' ') || arg.includes('\n')) {
-    return `"${arg.replace(/"/g, '\\"')}"`;
-  }
-  return arg;
-});
-
 console.log('Creating draft release...\n');
 
+// Write notes to temp file to avoid shell escaping issues with newlines
+const notesFile = path.join(rootDir, 'release', '.release-notes.md');
+fs.writeFileSync(notesFile, notes);
+
 try {
-  // Use spawn-style execution to handle complex args
-  execSync(`gh release create "${tag}" "${zipFile}" --title "AgentBoard ${tag}" --notes "${notes.replace(/"/g, '\\"').replace(/\n/g, '\\n')}" --draft`, {
+  execSync(`gh release create "${tag}" "${zipFile}" --title "AgentBoard ${tag}" --notes-file "${notesFile}" --draft`, {
     stdio: 'inherit',
     cwd: rootDir
   });
+
+  // Clean up temp notes file
+  fs.unlinkSync(notesFile);
 
   console.log('\n✓ Draft release created successfully!');
   console.log('\nNext steps:');
@@ -155,6 +145,10 @@ try {
   console.log('\n  View draft: gh release view ' + tag + ' --web');
 
 } catch (e) {
+  // Clean up temp notes file on error
+  if (fs.existsSync(notesFile)) {
+    fs.unlinkSync(notesFile);
+  }
   console.error('\n✗ Failed to create GitHub release');
   console.error('  Check if release already exists: gh release list');
   console.error('  Or if tag exists: gh release view ' + tag);

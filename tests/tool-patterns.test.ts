@@ -34,11 +34,6 @@ describe('tool-patterns', () => {
         const score = calculateSpecificityScore('agentboard_get_full_page_context', 'site');
         expect(score).toBe(30);
       });
-
-      it('scores agentboard_dom_query low (30) due to <all_urls> pattern', () => {
-        const score = calculateSpecificityScore('agentboard_dom_query', 'site');
-        expect(score).toBe(30);
-      });
     });
 
     describe('user script patterns (registered at runtime)', () => {

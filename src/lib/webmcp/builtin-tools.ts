@@ -14,8 +14,8 @@ import { FETCH_URL_TOOL_NAME, FETCH_URL_METADATA } from './tools/fetch';
 export type BuiltinToolType = 'system' | 'webmcp';
 
 export interface BuiltinToolInfo {
-  id: string; // Full tool ID: 'agentboard_fetch_url', 'agentboard_dom_query'
-  name: string; // Display name: 'fetch_url', 'dom_query'
+  id: string; // Full tool ID: 'agentboard_fetch_url', 'agentboard_youtube_transcript'
+  name: string; // Display name: 'fetch_url', 'youtube_transcript'
   namespace: string; // Always 'agentboard' for built-ins
   type: BuiltinToolType;
   description: string;
@@ -43,13 +43,13 @@ const SYSTEM_TOOLS: BuiltinToolInfo[] = [
 
 /**
  * Convert CompiledToolInfo to BuiltinToolInfo
- * Extracts name from id (e.g., 'agentboard_dom_query' -> 'dom_query')
+ * Extracts name from id (e.g., 'agentboard_youtube_transcript' -> 'youtube_transcript')
  */
 function convertCompiledToBuiltin(compiled: CompiledToolInfo): BuiltinToolInfo {
   // Extract tool name from id (namespace_name format)
   const parts = compiled.id.split('_');
   const namespace = parts[0]; // 'agentboard'
-  const name = parts.slice(1).join('_'); // 'dom_query', 'dom_readability', etc.
+  const name = parts.slice(1).join('_'); // 'youtube_transcript', 'get_full_page_context', etc.
 
   return {
     id: compiled.id,

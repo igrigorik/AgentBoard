@@ -79,7 +79,7 @@ export interface UserScriptMetadata {
 // Built-in tool state configuration
 // Stores user preferences for pre-compiled system and WebMCP tools
 export interface BuiltinScript {
-  id: string; // Tool ID: 'agentboard_fetch_url', 'agentboard_dom_query', etc.
+  id: string; // Tool ID: 'agentboard_fetch_url', 'agentboard_youtube_transcript', etc.
   enabled: boolean; // User toggle to enable/disable
   // Future: per-tool configuration (timeouts, limits, etc.)
 }
