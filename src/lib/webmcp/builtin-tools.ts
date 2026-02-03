@@ -49,7 +49,7 @@ function convertCompiledToBuiltin(compiled: CompiledToolInfo): BuiltinToolInfo {
   // Extract tool name from id (namespace_name format)
   const parts = compiled.id.split('_');
   const namespace = parts[0]; // 'agentboard'
-  const name = parts.slice(1).join('_'); // 'youtube_transcript', 'get_full_page_context', etc.
+  const name = parts.slice(1).join('_'); // 'youtube_transcript', 'read_page', etc.
 
   return {
     id: compiled.id,

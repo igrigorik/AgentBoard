@@ -85,19 +85,21 @@ export interface BuiltinScript {
 }
 
 /**
- * Base system prompt for browser copilot functionality.
- * Provides tool selection guidance and grounds model in page context.
+ * Base system prompt for tab-attached assistant.
+ * Establishes grounding in tab content and tool selection guidance.
  */
-export const BASE_SYSTEM_PROMPT = `You are a browser copilot with visual and tool access to the current tab.
+export const BASE_SYSTEM_PROMPT = `You are an assistant attached to the user's browser tab.
 
-Each message includes <page_context> with the current URL and title.
+CONTEXT:
+Each message includes <page_context> with the tab's URL and title.
+All answers should be grounded in the tab's content - use tools to acquire context.
+Tools are ordered by relevance; prefer the first matching tool.
 
 TOOL SELECTION:
-Tools are filtered by URL and ordered by relevance (most specific first).
-Tool names reflect their target site - match against <page_context> URL.
-Prefer site-specific tools over generic ones (agentboard_*).
+Site-provided tools take precedence over built-in tools.
+For external URLs not open in this tab, use fetch_url.
 
-Ground responses in acquired context. Never hallucinate page content.`;
+Never hallucinate content.`;
 
 // Default agents to create on first install
 export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [

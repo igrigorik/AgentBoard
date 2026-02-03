@@ -9,7 +9,7 @@
  */
 
 export const BUILTIN_SOURCES: Record<string, string> = {
-  agentboard_get_full_page_context: `'use webmcp-tool v1';
+  agentboard_read_page: `'use webmcp-tool v1';
 
 // Vendor Mozilla Readability v0.5.0 (Apache License 2.0)
 // Inlined directly for CSP compatibility - no eval/Function needed
@@ -2342,10 +2342,10 @@ if (typeof window !== 'undefined') {
 /* eslint-enable */
 
 export const metadata = {
-  name: 'get_full_page_context',
+  name: 'read_page',
   namespace: 'agentboard',
-  version: '3.0.0',
-  description: 'Get full page context beyond the default <page_context>. Returns comprehensive metadata and, where possible, page content extracted as clean markdown. Use when URL/title from <page_context> is insufficient.',
+  version: '4.0.1',
+  description: "Extract the current tab's content as clean markdown with metadata (title, author, date). Primary grounding context for pages. For external URLs, use fetch_url.",
   match: ['<all_urls>'],
   inputSchema: {
     type: 'object',

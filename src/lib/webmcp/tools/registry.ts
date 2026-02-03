@@ -22,12 +22,12 @@ export interface CompiledToolInfo {
  */
 export const COMPILED_TOOLS: CompiledToolInfo[] = [
   {
-    id: 'agentboard_get_full_page_context',
-    file: 'tools/agentboard_get_full_page_context.js',
+    id: 'agentboard_read_page',
+    file: 'tools/agentboard_read_page.js',
     match: ['<all_urls>'],
-    version: '3.0.0',
+    version: '4.0.1',
     description:
-      'Get full page context beyond the default <page_context>. Returns comprehensive metadata and, where possible, page content extracted as clean markdown. Use when URL/title from <page_context> is insufficient.',
+      "Extract the current tab's content as clean markdown with metadata (title, author, date). Primary grounding context for pages. For external URLs, use fetch_url.",
   },
   {
     id: 'agentboard_youtube_transcript',
