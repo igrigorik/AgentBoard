@@ -53,23 +53,28 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
           input: processedArgs,
         });
 
-        // Extract the content from the MCP result
-        // MCP tools return { content: [...] } format
-        if (result && typeof result === 'object' && 'content' in result) {
-          // Return the content array or format it as needed
-          const content = (result as CallToolResult).content;
-          if (Array.isArray(content)) {
-            // If there's text content, extract it
-            const textContent = content.find(
-              (c): c is { type: 'text'; text: string } => c.type === 'text'
-            );
-            if (textContent) {
-              return textContent.text;
-            }
-            // Otherwise return the full content
-            return JSON.stringify(content);
+        // Extract content from MCP result
+        // Prefer structuredContent (typed data) over content (text summary)
+        if (result && typeof result === 'object') {
+          // structuredContent has richer typed data when the server provides it
+          // (MCP SDK types lag the spec — field exists at runtime via Zod passthrough)
+          if ('structuredContent' in result && result.structuredContent) {
+            return result.structuredContent;
           }
-          return content;
+
+          if ('content' in result) {
+            const content = (result as CallToolResult).content;
+            if (Array.isArray(content)) {
+              const textContent = content.find(
+                (c): c is { type: 'text'; text: string } => c.type === 'text'
+              );
+              if (textContent) {
+                return textContent.text;
+              }
+              return JSON.stringify(content);
+            }
+            return content;
+          }
         }
 
         return result;

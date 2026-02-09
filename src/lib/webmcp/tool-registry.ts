@@ -241,7 +241,9 @@ export class ToolRegistryManager {
         }
 
         const aiTool = convertMCPToAISDKTool(mcpTool, serverName);
-        this.addTool(mcpTool.name, {
+        // Prefix with server name so both AI and UI have origin context
+        // Execution uses original mcpTool.name via closure, not this key
+        this.addTool(`${serverName}_${mcpTool.name}`, {
           tool: aiTool,
           source: 'remote',
           origin: serverName,

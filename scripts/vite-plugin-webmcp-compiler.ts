@@ -308,14 +308,17 @@ function generateRegistry(tools: CompiledToolInfo[], outputPath: string): void {
   // Format tools array with proper TypeScript code style
   const toolsArray = tools
     .map((tool) => {
-      // Escape single quotes in description
-      const escapedDesc = tool.description.replace(/'/g, "\\'");
+      // Use double quotes for descriptions containing apostrophes,
+      // single quotes otherwise — matches prettier singleQuote behavior
+      const hasApostrophe = tool.description.includes("'");
+      const quote = hasApostrophe ? '"' : "'";
+      const desc = hasApostrophe ? tool.description.replace(/"/g, '\\"') : tool.description;
 
       // Format multi-line if description is long (> 80 chars)
       const descLine =
-        escapedDesc.length > 80
-          ? `description:\n      '${escapedDesc}',`
-          : `description: '${escapedDesc}',`;
+        desc.length > 80
+          ? `description:\n      ${quote}${desc}${quote},`
+          : `description: ${quote}${desc}${quote},`;
 
       return `  {
     id: '${tool.id}',

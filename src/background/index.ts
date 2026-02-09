@@ -474,6 +474,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
     case 'WEBMCP_GET_TOOLS': {
       // Get available tools from unified registry with original schemas
       (async () => {
+        await toolsReady;
         const { tabId: providedTabId } = request as WebMCPGetToolsMessage;
 
         // Get tab ID - either provided or from sidebar binding
@@ -673,6 +674,7 @@ chrome.runtime.onConnect.addListener((port) => {
         log.debug('[Background] Starting stream for agent:', msg.agentId, 'tab:', msg.tabId);
 
         try {
+          await toolsReady;
           const { agentId, tabId, messages } = msg;
 
           // Ensure the agent is available
@@ -823,6 +825,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // Listen for config changes from Options page
 configStorage.onChange(async (newConfig: StorageConfig) => {
+  await toolsReady; // Ensure initial load completes before reload
   const agents = await aiClient.getAvailableAgents();
   log.debug(
     '[Background] Config updated - available agents:',
@@ -843,12 +846,13 @@ configStorage.onChange(async (newConfig: StorageConfig) => {
   await toolRegistry.loadRemoteTools();
 });
 
-// Initialize system tools and MCP tools on startup
-(async () => {
+// Initialization gate — handlers that need tools await this to avoid
+// race between async MCP connection and immediate message handlers
+const toolsReady = (async () => {
   const toolRegistry = getToolRegistry();
   await toolRegistry.registerSystemTools();
   await toolRegistry.loadRemoteTools();
-  log.debug('[Background] Initialized tool registry with system and MCP tools');
+  log.debug('[Background] Tool registry initialized');
 })();
 
 export {};
