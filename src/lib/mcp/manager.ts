@@ -16,6 +16,7 @@ export interface MCPServerStatus {
     name: string;
     description?: string;
   }>;
+  instructions?: string;
 }
 
 export interface MCPToolExecution {
@@ -33,6 +34,7 @@ export interface MCPToolExecution {
 export class RemoteMCPManager {
   private clients: Map<string, MCPClientService> = new Map();
   private serverTools: Map<string, Tool[]> = new Map();
+  private serverInstructions: Map<string, string> = new Map();
   private config: MCPConfig | null = null;
 
   /**
@@ -76,9 +78,12 @@ export class RemoteMCPManager {
       const connectionStatus = await client.connect(serverConfig, name);
 
       if (connectionStatus.connected && connectionStatus.tools) {
-        // Store client and tools
+        // Store client, tools, and server instructions
         this.clients.set(name, client);
         this.serverTools.set(name, connectionStatus.tools);
+        if (connectionStatus.instructions) {
+          this.serverInstructions.set(name, connectionStatus.instructions);
+        }
 
         return {
           name,
@@ -87,6 +92,7 @@ export class RemoteMCPManager {
             name: tool.name,
             description: tool.description,
           })),
+          ...(connectionStatus.instructions && { instructions: connectionStatus.instructions }),
         };
       } else {
         return {
@@ -203,6 +209,7 @@ export class RemoteMCPManager {
       const tools = this.serverTools.get(name) || [];
 
       if (client?.isConnected()) {
+        const instructions = this.serverInstructions.get(name);
         statuses.push({
           name,
           status: 'connected',
@@ -210,6 +217,7 @@ export class RemoteMCPManager {
             name: t.name,
             description: t.description,
           })),
+          ...(instructions && { instructions }),
         });
       } else {
         statuses.push({
@@ -234,6 +242,26 @@ export class RemoteMCPManager {
   }
 
   /**
+   * Get aggregated MCP server instructions for system prompt injection.
+   * Returns formatted instructions from all connected servers that provide them,
+   * or undefined if no server has instructions.
+   */
+  getMCPInstructions(): string | undefined {
+    const parts: string[] = [];
+
+    for (const [name, instructions] of this.serverInstructions) {
+      const client = this.clients.get(name);
+      if (client?.isConnected()) {
+        parts.push(`## MCP Server: ${name}\n${instructions}`);
+      }
+    }
+
+    if (parts.length === 0) return undefined;
+
+    return `# MCP Server Instructions\n\n${parts.join('\n\n')}`;
+  }
+
+  /**
    * Disconnect all clients
    */
   async disconnectAll(): Promise<void> {
@@ -242,6 +270,7 @@ export class RemoteMCPManager {
     }
     this.clients.clear();
     this.serverTools.clear();
+    this.serverInstructions.clear();
   }
 
   /**

@@ -749,6 +749,36 @@ select:user-invalid:focus {
   margin-left: 12px;
 }
 
+.mcp-server-instructions {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.mcp-server-instructions summary {
+  cursor: pointer;
+  color: #6b7280;
+  font-style: italic;
+  user-select: none;
+}
+
+.mcp-server-instructions summary:hover {
+  color: #374151;
+}
+
+.mcp-server-instructions pre {
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  background: #f3f4f6;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #374151;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 /* Reasoning Configuration Section */
 .form-section {
   margin-top: 24px;

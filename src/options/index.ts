@@ -866,6 +866,22 @@ function displayMCPStatus(statuses: MCPServerStatus[]) {
       serverDiv.appendChild(toolsDiv);
     }
 
+    // Show server instructions as expandable section (if provided)
+    if (status.instructions) {
+      const details = document.createElement('details');
+      details.className = 'mcp-server-instructions';
+
+      const summary = document.createElement('summary');
+      summary.textContent = 'Server Instructions';
+      details.appendChild(summary);
+
+      const pre = document.createElement('pre');
+      pre.textContent = status.instructions;
+      details.appendChild(pre);
+
+      serverDiv.appendChild(details);
+    }
+
     statusContent.appendChild(serverDiv);
   }
 }

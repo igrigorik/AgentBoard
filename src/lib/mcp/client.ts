@@ -35,6 +35,7 @@ export interface MCPClientStatus {
   serverName: string;
   error?: string;
   tools?: Tool[];
+  instructions?: string;
 }
 
 /**
@@ -83,10 +84,14 @@ export class MCPClientService {
       // Fetch available tools immediately after connection
       const toolsList = await this.listTools();
 
+      // Extract server instructions (guidance for LLMs on how to use tools)
+      const instructions = this.client.getInstructions();
+
       return {
         connected: true,
         serverName: serverName || 'unknown',
         tools: toolsList,
+        ...(instructions && { instructions }),
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown connection error';

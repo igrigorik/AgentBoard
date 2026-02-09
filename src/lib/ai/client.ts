@@ -14,6 +14,7 @@ import type { AgentConfig } from '../storage/config';
 import type { AIProvider, ToolCall } from '../../types';
 import { ConfigStorage } from '../storage/config';
 import { getToolRegistry } from '../webmcp/tool-registry';
+import { getRemoteMCPManager } from '../mcp/manager';
 import { inferProviderFromModel, isLikelyOpenAICompatible } from './provider-utils';
 
 // Interface for API error objects that may have additional properties
@@ -260,9 +261,13 @@ export class AIClient {
       const modelFactory = this.createProviderForAgent(agent);
       const model = modelFactory();
 
-      // Add system prompt if configured
-      const messagesWithSystem: CoreMessage[] = agent.systemPrompt
-        ? [{ role: 'system', content: agent.systemPrompt }, ...messages]
+      // Build system prompt: agent config + MCP server instructions (if any)
+      const mcpInstructions = getRemoteMCPManager().getMCPInstructions();
+      const systemParts = [agent.systemPrompt, mcpInstructions].filter(Boolean);
+      const systemPrompt = systemParts.join('\n\n');
+
+      const messagesWithSystem: CoreMessage[] = systemPrompt
+        ? [{ role: 'system', content: systemPrompt }, ...messages]
         : messages;
 
       try {
