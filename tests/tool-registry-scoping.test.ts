@@ -108,6 +108,31 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(Object.keys(tab200Tools)).not.toContain('google_docs_document_context');
     });
 
+    it('should include tab-bound factory tools for any tab', () => {
+      const mockFactory = vi.fn((tabId: number) => ({ execute: vi.fn(), _tabId: tabId }));
+
+      // Access private tabBoundFactories to register a factory
+      (registry as any).tabBoundFactories.set('agentboard_navigate', mockFactory);
+
+      const tab100Tools = registry.getToolsForTab(100);
+      expect(Object.keys(tab100Tools)).toContain('agentboard_navigate');
+      expect(mockFactory).toHaveBeenCalledWith(100);
+
+      const tab200Tools = registry.getToolsForTab(200);
+      expect(Object.keys(tab200Tools)).toContain('agentboard_navigate');
+      expect(mockFactory).toHaveBeenCalledWith(200);
+    });
+
+    it('should NOT include tab-bound factory tools in getAllTools', () => {
+      const mockFactory = vi.fn(() => ({ execute: vi.fn() }));
+
+      (registry as any).tabBoundFactories.set('agentboard_navigate', mockFactory);
+
+      const allTools = registry.getAllTools();
+      expect(Object.keys(allTools)).not.toContain('agentboard_navigate');
+      expect(mockFactory).not.toHaveBeenCalled();
+    });
+
     it('should include remote MCP tools for all tabs', () => {
       const remoteTool = { execute: vi.fn() };
       const siteTool = { execute: vi.fn() };
@@ -277,6 +302,85 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(Object.keys(allTools)).toContain('system_tool');
       expect(Object.keys(allTools)).toContain('remote_tool');
       expect(Object.keys(allTools)).not.toContain('site_tool');
+    });
+  });
+
+  describe('onTabToolsChanged subscription', () => {
+    it('should fire callback when tools are removed for a tab', () => {
+      const callback = vi.fn();
+      registry.onTabToolsChanged(100, callback);
+
+      registry.addTool('tool1', {
+        tool: { execute: vi.fn() },
+        source: 'site',
+        origin: 'tab-100',
+      });
+
+      // removeToolsByOrigin should fire the tab change callback
+      registry.removeToolsByOrigin('tab-100');
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it('should fire callback when updateWebMCPTools replaces tools', () => {
+      const callback = vi.fn();
+      registry.onTabToolsChanged(100, callback);
+
+      // updateWebMCPTools calls removeToolsByOrigin(silent) + addTool + notifyTabChange
+      registry.updateWebMCPTools(
+        100,
+        [{ name: 'new_tool', description: 'A new tool' }],
+        'https://example.com'
+      );
+
+      // Fired exactly once: removeToolsByOrigin is silent, only the final notify fires
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not fire callback for different tab', () => {
+      const callback100 = vi.fn();
+      const callback200 = vi.fn();
+      registry.onTabToolsChanged(100, callback100);
+      registry.onTabToolsChanged(200, callback200);
+
+      registry.addTool('tool1', {
+        tool: { execute: vi.fn() },
+        source: 'site',
+        origin: 'tab-100',
+      });
+      registry.removeToolsByOrigin('tab-100');
+
+      expect(callback100).toHaveBeenCalled();
+      expect(callback200).not.toHaveBeenCalled();
+    });
+
+    it('should unsubscribe cleanly', () => {
+      const callback = vi.fn();
+      const unsub = registry.onTabToolsChanged(100, callback);
+
+      unsub();
+
+      registry.addTool('tool1', {
+        tool: { execute: vi.fn() },
+        source: 'site',
+        origin: 'tab-100',
+      });
+      registry.removeToolsByOrigin('tab-100');
+
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    it('should not fire for non-tab origins', () => {
+      const callback = vi.fn();
+      registry.onTabToolsChanged(100, callback);
+
+      registry.addTool('mcp_tool', {
+        tool: { execute: vi.fn() },
+        source: 'remote',
+        origin: 'mcp-server',
+      });
+      registry.removeToolsByOrigin('mcp-server');
+
+      expect(callback).not.toHaveBeenCalled();
     });
   });
 });

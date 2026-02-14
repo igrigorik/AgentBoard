@@ -9,7 +9,7 @@ import log from '../logger';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { streamText, type LanguageModel, CoreMessage, stepCountIs, type JSONValue } from 'ai';
+import { streamText, type LanguageModel, CoreMessage, type JSONValue } from 'ai';
 import type { AgentConfig } from '../storage/config';
 import type { AIProvider, ToolCall } from '../../types';
 import { ConfigStorage } from '../storage/config';
@@ -23,13 +23,19 @@ interface APIError extends Error {
   responseBody?: string | object;
 }
 
+export interface StreamFinishMetadata {
+  /** True when the stream ended because the tab's tool set changed mid-stream.
+   *  The caller should restart the conversation with fresh tools. */
+  toolsChanged: boolean;
+}
+
 export interface StreamCallbacks {
   // Text block callbacks - each text-start/end creates a separate message
   onTextBlockStart?: (blockId: string) => void;
   onTextBlockChunk?: (blockId: string, chunk: string) => void;
   onTextBlockEnd?: (blockId: string) => void;
 
-  onFinish: (fullText: string) => void;
+  onFinish: (fullText: string, metadata?: StreamFinishMetadata) => void;
   onError: (error: Error) => void;
 
   // Tool callbacks
@@ -270,14 +276,32 @@ export class AIClient {
         ? [{ role: 'system', content: systemPrompt }, ...messages]
         : messages;
 
+      // Subscribe to tab-scoped tool changes for the duration of this stream.
+      // When tools change (navigation, user toggle, etc.), we stop after the
+      // current step so the caller can restart with a correct tool set.
+      let toolsInvalidated = false;
+      let unsubToolChange: (() => void) | null = null;
+
+      if (tabId) {
+        const toolRegistry = getToolRegistry();
+        unsubToolChange = toolRegistry.onTabToolsChanged(tabId, () => {
+          toolsInvalidated = true;
+          log.warn(
+            `[AIClient] Tools changed for tab ${tabId} during stream — will stop after current step`
+          );
+        });
+      }
+
       try {
         // Get tools from unified registry (already loaded by background)
         log.warn('[AIClient] Getting tools from unified registry for tab:', tabId);
         const toolRegistry = getToolRegistry();
 
-        // Get tools scoped to the specific tab if tabId is provided
-        // This ensures each sidebar only sees tools from its associated tab
+        // Get tools scoped to the specific tab if tabId is provided.
+        // This ensures each sidebar only sees tools from its associated tab.
+        // Tab-bound system tools (e.g., navigate) are injected by the registry.
         const allTools = tabId ? toolRegistry.getToolsForTab(tabId) : toolRegistry.getAllTools();
+
         const hasTools = Object.keys(allTools).length > 0;
 
         if (hasTools) {
@@ -298,7 +322,9 @@ export class AIClient {
           abortSignal: this.abortController.signal,
           ...(hasTools && {
             tools: allTools,
-            stopWhen: stepCountIs(5), // Allow up to 5 steps of tool calling and response generation
+            // Stop after current step if tools changed (navigation, etc.)
+            // or after 5 steps as the normal safety limit.
+            stopWhen: ({ steps }) => toolsInvalidated || steps.length >= 5,
           }),
           // Add provider-specific reasoning options under providerOptions
           ...(reasoningOptions && {
@@ -604,7 +630,7 @@ export class AIClient {
             }
           }
 
-          callbacks.onFinish(_fullText);
+          callbacks.onFinish(_fullText, { toolsChanged: toolsInvalidated });
         } catch (iterationError) {
           log.error('[AIClient] Error during stream iteration:', iterationError);
 
@@ -637,6 +663,9 @@ export class AIClient {
       } catch (streamError) {
         log.error('[AIClient] Stream error:', streamError);
         throw streamError;
+      } finally {
+        // Always clean up the tool-change subscription to prevent leaks
+        unsubToolChange?.();
       }
 
       // Note: onFinish above handles the completion

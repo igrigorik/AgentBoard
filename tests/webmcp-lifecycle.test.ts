@@ -835,6 +835,154 @@ describe('TabManager', () => {
     });
   });
 
+  describe('waitForNavigation', () => {
+    it('should resolve when onCompleted fires for main frame', async () => {
+      // Capture the onCompleted/onErrorOccurred listeners added by waitForNavigation
+      const completedListeners: Function[] = [];
+      const errorListeners: Function[] = [];
+
+      (mockChrome.webNavigation as any).onCompleted = {
+        addListener: vi.fn((handler: Function) => completedListeners.push(handler)),
+        removeListener: vi.fn(),
+      };
+      (mockChrome.webNavigation as any).onErrorOccurred = {
+        addListener: vi.fn((handler: Function) => errorListeners.push(handler)),
+        removeListener: vi.fn(),
+      };
+
+      const promise = lifecycle.waitForNavigation(123);
+
+      // Simulate onCompleted for main frame
+      for (const listener of completedListeners) {
+        listener({ tabId: 123, frameId: 0, url: 'https://example.com/new' });
+      }
+
+      const result = await promise;
+      expect(result).toEqual({ url: 'https://example.com/new' });
+    });
+
+    it('should ignore subframe completions', async () => {
+      const completedListeners: Function[] = [];
+      const errorListeners: Function[] = [];
+
+      (mockChrome.webNavigation as any).onCompleted = {
+        addListener: vi.fn((handler: Function) => completedListeners.push(handler)),
+        removeListener: vi.fn(),
+      };
+      (mockChrome.webNavigation as any).onErrorOccurred = {
+        addListener: vi.fn((handler: Function) => errorListeners.push(handler)),
+        removeListener: vi.fn(),
+      };
+
+      const promise = lifecycle.waitForNavigation(123, 500);
+
+      // Subframe completion — should be ignored
+      for (const listener of completedListeners) {
+        listener({ tabId: 123, frameId: 1, url: 'https://example.com/iframe' });
+      }
+
+      // Different tab — should be ignored
+      for (const listener of completedListeners) {
+        listener({ tabId: 999, frameId: 0, url: 'https://other.com' });
+      }
+
+      // Now fire main frame
+      for (const listener of completedListeners) {
+        listener({ tabId: 123, frameId: 0, url: 'https://example.com/actual' });
+      }
+
+      const result = await promise;
+      expect(result).toEqual({ url: 'https://example.com/actual' });
+    });
+
+    it('should reject on navigation error', async () => {
+      const completedListeners: Function[] = [];
+      const errorListeners: Function[] = [];
+
+      (mockChrome.webNavigation as any).onCompleted = {
+        addListener: vi.fn((handler: Function) => completedListeners.push(handler)),
+        removeListener: vi.fn(),
+      };
+      (mockChrome.webNavigation as any).onErrorOccurred = {
+        addListener: vi.fn((handler: Function) => errorListeners.push(handler)),
+        removeListener: vi.fn(),
+      };
+
+      const promise = lifecycle.waitForNavigation(123);
+
+      // Simulate navigation error
+      for (const listener of errorListeners) {
+        listener({ tabId: 123, frameId: 0, url: 'https://bad-url.com' });
+      }
+
+      await expect(promise).rejects.toThrow('Navigation failed for tab 123');
+    });
+
+    it('should timeout after specified duration', async () => {
+      vi.useFakeTimers();
+
+      (mockChrome.webNavigation as any).onCompleted = {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      };
+      (mockChrome.webNavigation as any).onErrorOccurred = {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      };
+
+      const promise = lifecycle.waitForNavigation(123, 1000);
+
+      vi.advanceTimersByTime(1001);
+
+      await expect(promise).rejects.toThrow('Navigation timeout after 1000ms');
+
+      vi.useRealTimers();
+    });
+  });
+
+  describe('Navigation clears stale tool registry', () => {
+    it('should clear tool registry on onBeforeNavigate', () => {
+      // First, populate a tool registry for the tab
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+
+      let messageHandler: Function | null = null;
+      mockPort.onMessage.addListener = vi.fn((handler) => {
+        messageHandler = handler;
+      });
+
+      portHandlers.onConnect(mockPort);
+
+      // Register tools
+      if (messageHandler) {
+        (messageHandler as Function)({
+          type: 'webmcp',
+          payload: {
+            method: 'tools/listChanged',
+            params: {
+              tools: [{ name: 'old_tool', description: 'Tool from old page' }],
+              origin: 'https://old-page.com',
+            },
+          },
+        });
+      }
+
+      expect(lifecycle.getToolRegistry(123)).toBeDefined();
+      expect(lifecycle.getToolRegistry(123)?.tools).toHaveLength(1);
+
+      // Trigger navigation — should clear registry
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
+
+      expect(lifecycle.getToolRegistry(123)).toBeUndefined();
+    });
+  });
+
   describe('Script Injection', () => {
     it('should inject scripts in correct order and timing', async () => {
       mockChrome.tabs.get.mockResolvedValue({

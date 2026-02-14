@@ -187,6 +187,41 @@ export class TabManager {
   }
 
   /**
+   * Wait for a navigation to complete on a tab.
+   * Resolves with the final URL after onCompleted fires (main frame).
+   * Rejects on navigation error or timeout.
+   */
+  async waitForNavigation(tabId: number, timeoutMs: number = 30000): Promise<{ url: string }> {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        chrome.webNavigation.onCompleted.removeListener(onCompleted);
+        chrome.webNavigation.onErrorOccurred.removeListener(onError);
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Navigation timeout after ${timeoutMs}ms for tab ${tabId}`));
+      }, timeoutMs);
+
+      const onCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
+        if (details.tabId !== tabId || details.frameId !== 0) return;
+        cleanup();
+        resolve({ url: details.url });
+      };
+
+      const onError = (details: chrome.webNavigation.WebNavigationFramedErrorCallbackDetails) => {
+        if (details.tabId !== tabId || details.frameId !== 0) return;
+        cleanup();
+        reject(new Error(`Navigation failed for tab ${tabId}: ${details.url}`));
+      };
+
+      chrome.webNavigation.onCompleted.addListener(onCompleted);
+      chrome.webNavigation.onErrorOccurred.addListener(onError);
+    });
+  }
+
+  /**
    * Handle messages from content scripts
    */
   private handleContentMessage(tabId: number, msg: WebMCPMessage): void {
@@ -274,7 +309,15 @@ export class TabManager {
       if (details.frameId !== 0) return; // Main frame only
 
       this.cancelPendingCallsForTab(details.tabId);
+      // Clear stale tool registry so requestToolsAndWait doesn't return old data
+      this.toolRegistries.delete(details.tabId);
       this.pendingInjections.add(details.tabId);
+
+      // Clear stale tools from the unified registry immediately.
+      // This fires notifyTabChange → sets toolsInvalidated in any active stream,
+      // ensuring the stream stops before calling stale tools on the old page.
+      const unifiedRegistry = getToolRegistry();
+      unifiedRegistry.removeToolsByOrigin(`tab-${details.tabId}`);
 
       log.debug(`[WebMCP Lifecycle] Navigation starting for tab ${details.tabId}`);
     });

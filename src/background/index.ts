@@ -778,11 +778,12 @@ chrome.runtime.onConnect.addListener((port) => {
                 });
               }
             },
-            onFinish: (fullText) => {
+            onFinish: (fullText, metadata) => {
               if (connection.isStreaming) {
                 port.postMessage({
                   type: 'STREAM_COMPLETE',
-                  fullResponse: fullText, // Pass the actual full text from AI SDK!
+                  fullResponse: fullText,
+                  toolsChanged: metadata?.toolsChanged || false,
                 });
                 connection.isStreaming = false;
               }

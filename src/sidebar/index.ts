@@ -39,6 +39,11 @@ let messageHistory: ChatMessage[] = [];
 let currentSession: StreamingSession | null = null;
 const configStorage = ConfigStorage.getInstance();
 
+// Auto-continuation: when tools change mid-stream (e.g., navigation),
+// the stream stops and restarts with fresh tools. Capped to prevent loops.
+let autoContinuationCount = 0;
+const MAX_AUTO_CONTINUATIONS = 3;
+
 // Image attachment state
 interface ImageAttachment {
   id: string;
@@ -610,6 +615,9 @@ async function sendToAI() {
   // When user sends a message, assume they want to see the response
   isUserAtBottom = true;
 
+  // Reset auto-continuation counter for new user-initiated messages
+  autoContinuationCount = 0;
+
   // Set loading state
   isLoading = true;
   updateSendButton();
@@ -871,6 +879,49 @@ async function streamAIResponse() {
           if (currentSession) {
             currentSession.port.disconnect();
             currentSession = null;
+          }
+
+          // Auto-continue if tools changed mid-stream (e.g., after navigation).
+          // The AI needs to restart with fresh tools to continue the task.
+          // Capped to prevent infinite loops if tools keep changing.
+          if (msg.toolsChanged && autoContinuationCount < MAX_AUTO_CONTINUATIONS) {
+            autoContinuationCount++;
+            log.info(
+              `[Sidebar] Tools changed during stream — auto-continuing (${autoContinuationCount}/${MAX_AUTO_CONTINUATIONS})`
+            );
+
+            // Build a summary of completed tool actions so the AI has context
+            const completedCalls = (assistantMsg.toolCalls || []).filter(
+              (tc: ToolCall) => tc.status === 'success'
+            );
+            const toolSummary = completedCalls
+              .map(
+                (tc: ToolCall) =>
+                  `${tc.toolName}: ${typeof tc.output === 'string' ? tc.output : JSON.stringify(tc.output)}`
+              )
+              .join('; ');
+
+            // Add a continuation context message so the AI knows what happened.
+            // Sent as a user message since system messages are filtered from history.
+            const contextText =
+              completedCalls.length > 0
+                ? `[Completed actions: ${toolSummary}. The page has changed and tools have been refreshed. Continue with the task.]`
+                : '[The page has changed and tools have been refreshed. Continue with the task.]';
+            const contMsg: ChatMessage = {
+              id: globalThis.crypto.randomUUID(),
+              role: 'user',
+              content: contextText,
+              timestamp: Date.now(),
+            };
+            messageHistory.push(contMsg);
+
+            // Chain the continuation — don't reset isLoading
+            streamAIResponse().then(resolve).catch(reject);
+            break;
+          }
+
+          if (msg.toolsChanged) {
+            log.warn('[Sidebar] Max auto-continuations reached, stopping');
           }
 
           isLoading = false;

@@ -16,6 +16,7 @@ import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
 import { ConfigStorage } from '../storage/config'; // Still needed for remote MCP tools
 import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
+import { createNavigateTool, NAVIGATE_TOOL_NAME } from './tools/navigate';
 import { calculateSpecificityScore } from './tool-patterns';
 
 export type ToolSourceType = 'site' | 'user' | 'remote' | 'system';
@@ -35,6 +36,22 @@ export interface ToolWithMetadata {
 export class ToolRegistryManager {
   private tools = new Map<string, ToolWithMetadata>();
   private listeners = new Set<(tools: Record<string, AISDKTool>) => void>();
+
+  /**
+   * Tab-bound system tool factories: (tabId) => AISDKTool.
+   * These tools need tab context (e.g., navigate captures tabId in a closure)
+   * so they can't be pre-registered as static entries. Instead, getToolsForTab
+   * invokes these factories per-call to create ephemeral tool instances.
+   */
+  private tabBoundFactories = new Map<string, (tabId: number) => AISDKTool>();
+
+  /**
+   * Tab-scoped tool change subscriptions.
+   * Fires when tools for a specific tab are added, removed, or replaced.
+   * Primary consumer: streamChat — stops the active stream when tools change
+   * so the conversation can restart with a correct tool set.
+   */
+  private tabChangeCallbacks = new Map<number, Set<() => void>>();
 
   /**
    * Register system tools on initialization
@@ -61,7 +78,16 @@ export class ToolRegistryManager {
       origin: 'system',
     });
 
-    log.info('[ToolRegistry] Registered system tools:', [FETCH_URL_TOOL_NAME]);
+    // Register tab-bound system tools (created per-tab via factory)
+    const isNavEnabled = await configStorage.isBuiltinToolEnabled(NAVIGATE_TOOL_NAME);
+    if (isNavEnabled) {
+      this.tabBoundFactories.set(NAVIGATE_TOOL_NAME, createNavigateTool);
+    }
+
+    log.info('[ToolRegistry] Registered system tools:', [
+      FETCH_URL_TOOL_NAME,
+      ...(isNavEnabled ? [NAVIGATE_TOOL_NAME] : []),
+    ]);
   }
 
   /**
@@ -89,7 +115,7 @@ export class ToolRegistryManager {
   /**
    * Remove all tools from a specific origin
    */
-  removeToolsByOrigin(origin: string): void {
+  removeToolsByOrigin(origin: string, { silent = false } = {}): void {
     const toRemove: string[] = [];
     for (const [name, meta] of this.tools.entries()) {
       if (meta.origin === origin) {
@@ -104,6 +130,15 @@ export class ToolRegistryManager {
     if (toRemove.length > 0) {
       this.notifyListeners();
       log.warn(`[ToolRegistry] Removed ${toRemove.length} tools from origin ${origin}`);
+
+      // Skip tab-scoped notification when caller will send its own
+      // (e.g. updateWebMCPTools notifies after new tools are registered).
+      if (!silent) {
+        const tabMatch = origin.match(/^tab-(\d+)$/);
+        if (tabMatch) {
+          this.notifyTabChange(Number(tabMatch[1]));
+        }
+      }
     }
   }
 
@@ -154,6 +189,13 @@ export class ToolRegistryManager {
       (_, meta) =>
         meta.origin === `tab-${tabId}` || meta.source === 'remote' || meta.source === 'system'
     );
+
+    // Inject tab-bound system tools (ephemeral, created per-call with tabId)
+    for (const [name, factory] of this.tabBoundFactories) {
+      tools[name] = factory(tabId);
+      debug.push(`${name}:factory`);
+    }
+
     log.info(`[ToolRegistry] Providing ${debug.length} tools for tab ${tabId}:`, debug);
     return tools;
   }
@@ -170,6 +212,50 @@ export class ToolRegistryManager {
    */
   removeListener(listener: (tools: Record<string, AISDKTool>) => void): void {
     this.listeners.delete(listener);
+  }
+
+  /**
+   * Subscribe to tool changes for a specific tab.
+   * Returns an unsubscribe function — call it when done (e.g., stream ends).
+   *
+   * Design: Separate from the global `addListener` because consumers like
+   * streamChat only care about their own tab's tools changing, not all tools.
+   */
+  onTabToolsChanged(tabId: number, callback: () => void): () => void {
+    if (!this.tabChangeCallbacks.has(tabId)) {
+      this.tabChangeCallbacks.set(tabId, new Set());
+    }
+    this.tabChangeCallbacks.get(tabId)!.add(callback);
+
+    return () => {
+      const callbacks = this.tabChangeCallbacks.get(tabId);
+      if (callbacks) {
+        callbacks.delete(callback);
+        if (callbacks.size === 0) {
+          this.tabChangeCallbacks.delete(tabId);
+        }
+      }
+    };
+  }
+
+  /**
+   * Notify subscribers that a tab's tools changed.
+   * Called by removeToolsByOrigin (standalone) and updateWebMCPTools (after new tools are in).
+   */
+  private notifyTabChange(tabId: number): void {
+    const callbacks = this.tabChangeCallbacks.get(tabId);
+    if (!callbacks || callbacks.size === 0) return;
+
+    log.info(
+      `[ToolRegistry] Notifying ${callbacks.size} subscriber(s) of tool change for tab ${tabId}`
+    );
+    for (const cb of callbacks) {
+      try {
+        cb();
+      } catch (error) {
+        log.error('[ToolRegistry] Error in tab change callback:', error);
+      }
+    }
   }
 
   /**
@@ -268,8 +354,8 @@ export class ToolRegistryManager {
     }>,
     origin: string
   ): void {
-    // Remove existing tools from this tab
-    this.removeToolsByOrigin(`tab-${tabId}`);
+    // Remove existing tools from this tab (silent: notify once after new tools are in)
+    this.removeToolsByOrigin(`tab-${tabId}`, { silent: true });
 
     // Convert and add each WebMCP tool
     for (const webmcpTool of tools) {
@@ -286,6 +372,9 @@ export class ToolRegistryManager {
       `[ToolRegistry] Added ${tools.length} WebMCP tools from tab ${tabId} (${origin}):`,
       tools.map((t) => t.name)
     );
+
+    // Fire tab-scoped change notification after new tools are fully registered
+    this.notifyTabChange(tabId);
   }
 }
 

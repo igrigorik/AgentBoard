@@ -64,6 +64,9 @@ interface StreamCompleteMessage {
   type: 'STREAM_COMPLETE';
   fullResponse: string;
   connectionId?: string;
+  /** True when the stream ended because tab tools changed (e.g., navigation).
+   *  Sidebar should auto-continue with fresh tools. */
+  toolsChanged?: boolean;
 }
 
 interface StreamErrorMessage {
