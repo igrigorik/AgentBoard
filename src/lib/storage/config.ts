@@ -3,6 +3,8 @@
  * Agent-centric configuration for AI assistants
  */
 
+import type { StoredEvalSuite, EvalSuite } from '../eval/types';
+
 export type AIProvider = 'openai' | 'anthropic' | 'google';
 
 export interface ReasoningConfig {
@@ -45,6 +47,7 @@ export interface StorageConfig {
   mcpConfig?: MCPConfig;
   userScripts?: UserScript[]; // WebMCP user-defined tool scripts
   builtinScripts?: BuiltinScript[]; // Built-in tool state (only stores user overrides)
+  evalSuites?: StoredEvalSuite[]; // Imported eval suite definitions
   logLevel?: string; // Global log level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent'
 }
 
@@ -403,5 +406,36 @@ export class ConfigStorage {
     }
 
     await this.set({ builtinScripts: scripts });
+  }
+
+  // Eval Suite management methods
+  async getEvalSuites(): Promise<StoredEvalSuite[]> {
+    const config = await this.get();
+    return config.evalSuites || [];
+  }
+
+  async addEvalSuite(suite: EvalSuite, fileName?: string): Promise<string> {
+    const suites = await this.getEvalSuites();
+    const id = globalThis.crypto.randomUUID();
+    const stored: StoredEvalSuite = {
+      ...suite,
+      id,
+      fileName,
+      importedAt: Date.now(),
+    };
+
+    await this.set({ evalSuites: [...suites, stored] });
+    return id;
+  }
+
+  async deleteEvalSuite(id: string): Promise<void> {
+    const suites = await this.getEvalSuites();
+    const filtered = suites.filter((s) => s.id !== id);
+
+    if (filtered.length === suites.length) {
+      throw new Error(`Eval suite ${id} not found`);
+    }
+
+    await this.set({ evalSuites: filtered });
   }
 }

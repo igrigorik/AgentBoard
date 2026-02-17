@@ -537,6 +537,66 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       return true; // Now async to support getBoundTabIdForSidebar
     }
 
+    case 'EVAL_JUDGE': {
+      // Eval judge: use LLM to verify post-conditions of an eval scenario
+      (async () => {
+        try {
+          const { agentId, prompt, assistantResponse, toolCalls, postConditions } = request;
+
+          const systemPrompt = `You are an evaluation judge. Given a user prompt, assistant response, tool calls made, and expected post-conditions, determine whether the post-conditions were met.
+
+Respond ONLY with a JSON object (no markdown fences, no extra text):
+{"verdict": "pass" or "fail", "score": 0.0 to 1.0, "reasoning": "brief explanation"}`;
+
+          const toolCallsSummary = toolCalls
+            .map(
+              (tc: { toolName: string; input: unknown; output: unknown; status: string }) =>
+                `- ${tc.toolName}(${JSON.stringify(tc.input)}) → ${tc.status}: ${JSON.stringify(tc.output)}`
+            )
+            .join('\n');
+
+          const userMsg = `## User Prompt
+${prompt}
+
+## Assistant Response
+${assistantResponse}
+
+## Tool Calls
+${toolCallsSummary || '(none)'}
+
+## Post-Conditions to Verify
+${postConditions}`;
+
+          const responseText = await aiClient.generateTextForAgent(agentId, systemPrompt, userMsg, {
+            temperature: 0,
+          });
+
+          // Parse JSON from response (strip markdown fences if present)
+          const cleaned = responseText
+            .replace(/```(?:json)?\s*/g, '')
+            .replace(/```\s*/g, '')
+            .trim();
+          const parsed = JSON.parse(cleaned);
+
+          sendResponse({
+            success: true,
+            verdict: parsed.verdict || 'fail',
+            score: typeof parsed.score === 'number' ? parsed.score : 0,
+            reasoning: parsed.reasoning || '',
+          });
+        } catch (error) {
+          log.error('[Background] EVAL_JUDGE error:', error);
+          sendResponse({
+            success: true,
+            score: 0,
+            verdict: 'fail',
+            reasoning: `Failed to parse judge response: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          });
+        }
+      })();
+      return true;
+    }
+
     default:
       log.debug('Unknown message type:', request.type);
       return false; // No async response needed

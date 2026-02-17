@@ -12,6 +12,8 @@ import { ReasoningBox } from './ReasoningBox';
 import { TextBox } from './TextBox';
 import { StreamingMarkdownRenderer } from './StreamingMarkdownRenderer';
 import { CommandRegistry, CommandProcessor, createBuiltinCommands } from '../lib/commands';
+import { EvalRunner, type SidebarInterface } from '../lib/eval/runner';
+import { EvalReportBox } from './EvalReportBox';
 
 // Streaming session interface to encapsulate all streaming state
 interface StreamingSession {
@@ -58,6 +60,9 @@ let pendingAttachments: ImageAttachment[] = [];
 // Command system
 let commandRegistry: CommandRegistry;
 let commandProcessor: CommandProcessor;
+
+// Eval mode state
+let activeEvalRunner: EvalRunner | null = null;
 
 // Scroll management state
 let isUserAtBottom = true; // Initially at bottom
@@ -531,6 +536,15 @@ async function handleSendMessage() {
   // Require either text or attachments
   if (!text && pendingAttachments.length === 0) return;
   if (isLoading) return;
+
+  // Intercept /eval command before the command processor
+  if (text === '/eval' || text.startsWith('/eval ')) {
+    messageInput.value = '';
+    messageInput.style.height = '88px';
+    const suiteName = text.startsWith('/eval ') ? text.slice(6).trim() : undefined;
+    startEvalMode(suiteName || undefined);
+    return;
+  }
 
   // Clear input immediately for better UX
   messageInput.value = '';
@@ -1204,11 +1218,19 @@ function cancelCurrentStream() {
   }
 }
 
-// Cancel current stream on Escape OR clear attachments
+// Cancel current stream on Escape OR clear attachments OR abort eval
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    // Priority 0: Abort active eval
+    if (activeEvalRunner) {
+      activeEvalRunner.abort();
+      activeEvalRunner = null;
+      isLoading = false;
+      updateSendButton();
+      log.info('[Sidebar] Eval run aborted');
+    }
     // Priority 1: Cancel active stream
-    if (currentSession) {
+    else if (currentSession) {
       cancelCurrentStream();
     }
     // Priority 2: Clear pending attachments
@@ -1219,5 +1241,105 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+
+/**
+ * Start eval mode: load suite, run all scenarios, show report.
+ */
+async function startEvalMode(suiteName?: string): Promise<void> {
+  if (isLoading) {
+    addMessage('error', 'Cannot start eval while a message is loading.');
+    return;
+  }
+
+  // Load eval suites from storage
+  const suites = await configStorage.getEvalSuites();
+  if (suites.length === 0) {
+    addMessage('error', 'No eval suites imported. Upload one in Settings.');
+    return;
+  }
+
+  // Pick suite: by name or first available
+  const suite = suiteName
+    ? suites.find((s) => s.name.toLowerCase() === suiteName.toLowerCase())
+    : suites[0];
+
+  if (!suite) {
+    addMessage(
+      'error',
+      `Eval suite "${suiteName}" not found. Available: ${suites.map((s) => s.name).join(', ')}`
+    );
+    return;
+  }
+
+  if (!currentAgentId) {
+    addMessage('error', 'No agent selected. Select an agent before running evals.');
+    return;
+  }
+
+  // Clear conversation and set up report UI
+  clearConversation();
+  isLoading = true;
+  updateSendButton();
+
+  const reportBox = new EvalReportBox();
+  messagesContainer.appendChild(reportBox.getElement());
+
+  // Create sidebar interface adapter
+  const sidebarAdapter: SidebarInterface = {
+    attachedTabId,
+    currentAgentId,
+    getMessageHistory: () => messageHistory,
+    clearConversation: () => {
+      // Clear without adding welcome message (we manage UI ourselves during eval)
+      messageHistory = [];
+      // Remove everything except the report box
+      const children = Array.from(messagesContainer.children);
+      for (const child of children) {
+        if (!child.classList.contains('eval-report-box')) {
+          child.remove();
+        }
+      }
+      if (currentSession) {
+        currentSession.port.disconnect();
+        currentSession = null;
+      }
+      isUserAtBottom = true;
+    },
+    sendMessage: async (text: string) => {
+      // Create and send message, waiting for stream completion
+      const content = text;
+      const userMsg: ChatMessage = {
+        id: globalThis.crypto.randomUUID(),
+        role: 'user',
+        content,
+        timestamp: Date.now(),
+      };
+      messageHistory.push(userMsg);
+      await streamAIResponse();
+    },
+  };
+
+  // Run eval
+  const runner = new EvalRunner(sidebarAdapter);
+  activeEvalRunner = runner;
+
+  runner.setProgressCallback((progress) => {
+    reportBox.updateProgress(progress);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  });
+
+  try {
+    const result = await runner.run(suite);
+    reportBox.showSummary(result);
+  } catch (error) {
+    log.error('[Sidebar] Eval run failed:', error);
+    reportBox.showError(error instanceof Error ? error.message : 'Eval run failed');
+  } finally {
+    activeEvalRunner = null;
+    isLoading = false;
+    updateSendButton();
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+}
 
 export {};

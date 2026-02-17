@@ -9,7 +9,7 @@ import log from '../logger';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { streamText, type LanguageModel, CoreMessage, type JSONValue } from 'ai';
+import { streamText, generateText, type LanguageModel, CoreMessage, type JSONValue } from 'ai';
 import type { AgentConfig } from '../storage/config';
 import type { AIProvider, ToolCall } from '../../types';
 import { ConfigStorage } from '../storage/config';
@@ -756,6 +756,43 @@ export class AIClient {
    */
   cancelStream(): void {
     this.abortController?.abort();
+  }
+
+  /**
+   * Non-streaming text generation for a specific agent.
+   * Used for eval judge and other non-interactive use cases.
+   */
+  async generateTextForAgent(
+    agentId: string,
+    systemPrompt: string,
+    userMessage: string,
+    options?: { temperature?: number }
+  ): Promise<string> {
+    const agent = await this.configStorage.getAgent(agentId);
+    if (!agent) {
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    if (!agent.apiKey && !agent.endpoint) {
+      throw new Error(`No API key or endpoint configured for agent "${agent.name}"`);
+    }
+
+    const modelFactory = this.createProviderForAgent(agent);
+    const model = modelFactory();
+
+    const messages: CoreMessage[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ];
+
+    const result = await generateText({
+      model,
+      messages,
+      temperature: options?.temperature ?? 0,
+      maxRetries: 2,
+    });
+
+    return result.text;
   }
 
   /**

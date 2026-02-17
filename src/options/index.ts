@@ -18,6 +18,7 @@ import { initializeWebMCPScripts } from './webmcp-scripts';
 import { initializeCommands } from './commands';
 import { openModal, closeModal, setupBackdropHandler } from './modal-manager';
 import { initializeBackupRestore } from './backup-restore';
+import { initEvalSuites } from './eval-suites';
 import {
   createCard,
   setupModalFooter,
@@ -41,6 +42,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await initializeWebMCPScripts();
   await initializeCommands();
   await initializeBackupRestore();
+  await initEvalSuites();
 });
 
 async function renderAgents() {
