@@ -34,6 +34,7 @@ export interface AgentConfig {
   systemPrompt: string;
   temperature: number;
   maxTokens: number;
+  maxSteps?: number; // Tool call steps per turn (1-50, default 10)
   isDefault?: boolean;
   reasoning?: ReasoningConfig;
 }
@@ -111,6 +112,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     systemPrompt: BASE_SYSTEM_PROMPT,
     temperature: 0.7,
     maxTokens: 4000,
+    maxSteps: 10,
     isDefault: true,
     reasoning: {
       enabled: true,
@@ -127,6 +129,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     systemPrompt: BASE_SYSTEM_PROMPT,
     temperature: 0.7,
     maxTokens: 4096,
+    maxSteps: 10,
     reasoning: {
       enabled: true,
       anthropic: {
@@ -142,6 +145,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     systemPrompt: BASE_SYSTEM_PROMPT,
     temperature: 0.8,
     maxTokens: 2048,
+    maxSteps: 10,
     reasoning: {
       enabled: true,
       google: {

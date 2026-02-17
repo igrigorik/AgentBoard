@@ -323,8 +323,8 @@ export class AIClient {
           ...(hasTools && {
             tools: allTools,
             // Stop after current step if tools changed (navigation, etc.)
-            // or after 5 steps as the normal safety limit.
-            stopWhen: ({ steps }) => toolsInvalidated || steps.length >= 5,
+            // or after agent-configured step limit (default 5).
+            stopWhen: ({ steps }) => toolsInvalidated || steps.length >= (agent.maxSteps ?? 10),
           }),
           // Add provider-specific reasoning options under providerOptions
           ...(reasoningOptions && {

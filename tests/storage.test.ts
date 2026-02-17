@@ -154,6 +154,61 @@ describe('ConfigStorage', () => {
     expect(instance1).toBe(instance2);
   });
 
+  describe('maxSteps configuration', () => {
+    it('should persist maxSteps when saving an agent', async () => {
+      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+        if (callback) callback({});
+        return Promise.resolve({});
+      });
+
+      const agentData = {
+        name: 'Steps Agent',
+        provider: 'openai' as const,
+        apiKey: 'sk-test',
+        model: 'gpt-4',
+        systemPrompt: 'Test',
+        temperature: 0.7,
+        maxTokens: 2000,
+        maxSteps: 10,
+      };
+
+      await configStorage.addAgent(agentData);
+
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({
+        config: expect.objectContaining({
+          agents: expect.arrayContaining([expect.objectContaining({ maxSteps: 10 })]),
+        }),
+      });
+    });
+
+    it('should load agent without maxSteps (backward compat)', async () => {
+      // Simulate a legacy config saved before maxSteps existed
+      const legacyAgent: AgentConfig = {
+        id: 'legacy-1',
+        name: 'Legacy Agent',
+        provider: 'openai',
+        apiKey: 'sk-test',
+        model: 'gpt-4',
+        systemPrompt: 'Test',
+        temperature: 0.7,
+        maxTokens: 2000,
+        // maxSteps intentionally missing
+      };
+
+      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+        const result = { config: { agents: [legacyAgent] } };
+        if (callback) callback(result);
+        return Promise.resolve(result);
+      });
+
+      const agent = await configStorage.getAgent('legacy-1');
+      expect(agent).toBeDefined();
+      // maxSteps is undefined — callers use ?? 5 fallback
+      expect(agent!.maxSteps).toBeUndefined();
+      expect(agent!.maxSteps ?? 10).toBe(10);
+    });
+  });
+
   describe('Proxy URL and API Key validation', () => {
     it('should accept agent with API key and no proxy', async () => {
       // Mock empty storage initially

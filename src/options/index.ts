@@ -283,6 +283,9 @@ async function populateForm(agentId: string) {
     agent.temperature.toString();
   (document.getElementById('agent-max-tokens') as HTMLInputElement).value =
     agent.maxTokens.toString();
+  (document.getElementById('agent-max-steps') as HTMLInputElement).value = (
+    agent.maxSteps ?? 10
+  ).toString();
   (document.getElementById('agent-is-default') as HTMLInputElement).checked =
     agent.isDefault || false;
 
@@ -313,6 +316,12 @@ function setDefaultFormValues() {
   const maxTokensEl = document.getElementById('agent-max-tokens') as HTMLInputElement;
   if (maxTokensEl) {
     maxTokensEl.value = '4000';
+  }
+
+  // Set default max steps
+  const maxStepsEl = document.getElementById('agent-max-steps') as HTMLInputElement;
+  if (maxStepsEl) {
+    maxStepsEl.value = '10';
   }
 
   // Clear reasoning configuration
@@ -365,6 +374,10 @@ async function saveAgent() {
       ),
       maxTokens: parseInt(
         (document.getElementById('agent-max-tokens') as HTMLInputElement).value,
+        10
+      ),
+      maxSteps: parseInt(
+        (document.getElementById('agent-max-steps') as HTMLInputElement).value,
         10
       ),
       isDefault: (document.getElementById('agent-is-default') as HTMLInputElement).checked,
