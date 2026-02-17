@@ -127,6 +127,7 @@ export function convertWebMCPToAISDKTool(
     name: string;
     description?: string;
     inputSchema?: unknown;
+    annotations?: Record<string, unknown>;
   },
   tabId: number // The tab where this tool was registered
 ) {

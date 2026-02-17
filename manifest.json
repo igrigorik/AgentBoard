@@ -36,6 +36,15 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://localhost/*"],
+      "js": ["src/content-scripts/webmcp-polyfill.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    }
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   }

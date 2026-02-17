@@ -120,15 +120,16 @@ describe('WebMCP Script Injection Timing', () => {
   });
 
   describe('Core Script Injection Order', () => {
-    it('should inject scripts in correct order: polyfill → relay → bridge', async () => {
+    it('should inject scripts in correct order: relay → tools → bridge', async () => {
       const tabId = 123;
 
       // Inject scripts
       await lifecycleManager.ensureContentScriptReady(tabId);
 
-      // Verify: relay + polyfill + 1 matching tool + bridge = 4 scripts
+      // Verify: relay + 1 matching tool + bridge = 3 scripts
+      // (polyfill now injected via manifest content_scripts, not programmatically)
       // (youtube_transcript only matches YouTube URLs, not example.com)
-      expect(injectionLog).toHaveLength(4);
+      expect(injectionLog).toHaveLength(3);
 
       // 1. Relay FIRST (CRITICAL: must be listening before bridge sends initial snapshot)
       expect(injectionLog[0]).toEqual({
@@ -138,21 +139,13 @@ describe('WebMCP Script Injection Timing', () => {
         files: ['content-scripts/relay.js'],
       });
 
-      // 2. Polyfill SECOND (provides window.agent)
-      expect(injectionLog[1]).toEqual({
-        type: 'script',
-        timing: 'document_start',
-        world: 'MAIN',
-        files: ['content-scripts/webmcp-polyfill.js'],
-      });
+      // 2. One matching compiled tool (inject after polyfill which is already present via manifest)
+      expect(injectionLog[1]?.world).toBe('MAIN');
+      expect(injectionLog[1]?.timing).toBe('document_idle');
+      expect(injectionLog[1]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
 
-      // 3. One matching compiled tool (inject after polyfill)
-      expect(injectionLog[2]?.world).toBe('MAIN');
-      expect(injectionLog[2]?.timing).toBe('document_idle');
-      expect(injectionLog[2]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
-
-      // 4. Bridge LAST (sends initial snapshot to relay)
-      expect(injectionLog[3]).toEqual({
+      // 3. Bridge LAST (sends initial snapshot to relay)
+      expect(injectionLog[2]).toEqual({
         type: 'script',
         timing: 'document_idle',
         world: 'MAIN',
@@ -160,17 +153,18 @@ describe('WebMCP Script Injection Timing', () => {
       });
     });
 
-    it('should inject polyfill before any page scripts can run', async () => {
+    it('should inject polyfill via manifest content_scripts (not programmatically)', async () => {
       const tabId = 456;
 
       await lifecycleManager.ensureContentScriptReady(tabId);
 
-      // Polyfill injection must have injectImmediately: true (it's call #2 now, relay is #1)
-      const polyfillCall = mockChrome.scripting.executeScript.mock.calls[1][0];
-      expect(polyfillCall.injectImmediately).toBe(true);
-      expect(polyfillCall.world).toBe('MAIN');
-
-      // This ensures window.agent is available before tools register
+      // Polyfill is no longer injected programmatically — it comes from manifest content_scripts.
+      // Verify no executeScript call references the polyfill.
+      const allCalls = mockChrome.scripting.executeScript.mock.calls;
+      const polyfillCalls = allCalls.filter(
+        (call: any) => call[0]?.files?.[0] === 'content-scripts/webmcp-polyfill.js'
+      );
+      expect(polyfillCalls).toHaveLength(0);
     });
 
     it('should inject relay early for message passing setup', async () => {
@@ -494,10 +488,10 @@ describe('WebMCP Script Injection Timing', () => {
       // Should inject same number of scripts
       expect(injectionLog.length).toBe(initialInjectionCount);
 
-      // NEW order: relay → polyfill → tools → bridge (fixed for race condition)
+      // Order: relay → tools → bridge (polyfill via manifest content_scripts)
       expect(injectionLog[0].files).toEqual(['content-scripts/relay.js']);
-      expect(injectionLog[1].files).toEqual(['content-scripts/webmcp-polyfill.js']);
-      expect(injectionLog[3].files).toEqual(['content-scripts/page-bridge.js']);
+      expect(injectionLog[1]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
+      expect(injectionLog[2].files).toEqual(['content-scripts/page-bridge.js']);
     });
 
     it('should handle rapid navigations without double injection', async () => {

@@ -262,9 +262,10 @@ describe('TabManager', () => {
       // Wait for async injection
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Should inject: relay + polyfill + 1 matching tool + bridge = 4 scripts
+      // Should inject: relay + 1 matching tool + bridge = 3 scripts
+      // (polyfill now injected via manifest content_scripts, not programmatically)
       // (youtube_transcript only matches youtube.com, not example.com)
-      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(4);
+      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(3);
 
       // Check relay injection (FIRST - critical for race condition fix!)
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledWith({
@@ -272,14 +273,6 @@ describe('TabManager', () => {
         world: 'ISOLATED',
         injectImmediately: true,
         files: ['content-scripts/relay.js'],
-      });
-
-      // Check polyfill injection (SECOND)
-      expect(mockChrome.scripting.executeScript).toHaveBeenCalledWith({
-        target: { tabId: 123, frameIds: [0] },
-        world: 'MAIN',
-        injectImmediately: true,
-        files: ['content-scripts/webmcp-polyfill.js'],
       });
 
       // Check bridge injection
@@ -994,7 +987,7 @@ describe('TabManager', () => {
 
       const calls = mockChrome.scripting.executeScript.mock.calls;
 
-      // Verify NEW order and timing (changed to fix race condition on strict CSP sites)
+      // Verify injection order (polyfill now via manifest content_scripts)
       // 1. Relay FIRST (must be listening when bridge sends initial snapshot)
       expect(calls[0][0]).toEqual({
         target: { tabId: 123, frameIds: [0] },
@@ -1003,19 +996,11 @@ describe('TabManager', () => {
         files: ['content-scripts/relay.js'],
       });
 
-      // 2. Polyfill SECOND
-      expect(calls[1][0]).toEqual({
-        target: { tabId: 123, frameIds: [0] },
-        world: 'MAIN',
-        injectImmediately: true,
-        files: ['content-scripts/webmcp-polyfill.js'],
-      });
-
-      // 3. One matching compiled tool (in MAIN world, after polyfill)
+      // 2. One matching compiled tool (in MAIN world, after polyfill)
       // (We won't check it individually, just verify it's injected)
 
-      // 4. Bridge LAST (after relay is ready and tools are registered)
-      expect(calls[3][0]).toEqual({
+      // 3. Bridge LAST (after relay is ready and tools are registered)
+      expect(calls[2][0]).toEqual({
         target: { tabId: 123, frameIds: [0] },
         world: 'MAIN',
         injectImmediately: false,

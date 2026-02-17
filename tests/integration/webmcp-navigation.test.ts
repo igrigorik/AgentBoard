@@ -146,9 +146,10 @@ describe('WebMCP Navigation Integration', () => {
         });
       }
 
-      // Verify scripts were injected: relay + polyfill + 1 matching tool + bridge = 4
+      // Verify scripts were injected: relay + 1 matching tool + bridge = 3
+      // (polyfill now injected via manifest content_scripts, not programmatically)
       // (youtube_transcript only matches youtube.com, not example.com)
-      const expectedScriptCount = 4; // 3 core scripts + 1 matching tool
+      const expectedScriptCount = 3; // 2 core scripts + 1 matching tool
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(expectedScriptCount);
 
       // Check relay injection FIRST (critical for race condition fix)
@@ -159,16 +160,8 @@ describe('WebMCP Navigation Integration', () => {
         files: ['content-scripts/relay.js'],
       });
 
-      // Check polyfill injection second
-      expect(mockChrome.scripting.executeScript).toHaveBeenNthCalledWith(2, {
-        target: { tabId, frameIds: [0] },
-        injectImmediately: true,
-        world: 'MAIN',
-        files: ['content-scripts/webmcp-polyfill.js'],
-      });
-
-      // Check bridge injection LAST (call #4 - after 1 matching tool)
-      expect(mockChrome.scripting.executeScript).toHaveBeenNthCalledWith(4, {
+      // Check bridge injection LAST (call #3 - after 1 matching tool)
+      expect(mockChrome.scripting.executeScript).toHaveBeenNthCalledWith(3, {
         target: { tabId, frameIds: [0] },
         world: 'MAIN',
         injectImmediately: false,
@@ -206,8 +199,9 @@ describe('WebMCP Navigation Integration', () => {
         });
       }
 
-      // Should inject only once: relay + polyfill + 1 matching tool + bridge = 4
-      const expectedScriptCount = 4; // 3 core scripts + 1 matching tool
+      // Should inject only once: relay + 1 matching tool + bridge = 3
+      // (polyfill now injected via manifest content_scripts)
+      const expectedScriptCount = 3; // 2 core scripts + 1 matching tool
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(expectedScriptCount);
     });
 

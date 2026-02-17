@@ -122,6 +122,7 @@ export interface WebMCPToolsChangedMessage {
     name: string;
     description: string;
     inputSchema?: unknown;
+    annotations?: Record<string, unknown>;
   }>;
 }
 
@@ -297,6 +298,7 @@ export interface ToolsListChangedParams {
     name: string;
     description: string;
     inputSchema?: unknown;
+    annotations?: Record<string, unknown>;
   }>;
   origin: string;
   timestamp?: number;

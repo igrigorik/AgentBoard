@@ -222,10 +222,12 @@ export class ToolRegistryManager {
    * streamChat only care about their own tab's tools changing, not all tools.
    */
   onTabToolsChanged(tabId: number, callback: () => void): () => void {
-    if (!this.tabChangeCallbacks.has(tabId)) {
-      this.tabChangeCallbacks.set(tabId, new Set());
+    let callbacks = this.tabChangeCallbacks.get(tabId);
+    if (!callbacks) {
+      callbacks = new Set();
+      this.tabChangeCallbacks.set(tabId, callbacks);
     }
-    this.tabChangeCallbacks.get(tabId)!.add(callback);
+    callbacks.add(callback);
 
     return () => {
       const callbacks = this.tabChangeCallbacks.get(tabId);
@@ -351,6 +353,7 @@ export class ToolRegistryManager {
       name: string;
       description?: string;
       inputSchema?: unknown;
+      annotations?: Record<string, unknown>;
     }>,
     origin: string
   ): void {

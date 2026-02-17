@@ -256,16 +256,19 @@
     if (!tool || typeof tool !== 'object') {
       throw new ValidationError('Tool must be an object');
     }
-    const { name, description, inputSchema, execute } = tool;
+    const { name, description, inputSchema, execute, annotations } = tool;
     if (!name || typeof name !== 'string') throw new ValidationError('Tool must have a string name');
     if (!description || typeof description !== 'string') throw new ValidationError('Tool must have a string description');
     if (typeof execute !== 'function') throw new ValidationError('Tool must have an execute function');
-    return {
+    const normalized = {
       name,
       description,
       inputSchema: inputSchema || { type: 'object', properties: {} },
       execute
     };
+    // Preserve optional annotations metadata (readOnlyHint, destructiveHint, etc.)
+    if (annotations != null) normalized.annotations = annotations;
+    return normalized;
   }
 
   /**
@@ -294,9 +297,11 @@
    * Used by both APIs
    */
   function listToolsInternal() {
-    return Array.from(tools.values()).map(({ name, description, inputSchema }) => ({
-      name, description, inputSchema
-    }));
+    return Array.from(tools.values()).map(({ name, description, inputSchema, annotations }) => {
+      const entry = { name, description, inputSchema };
+      if (annotations != null) entry.annotations = annotations;
+      return entry;
+    });
   }
 
   /**
@@ -309,11 +314,12 @@
      * Clears any pre-existing tools before registering new ones
      */
     provideContext(context) {
-      if (!context || !context.tools || !Array.isArray(context.tools)) {
-        throw new ValidationError('Context must have a tools array');
+      if (!context || typeof context !== 'object') {
+        throw new ValidationError('provideContext requires an object argument');
       }
+      const toolList = Array.isArray(context.tools) ? context.tools : [];
       tools.clear();
-      for (const raw of context.tools) {
+      for (const raw of toolList) {
         const tool = validateAndNormalizeTool(raw);
         if (tools.has(tool.name)) {
           throw new ValidationError(`Duplicate tool name: ${tool.name}`);

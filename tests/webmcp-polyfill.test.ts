@@ -401,6 +401,174 @@ describe('WebMCP Polyfill - agent context in execute', () => {
   });
 });
 
+describe('WebMCP Polyfill - provideContext tolerance', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  it('should accept provideContext({}) — empty object clears tools', () => {
+    // Pre-register a tool
+    modelContext.registerTool({
+      name: 'existing',
+      description: 'Existing tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+    expect(modelContextTesting.listTools().length).toBe(1);
+
+    // Empty context should clear tools, not throw
+    modelContext.provideContext({});
+    expect(modelContextTesting.listTools().length).toBe(0);
+  });
+
+  it('should accept provideContext({context: [...]}) — Shopify compat, ignores unknown fields', () => {
+    // Shopify adapter passes {context: [...]} instead of {tools: [...]}
+    expect(() => {
+      modelContext.provideContext({ context: [{ type: 'text', text: 'some context' }] });
+    }).not.toThrow();
+    expect(modelContextTesting.listTools().length).toBe(0);
+  });
+
+  it('should still throw on provideContext(null)', () => {
+    expect(() => {
+      modelContext.provideContext(null);
+    }).toThrow(/provideContext requires an object argument/);
+  });
+
+  it('should still throw on provideContext() — no argument', () => {
+    expect(() => {
+      modelContext.provideContext();
+    }).toThrow(/provideContext requires an object argument/);
+  });
+
+  it('should still throw on provideContext("string")', () => {
+    expect(() => {
+      modelContext.provideContext('tools');
+    }).toThrow(/provideContext requires an object argument/);
+  });
+
+  it('should work normally with provideContext({tools: [...]}) — standard path', () => {
+    modelContext.provideContext({
+      tools: [
+        {
+          name: 'tool_a',
+          description: 'Tool A',
+          inputSchema: { type: 'object', properties: {} },
+          execute: vi.fn(),
+        },
+      ],
+    });
+    const tools = modelContextTesting.listTools();
+    expect(tools.length).toBe(1);
+    expect(tools[0].name).toBe('tool_a');
+  });
+});
+
+describe('WebMCP Polyfill - annotations', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  it('registerTool with annotations — survives round-trip via listTools', () => {
+    modelContext.registerTool({
+      name: 'annotated_tool',
+      description: 'Tool with annotations',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    });
+
+    const tools = modelContextTesting.listTools();
+    expect(tools.length).toBe(1);
+    expect(tools[0].annotations).toEqual({ readOnlyHint: true, destructiveHint: false });
+  });
+
+  it('provideContext with annotated tools — listTools includes annotations', () => {
+    modelContext.provideContext({
+      tools: [
+        {
+          name: 'safe_tool',
+          description: 'A safe tool',
+          inputSchema: { type: 'object', properties: {} },
+          execute: vi.fn(),
+          annotations: { readOnlyHint: true },
+        },
+        {
+          name: 'dangerous_tool',
+          description: 'A dangerous tool',
+          inputSchema: { type: 'object', properties: {} },
+          execute: vi.fn(),
+          annotations: { destructiveHint: true, idempotentHint: false },
+        },
+      ],
+    });
+
+    const tools = modelContextTesting.listTools();
+    expect(tools.length).toBe(2);
+    expect(tools[0].annotations).toEqual({ readOnlyHint: true });
+    expect(tools[1].annotations).toEqual({ destructiveHint: true, idempotentHint: false });
+  });
+
+  it('tool without annotations — listTools omits the field entirely', () => {
+    modelContext.registerTool({
+      name: 'plain_tool',
+      description: 'No annotations',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    const tools = modelContextTesting.listTools();
+    expect(tools.length).toBe(1);
+    expect(tools[0]).not.toHaveProperty('annotations');
+  });
+});
+
 describe('WebMCP Polyfill - JSON Schema Validation', () => {
   let dom: JSDOM;
   let window: Window & typeof globalThis;

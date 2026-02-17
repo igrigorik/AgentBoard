@@ -25,6 +25,7 @@ export interface ToolRegistry {
     name: string;
     description: string;
     inputSchema?: unknown;
+    annotations?: Record<string, unknown>;
   }>;
   origin: string;
   timestamp: number;
@@ -395,7 +396,10 @@ export class TabManager {
 
       log.debug(`[WebMCP Lifecycle] Injecting scripts into tab ${tabId} (${tab.url})`);
 
-      // 1. Inject the relay content script FIRST (isolated world)
+      // Polyfill is injected via manifest content_scripts (world: MAIN, run_at: document_start)
+      // so it's guaranteed to be available before any page scripts run.
+
+      // 1. Inject the relay content script (isolated world)
       // CRITICAL: Must be first so it's listening when bridge sends initial snapshot
       await chrome.scripting.executeScript({
         target: { tabId, frameIds: [0] },
@@ -404,15 +408,7 @@ export class TabManager {
         files: ['content-scripts/relay.js'],
       });
 
-      // 2. Inject WebMCP polyfill BEFORE any page scripts run
-      await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
-        world: 'MAIN',
-        injectImmediately: true, // Run as early as possible
-        files: ['content-scripts/webmcp-polyfill.js'],
-      });
-
-      // 3. Inject pre-compiled built-in tools (CSP bypass via files:[])
+      // 2. Inject pre-compiled built-in tools (CSP bypass via files:[])
       // Filter tools by URL match patterns AND enabled state
       const tabUrl = tab.url;
       const configStorage = ConfigStorage.getInstance();
@@ -453,7 +449,7 @@ export class TabManager {
         });
       }
 
-      // 4. Inject page bridge LAST (after relay is ready)
+      // 3. Inject page bridge LAST (after relay is ready)
       await chrome.scripting.executeScript({
         target: { tabId, frameIds: [0] },
         world: 'MAIN',
@@ -463,7 +459,7 @@ export class TabManager {
 
       log.debug(`[WebMCP Lifecycle] Scripts injected successfully into tab ${tabId}`);
 
-      // 5. Inject user scripts that match this URL
+      // 4. Inject user scripts that match this URL
       if (tab.url) {
         await injectUserScripts({
           tabId,
