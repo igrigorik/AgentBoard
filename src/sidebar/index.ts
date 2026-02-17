@@ -924,6 +924,30 @@ async function streamAIResponse() {
             log.warn('[Sidebar] Max auto-continuations reached, stopping');
           }
 
+          // When the model exhausts its tool step budget, give it one more
+          // text-only turn to summarize progress instead of silently stopping.
+          if (
+            msg.stepsExhausted &&
+            !msg.toolsChanged &&
+            autoContinuationCount < MAX_AUTO_CONTINUATIONS
+          ) {
+            autoContinuationCount++;
+            const limit = currentAgent?.maxSteps ?? 10;
+            log.info(`[Sidebar] Steps exhausted (${limit}) — requesting wrap-up summary`);
+
+            const contMsg: ChatMessage = {
+              id: globalThis.crypto.randomUUID(),
+              role: 'user',
+              content: `[You have used all ${limit} tool steps allowed for this turn. Do NOT call any more tools. Instead, summarize what you accomplished and what remains to be done.]`,
+              timestamp: Date.now(),
+            };
+            messageHistory.push(contMsg);
+
+            // Chain continuation — model should respond with text summary
+            streamAIResponse().then(resolve).catch(reject);
+            break;
+          }
+
           isLoading = false;
           updateSendButton();
           resolve();

@@ -784,6 +784,7 @@ chrome.runtime.onConnect.addListener((port) => {
                   type: 'STREAM_COMPLETE',
                   fullResponse: fullText,
                   toolsChanged: metadata?.toolsChanged || false,
+                  stepsExhausted: metadata?.stepsExhausted || false,
                 });
                 connection.isStreaming = false;
               }

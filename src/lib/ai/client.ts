@@ -27,6 +27,9 @@ export interface StreamFinishMetadata {
   /** True when the stream ended because the tab's tool set changed mid-stream.
    *  The caller should restart the conversation with fresh tools. */
   toolsChanged: boolean;
+  /** True when the stream ended because the agent's maxSteps limit was reached.
+   *  The caller should give the model one more text-only turn to summarize. */
+  stepsExhausted: boolean;
 }
 
 export interface StreamCallbacks {
@@ -280,6 +283,7 @@ export class AIClient {
       // When tools change (navigation, user toggle, etc.), we stop after the
       // current step so the caller can restart with a correct tool set.
       let toolsInvalidated = false;
+      let stepsExhausted = false;
       let unsubToolChange: (() => void) | null = null;
 
       if (tabId) {
@@ -323,8 +327,15 @@ export class AIClient {
           ...(hasTools && {
             tools: allTools,
             // Stop after current step if tools changed (navigation, etc.)
-            // or after agent-configured step limit (default 5).
-            stopWhen: ({ steps }) => toolsInvalidated || steps.length >= (agent.maxSteps ?? 10),
+            // or after agent-configured step limit (default 10).
+            stopWhen: ({ steps }) => {
+              if (toolsInvalidated) return true;
+              if (steps.length >= (agent.maxSteps ?? 10)) {
+                stepsExhausted = true;
+                return true;
+              }
+              return false;
+            },
           }),
           // Add provider-specific reasoning options under providerOptions
           ...(reasoningOptions && {
@@ -630,7 +641,7 @@ export class AIClient {
             }
           }
 
-          callbacks.onFinish(_fullText, { toolsChanged: toolsInvalidated });
+          callbacks.onFinish(_fullText, { toolsChanged: toolsInvalidated, stepsExhausted });
         } catch (iterationError) {
           log.error('[AIClient] Error during stream iteration:', iterationError);
 
