@@ -47,7 +47,8 @@ header h1 {
 .agents-section,
 .commands-section,
 .webmcp-section,
-.mcp-section {
+.mcp-section,
+.eval-section {
   background: white;
   border-radius: 12px;
   padding: 24px;
@@ -58,7 +59,8 @@ header h1 {
 .agents-header,
 .commands-header,
 .webmcp-header,
-.mcp-header {
+.mcp-header,
+.eval-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -70,6 +72,7 @@ header h1 {
 .commands-header h2,
 .webmcp-header h2,
 .mcp-header h2,
+.eval-header h2,
 .settings-section h2 {
   font-size: 20px;
   font-weight: 600;
@@ -77,10 +80,11 @@ header h1 {
   margin: 0;
 }
 
-/* Grid lists for agents, commands, and scripts */
+/* Grid lists for agents, commands, scripts, and eval suites */
 .agents-list,
 .commands-list,
-.scripts-list {
+.scripts-list,
+.evalsuites-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
   gap: 20px;
@@ -177,13 +181,15 @@ header h1 {
 /* Empty state - unified styling */
 .no-agents,
 .no-commands,
-.no-scripts {
+.no-scripts,
+.no-evalsuites {
   margin: 0;
 }
 
 .no-agents-content,
 .no-commands-content,
-.no-scripts-content {
+.no-scripts-content,
+.no-evalsuites-content {
   text-align: center;
   padding: 48px 32px;
   background: #f8f9fa;
@@ -193,7 +199,8 @@ header h1 {
 
 .no-agents-content h3,
 .no-commands-content h3,
-.no-scripts-content h3 {
+.no-scripts-content h3,
+.no-evalsuites-content h3 {
   font-size: 16px;
   font-weight: 500;
   color: #6c757d;
@@ -202,7 +209,8 @@ header h1 {
 
 .no-agents-content p,
 .no-commands-content p,
-.no-scripts-content p {
+.no-scripts-content p,
+.no-evalsuites-content p {
   color: #6c757d;
   font-size: 14px;
   margin: 0;
@@ -213,7 +221,8 @@ header h1 {
 }
 
 .no-agents-content code,
-.no-commands-content code {
+.no-commands-content code,
+.no-evalsuites-content code {
   background: rgba(0, 0, 0, 0.06);
   padding: 2px 6px;
   border-radius: 3px;

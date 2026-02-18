@@ -1392,3 +1392,258 @@ body {
 .tool-item-box.expanded .chevron {
   transform: rotate(90deg);
 }
+
+/* ============================================
+   Eval Report Box Styles
+   ============================================ */
+
+.eval-report-box {
+  margin: 12px 16px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+}
+
+/* Progress */
+.eval-progress {
+  margin-bottom: 12px;
+}
+
+.eval-progress-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.eval-progress-bar {
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.eval-progress-fill {
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+/* Scenario list */
+.eval-scenario-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.eval-scenario-row {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.eval-scenario-row.eval-scenario-pass {
+  border-left: 3px solid var(--success-color);
+}
+
+.eval-scenario-row.eval-scenario-fail {
+  border-left: 3px solid var(--error-color);
+}
+
+.eval-scenario-row.eval-scenario-error {
+  border-left: 3px solid #f59e0b;
+}
+
+.eval-scenario-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.eval-status-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.eval-badge-pass {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success-color);
+}
+
+.eval-badge-fail {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--error-color);
+}
+
+.eval-badge-error {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.eval-scenario-id-block {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.eval-scenario-id {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-scenario-prompt {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+.eval-scenario-score {
+  font-weight: 600;
+  color: var(--accent-primary);
+  font-size: 12px;
+}
+
+.eval-scenario-duration {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.eval-chevron {
+  color: var(--text-secondary);
+  transition: transform 0.2s ease;
+  display: flex;
+  align-items: center;
+}
+
+.eval-scenario-row.expanded .eval-chevron {
+  transform: rotate(90deg);
+}
+
+.eval-scenario-details {
+  display: none;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.eval-scenario-row.expanded .eval-scenario-details {
+  display: block;
+}
+
+.eval-detail-row {
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+}
+
+.eval-detail-row strong {
+  color: var(--text-primary);
+}
+
+.eval-detail-row code {
+  background: var(--code-bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.eval-detail-warn {
+  color: #f59e0b;
+}
+
+.eval-detail-error {
+  color: var(--error-color);
+}
+
+/* Summary */
+.eval-summary {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.eval-summary-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.eval-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.eval-summary-stat {
+  text-align: center;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+
+.eval-stat-value {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.eval-stat-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.eval-stat-pass .eval-stat-value {
+  color: var(--success-color);
+}
+
+.eval-stat-fail .eval-stat-value {
+  color: var(--error-color);
+}
+
+.eval-stat-error .eval-stat-value {
+  color: #f59e0b;
+}
+
+.eval-summary-scores {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.eval-summary-scores strong {
+  color: var(--text-primary);
+}
+
+.eval-error {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  border-radius: 6px;
+  font-size: 13px;
+}

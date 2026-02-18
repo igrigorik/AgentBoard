@@ -96,6 +96,26 @@
         </div>
       </section>
 
+      <!-- Eval Suites Section -->
+      <section class="eval-section">
+        <div class="eval-header">
+          <h2>Eval Suites</h2>
+          <button id="import-evalsuite" class="button button-primary">+ Import Suite</button>
+        </div>
+
+        <div id="evalsuites-list" class="evalsuites-list">
+          <!-- Eval suite cards will be populated dynamically -->
+        </div>
+
+        <div id="no-evalsuites" class="no-evalsuites hidden">
+          <div class="no-evalsuites-content">
+            <h3>No eval suites imported</h3>
+            <p>Import a JSON eval suite file to test your WebMCP tool definitions. Run evals from the sidebar with <code>/eval</code>.</p>
+          </div>
+        </div>
+      </section>
+      <input type="file" id="import-evalsuite-file" class="hidden" accept=".json">
+
       <!-- Settings Section -->
       <section class="settings-section">
         <h2>Settings</h2>

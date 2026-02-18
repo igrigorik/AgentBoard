@@ -317,5 +317,11 @@ export function createBuiltinCommands(
     clear: () => {
       clearChat();
     },
+
+    eval: () => {
+      // No-op: actual handling is intercepted in sidebar's handleSendMessage.
+      // Registered here so /help lists it.
+      window.dispatchEvent(new CustomEvent('start-eval'));
+    },
   };
 }
