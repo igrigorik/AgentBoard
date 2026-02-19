@@ -86,6 +86,9 @@ describe('WebMCP Script Injection Timing', () => {
         onBeforeNavigate: {
           addListener: vi.fn(),
         },
+        onCommitted: {
+          addListener: vi.fn(),
+        },
         onDOMContentLoaded: {
           addListener: vi.fn(),
         },
@@ -153,18 +156,29 @@ describe('WebMCP Script Injection Timing', () => {
       });
     });
 
-    it('should inject polyfill via manifest content_scripts (not programmatically)', async () => {
+    it('should inject polyfill programmatically via onCommitted', async () => {
       const tabId = 456;
 
-      await lifecycleManager.ensureContentScriptReady(tabId);
+      // Capture the onCommitted handler
+      const onCommittedHandler =
+        mockChrome.webNavigation.onCommitted.addListener.mock.calls[0]?.[0];
+      expect(onCommittedHandler).toBeDefined();
 
-      // Polyfill is no longer injected programmatically — it comes from manifest content_scripts.
-      // Verify no executeScript call references the polyfill.
+      // Simulate onCommitted firing (this triggers polyfill injection)
+      await onCommittedHandler({ tabId, frameId: 0, url: 'https://example.com' });
+
+      // Verify the polyfill was injected programmatically via onCommitted
       const allCalls = mockChrome.scripting.executeScript.mock.calls;
       const polyfillCalls = allCalls.filter(
         (call: any) => call[0]?.files?.[0] === 'content-scripts/webmcp-polyfill.js'
       );
-      expect(polyfillCalls).toHaveLength(0);
+      expect(polyfillCalls).toHaveLength(1);
+      expect(polyfillCalls[0][0]).toEqual({
+        target: { tabId, frameIds: [0] },
+        world: 'MAIN',
+        injectImmediately: true,
+        files: ['content-scripts/webmcp-polyfill.js'],
+      });
     });
 
     it('should inject relay early for message passing setup', async () => {
@@ -452,6 +466,9 @@ describe('WebMCP Script Injection Timing', () => {
       mockChrome.webNavigation.onBeforeNavigate.addListener = vi.fn((handler) => {
         navigationHandlers.onBeforeNavigate = handler;
       });
+      mockChrome.webNavigation.onCommitted.addListener = vi.fn((handler) => {
+        navigationHandlers.onCommitted = handler;
+      });
       mockChrome.webNavigation.onDOMContentLoaded.addListener = vi.fn((handler) => {
         navigationHandlers.onDOMContentLoaded = handler;
       });
@@ -476,6 +493,15 @@ describe('WebMCP Script Injection Timing', () => {
         });
       }
 
+      // onCommitted fires — injects polyfill
+      if (navigationHandlers.onCommitted) {
+        await navigationHandlers.onCommitted({
+          tabId,
+          frameId: 0,
+          url: 'https://example.com/new-page',
+        });
+      }
+
       // DOM ready triggers re-injection
       if (navigationHandlers.onDOMContentLoaded) {
         await navigationHandlers.onDOMContentLoaded({
@@ -485,13 +511,14 @@ describe('WebMCP Script Injection Timing', () => {
         });
       }
 
-      // Should inject same number of scripts
-      expect(injectionLog.length).toBe(initialInjectionCount);
+      // Should inject: polyfill (from onCommitted) + same scripts as initial injection
+      expect(injectionLog.length).toBe(initialInjectionCount + 1);
 
-      // Order: relay → tools → bridge (polyfill via manifest content_scripts)
-      expect(injectionLog[0].files).toEqual(['content-scripts/relay.js']);
-      expect(injectionLog[1]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
-      expect(injectionLog[2].files).toEqual(['content-scripts/page-bridge.js']);
+      // Order: polyfill (onCommitted) → relay → tools → bridge
+      expect(injectionLog[0].files).toEqual(['content-scripts/webmcp-polyfill.js']);
+      expect(injectionLog[1].files).toEqual(['content-scripts/relay.js']);
+      expect(injectionLog[2]?.files?.[0]).toMatch(/^tools\/.*\.js$/);
+      expect(injectionLog[3].files).toEqual(['content-scripts/page-bridge.js']);
     });
 
     it('should handle rapid navigations without double injection', async () => {
@@ -500,6 +527,9 @@ describe('WebMCP Script Injection Timing', () => {
 
       mockChrome.webNavigation.onBeforeNavigate.addListener = vi.fn((handler) => {
         navigationHandlers.onBeforeNavigate = handler;
+      });
+      mockChrome.webNavigation.onCommitted.addListener = vi.fn((handler) => {
+        navigationHandlers.onCommitted = handler;
       });
       mockChrome.webNavigation.onDOMContentLoaded.addListener = vi.fn((handler) => {
         navigationHandlers.onDOMContentLoaded = handler;

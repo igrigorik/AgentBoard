@@ -323,6 +323,43 @@ export class TabManager {
       log.debug(`[WebMCP Lifecycle] Navigation starting for tab ${details.tabId}`);
     });
 
+    // Navigation committed - inject polyfill ASAP before any page scripts run.
+    // onCommitted fires when the server responds and the new document is about to be created,
+    // before any HTML is parsed. Combined with injectImmediately + files:[], this bypasses
+    // page CSP and runs at the equivalent of document_start.
+    // The manifest content_scripts entry (world: MAIN, document_start) is kept as a fallback
+    // but may lose the race on some pages or be wrapped by CRXJS in dev mode.
+    chrome.webNavigation.onCommitted.addListener(async (details) => {
+      if (details.frameId !== 0) return;
+
+      // Skip restricted URLs
+      const url = details.url;
+      if (
+        url.startsWith('chrome://') ||
+        url.startsWith('chrome-extension://') ||
+        url.startsWith('edge://') ||
+        url.startsWith('about:')
+      ) {
+        return;
+      }
+
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: details.tabId, frameIds: [0] },
+          world: 'MAIN',
+          injectImmediately: true,
+          files: ['content-scripts/webmcp-polyfill.js'],
+        });
+        log.debug(`[WebMCP Lifecycle] Early polyfill injected into tab ${details.tabId}`);
+      } catch (error) {
+        // Non-fatal: manifest content_scripts fallback may still work
+        log.debug(
+          `[WebMCP Lifecycle] Early polyfill injection failed for tab ${details.tabId}:`,
+          error
+        );
+      }
+    });
+
     // DOM is ready - inject our scripts
     chrome.webNavigation.onDOMContentLoaded.addListener(async (details) => {
       if (details.frameId !== 0) return; // Main frame only
@@ -396,8 +433,9 @@ export class TabManager {
 
       log.debug(`[WebMCP Lifecycle] Injecting scripts into tab ${tabId} (${tab.url})`);
 
-      // Polyfill is injected via manifest content_scripts (world: MAIN, run_at: document_start)
-      // so it's guaranteed to be available before any page scripts run.
+      // Polyfill is injected early via onCommitted + injectImmediately (see setupNavigationMonitor).
+      // The manifest content_scripts entry acts as a belt-and-suspenders fallback.
+      // The polyfill's own guard (`if ('modelContext' in navigator)`) prevents double-init.
 
       // 1. Inject the relay content script (isolated world)
       // CRITICAL: Must be first so it's listening when bridge sends initial snapshot

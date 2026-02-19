@@ -60,6 +60,9 @@ describe('WebMCP E2E Message Flow', () => {
         onBeforeNavigate: {
           addListener: vi.fn(),
         },
+        onCommitted: {
+          addListener: vi.fn(),
+        },
         onDOMContentLoaded: {
           addListener: vi.fn(),
         },

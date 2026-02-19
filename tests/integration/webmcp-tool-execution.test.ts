@@ -50,6 +50,9 @@ describe('WebMCP Tool Execution Integration', () => {
         onBeforeNavigate: {
           addListener: vi.fn(),
         },
+        onCommitted: {
+          addListener: vi.fn(),
+        },
         onDOMContentLoaded: {
           addListener: vi.fn(),
         },

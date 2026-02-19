@@ -44,6 +44,9 @@ describe('WebMCP Integration - Sidebar ↔ Tab Communication', () => {
         onBeforeNavigate: {
           addListener: vi.fn(),
         },
+        onCommitted: {
+          addListener: vi.fn(),
+        },
         onDOMContentLoaded: {
           addListener: vi.fn(),
         },

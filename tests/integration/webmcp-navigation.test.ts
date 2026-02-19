@@ -11,6 +11,7 @@ describe('WebMCP Navigation Integration', () => {
   let lifecycleManager: TabManager;
   let navigationHandlers: {
     onBeforeNavigate?: Function;
+    onCommitted?: Function;
     onDOMContentLoaded?: Function;
   };
 
@@ -56,6 +57,11 @@ describe('WebMCP Navigation Integration', () => {
         onBeforeNavigate: {
           addListener: vi.fn((handler: Function) => {
             navigationHandlers.onBeforeNavigate = handler;
+          }),
+        },
+        onCommitted: {
+          addListener: vi.fn((handler: Function) => {
+            navigationHandlers.onCommitted = handler;
           }),
         },
         onDOMContentLoaded: {

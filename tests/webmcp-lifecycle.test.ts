@@ -31,6 +31,9 @@ const mockChrome = {
     onBeforeNavigate: {
       addListener: vi.fn(),
     },
+    onCommitted: {
+      addListener: vi.fn(),
+    },
     onDOMContentLoaded: {
       addListener: vi.fn(),
     },
@@ -83,6 +86,10 @@ describe('TabManager', () => {
 
     mockChrome.webNavigation.onBeforeNavigate.addListener = vi.fn((handler) => {
       navHandlers.onBeforeNavigate = handler;
+    });
+
+    mockChrome.webNavigation.onCommitted.addListener = vi.fn((handler) => {
+      navHandlers.onCommitted = handler;
     });
 
     mockChrome.webNavigation.onDOMContentLoaded.addListener = vi.fn((handler) => {

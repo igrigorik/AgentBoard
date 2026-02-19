@@ -23,6 +23,7 @@ describe('WebMCP Basic Integration', () => {
       },
       webNavigation: {
         onBeforeNavigate: { addListener: vi.fn() },
+        onCommitted: { addListener: vi.fn() },
         onDOMContentLoaded: { addListener: vi.fn() },
       },
       tabs: {
