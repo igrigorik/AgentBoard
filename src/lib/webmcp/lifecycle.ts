@@ -243,10 +243,10 @@ export class TabManager {
       if (promise) {
         clearTimeout(promise.timeout);
         if ('error' in payload && payload.error) {
-          const err = new Error(payload.error.message);
           // Preserve structured error data from the page for debugging
-          if (payload.error.data) (err as any).data = payload.error.data;
-          if (payload.error.code) (err as any).code = payload.error.code;
+          const err: Error & { data?: unknown; code?: number } = new Error(payload.error.message);
+          if (payload.error.data) err.data = payload.error.data;
+          if (payload.error.code) err.code = payload.error.code;
           promise.reject(err);
         } else if ('result' in payload) {
           promise.resolve(payload.result);

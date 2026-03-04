@@ -33,12 +33,30 @@ export async function execute(args = {}) {
     throw new Error('Could not extract document ID from URL. Are you on a Google Docs page?');
   }
 
-  // Get the annotate API for text and selection
+  // Get the annotate API for text and selection.
+  // kix_core's getAnnotatedText throws a bare Error() when the document model
+  // is mid-mutation (sync, edit, render, tab switch). This is an intentional
+  // guard in Google's code to prevent reading inconsistent state — not a bug.
+  // Retry with backoff since the model is eventually consistent.
   if (typeof _docs_annotate_getAnnotatedText !== 'function') {
     throw new Error('Google Docs annotate API not available. Page may not be fully loaded.');
   }
 
-  const api = await _docs_annotate_getAnnotatedText();
+  let api;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      api = await _docs_annotate_getAnnotatedText();
+      break;
+    } catch (e) {
+      if (attempt === 2) {
+        throw new Error(
+          `Google Docs internal API failed after ${attempt + 1} attempts. ` +
+          `The document may still be loading. (${e?.message || e})`
+        );
+      }
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
 
   const text = api.getText();
   const annotations = api.getAnnotations();
