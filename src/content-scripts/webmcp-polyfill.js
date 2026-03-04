@@ -288,7 +288,12 @@
       return await Promise.resolve(tool.execute(params, agentContext));
     } catch (err) {
       if (err instanceof ValidationError || err instanceof ExecutionError) throw err;
-      throw new ExecutionError(`Tool '${toolName}' execution failed: ${err && err.message ? err.message : String(err)}`, err);
+      // err.message can be "" (falsy but valid string) — check typeof, not truthiness
+      const detail = (err instanceof Error && typeof err.message === 'string' && err.message !== '')
+        ? err.message
+        : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      throw new ExecutionError(`Tool '${toolName}' execution failed: ${detail}${stack ? '\n' + stack : ''}`, err);
     }
   }
 

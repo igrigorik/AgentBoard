@@ -186,7 +186,8 @@
               message: error?.message || String(error),
               data: {
                 name: error?.name,
-                toolName: error?.toolName
+                toolName: error?.toolName,
+                stack: error?.stack
               }
             }
           };
