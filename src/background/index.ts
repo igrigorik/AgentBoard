@@ -537,6 +537,21 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       return true; // Now async to support getBoundTabIdForSidebar
     }
 
+    case 'GET_SITE_TOOL_HINTS': {
+      (async () => {
+        try {
+          await toolsReady;
+          const toolRegistry = getToolRegistry();
+          const hints = toolRegistry.getSiteToolHints(request.tabId);
+          sendResponse({ hints });
+        } catch (error) {
+          log.error('[Background] GET_SITE_TOOL_HINTS error:', error);
+          sendResponse({ hints: [] }); // Degrade gracefully — no hints is fine
+        }
+      })();
+      return true; // Async response
+    }
+
     default:
       log.debug('Unknown message type:', request.type);
       return false; // No async response needed

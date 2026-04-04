@@ -2334,7 +2334,7 @@ export const metadata = {
   name: 'read_page',
   namespace: 'agentboard',
   version: '4.0.1',
-  description: "Extract the current tab's content as clean markdown with metadata (title, author, date). Primary grounding context for pages. For external URLs, use fetch_url.",
+  description: "Read the current page as clean markdown with metadata (title, author, date, excerpt).",
   match: ['<all_urls>'],
   inputSchema: {
     type: 'object',

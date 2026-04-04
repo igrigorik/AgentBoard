@@ -130,6 +130,11 @@ export interface WebMCPScriptsUpdatedMessage {
   type: 'WEBMCP_SCRIPTS_UPDATED';
 }
 
+export interface GetSiteToolHintsMessage {
+  type: 'GET_SITE_TOOL_HINTS';
+  tabId: number;
+}
+
 // Union type for all possible extension messages
 export type ExtensionMessage =
   | GetConfigMessage
@@ -150,7 +155,8 @@ export type ExtensionMessage =
   | WebMCPCallToolMessage
   | WebMCPGetToolsMessage
   | WebMCPToolsChangedMessage
-  | WebMCPScriptsUpdatedMessage;
+  | WebMCPScriptsUpdatedMessage
+  | GetSiteToolHintsMessage;
 
 // Response wrapper for message handlers
 export interface MessageResponse<T = unknown> {

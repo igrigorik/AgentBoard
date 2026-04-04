@@ -27,14 +27,13 @@ export const COMPILED_TOOLS: CompiledToolInfo[] = [
     match: ['<all_urls>'],
     version: '4.0.1',
     description:
-      "Extract the current tab's content as clean markdown with metadata (title, author, date). Primary grounding context for pages. For external URLs, use fetch_url.",
+      'Read the current page as clean markdown with metadata (title, author, date, excerpt).',
   },
   {
     id: 'agentboard_youtube_transcript',
     file: 'tools/agentboard_youtube_transcript.js',
     match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
     version: '1.0.0',
-    description:
-      'Extract transcript and metadata from the current YouTube video. Returns title, author, duration, description, view count, and full transcript with timestamps.',
+    description: "Get the current YouTube video's transcript with timestamps and metadata.",
   },
 ];

@@ -12,7 +12,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { streamText, type LanguageModel, CoreMessage, type JSONValue } from 'ai';
 import type { AgentConfig } from '../storage/config';
 import type { AIProvider, ToolCall } from '../../types';
-import { ConfigStorage } from '../storage/config';
+import { ConfigStorage, resolveSystemPrompt } from '../storage/config';
 import { getToolRegistry } from '../webmcp/tool-registry';
 import { getRemoteMCPManager } from '../mcp/manager';
 import { inferProviderFromModel, isLikelyOpenAICompatible } from './provider-utils';
@@ -270,9 +270,9 @@ export class AIClient {
       const modelFactory = this.createProviderForAgent(agent);
       const model = modelFactory();
 
-      // Build system prompt: agent config + MCP server instructions (if any)
+      // Build system prompt: base + user custom + MCP server instructions (if any)
       const mcpInstructions = getRemoteMCPManager().getMCPInstructions();
-      const systemParts = [agent.systemPrompt, mcpInstructions].filter(Boolean);
+      const systemParts = [resolveSystemPrompt(agent), mcpInstructions].filter(Boolean);
       const systemPrompt = systemParts.join('\n\n');
 
       const messagesWithSystem: CoreMessage[] = systemPrompt

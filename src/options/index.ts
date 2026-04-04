@@ -7,7 +7,6 @@ import log from '../lib/logger';
 import './styles.css';
 import {
   ConfigStorage,
-  BASE_SYSTEM_PROMPT,
   type AgentConfig,
   type MCPConfig,
   type ReasoningConfig,
@@ -278,7 +277,7 @@ async function populateForm(agentId: string) {
   }
 
   (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value =
-    agent.systemPrompt;
+    agent.systemPrompt || '';
   (document.getElementById('agent-temperature') as HTMLInputElement).value =
     agent.temperature.toString();
   (document.getElementById('agent-max-tokens') as HTMLInputElement).value =
@@ -300,10 +299,10 @@ async function populateForm(agentId: string) {
 }
 
 function setDefaultFormValues() {
-  // Set default system prompt
-  const systemPromptEl = document.getElementById('agent-system-prompt') as HTMLTextAreaElement;
-  if (systemPromptEl) {
-    systemPromptEl.value = BASE_SYSTEM_PROMPT;
+  // Clear custom instructions
+  const customPromptEl = document.getElementById('agent-system-prompt') as HTMLTextAreaElement;
+  if (customPromptEl) {
+    customPromptEl.value = '';
   }
 
   // Set default temperature

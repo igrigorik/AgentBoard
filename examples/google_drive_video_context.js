@@ -5,7 +5,7 @@ export const metadata = {
   namespace: 'google_drive',
   version: '0.4.1',
   description:
-    'Extract transcript from Drive video with timestamps. Returns title, video ID, and segments with start/end times. Requires captions (auto-generated or uploaded). Always prefer this over generic page tools for Drive videos.',
+    'Extract transcript from a Google Drive video with timestamps. Requires captions (auto-generated or uploaded).',
   match: 'https://drive.google.com/*',
   inputSchema: {
     type: 'object',

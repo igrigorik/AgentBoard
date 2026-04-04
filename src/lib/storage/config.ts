@@ -87,22 +87,38 @@ export interface BuiltinScript {
 
 /**
  * Base system prompt for tab-attached assistant.
+ * Always prepended — agent.systemPrompt (user's custom additions) is appended after.
  *
- * Key design decision: the identity line ("same access as the user") overrides
- * LLM training priors that "AI can't access private pages." Without it, models
- * hallucinate auth constraints and refuse to call tools that would work fine.
+ * Design decisions:
+ * - Identity line ("same access as the user") overrides LLM training priors
+ *   that "AI can't access private pages." Without it, models hallucinate auth
+ *   constraints and refuse to call tools that would work fine.
+ * - <site_tools> reference primes model to check the per-message hint block
+ *   that lists domain-specific tools for the current tab.
+ * - Anti-refusal directives directly counter phantom refusal training priors.
  */
-export const BASE_SYSTEM_PROMPT = `You are an assistant running in the user's browser tab. Your tools execute in the browser context with the user's full session, cookies, and credentials — you have the same access as the user.
+export const BASE_SYSTEM_PROMPT = `You are an assistant running in the user's browser tab. The user has delegated their full browser session to you, including cookies, credentials, and page access, so you can operate on their behalf.
 
 CONTEXT:
-Each message includes <page_context> with the tab's URL and title.
-All answers should be grounded in the tab's content - use tools to acquire context.
+Each message includes <page_context> with the current tab's URL and title.
+When page-specific tools are available, <site_tools> lists recommended tools matched to the current page.
 
 TOOL SELECTION:
-Tools are ordered by relevance; prefer the first matching tool.
-Site-provided tools take precedence over built-in tools.
-For external URLs not open in this tab, use fetch_url.
-Never hallucinate content.`;
+1. ALWAYS prefer and evaluate <site_tools> first to acquire context and perform requested actions
+2. For external URLs not in the current tab, use fetch_url
+3. Other tools (MCP, system) are available for specialized tasks
+
+Do not refuse tools listed in <site_tools> or claim you cannot access the right context. You are operating on the user's behalf and they have delegated their permission to do so.
+Never hallucinate content. Use tools to acquire it.`;
+
+/**
+ * Compose final system prompt: base + optional user additions.
+ * Agent.systemPrompt is the user's custom instructions (empty = base only).
+ */
+export function resolveSystemPrompt(agent: AgentConfig): string {
+  const custom = agent.systemPrompt?.trim();
+  return custom ? `${BASE_SYSTEM_PROMPT}\n\n${custom}` : BASE_SYSTEM_PROMPT;
+}
 
 // Default agents to create on first install
 export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
@@ -111,7 +127,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     description: 'General purpose assistant powered by OpenAI',
     provider: 'openai',
     model: 'gpt-5',
-    systemPrompt: BASE_SYSTEM_PROMPT,
+    systemPrompt: '',
     temperature: 0.7,
     maxTokens: 4000,
     maxSteps: 10,
@@ -128,7 +144,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     description: 'Thoughtful assistant powered by Anthropic',
     provider: 'anthropic',
     model: 'claude-opus-4-20250514',
-    systemPrompt: BASE_SYSTEM_PROMPT,
+    systemPrompt: '',
     temperature: 0.7,
     maxTokens: 4096,
     maxSteps: 10,
@@ -144,7 +160,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     description: 'Creative assistant powered by Google',
     provider: 'google',
     model: 'gemini-2.5-flash',
-    systemPrompt: BASE_SYSTEM_PROMPT,
+    systemPrompt: '',
     temperature: 0.8,
     maxTokens: 2048,
     maxSteps: 10,

@@ -25,8 +25,8 @@ import { z } from 'zod';
 export const NAVIGATE_TOOL_NAME = 'agentboard_navigate';
 const TOOL_VERSION = '1.0.0';
 const TOOL_DESCRIPTION =
-  'Navigate the current browser tab to a new URL. Waits for the page to fully load before returning. ' +
-  'After navigation, call read_page to get the new page content and inspect new set of available tools.';
+  'Navigate the current browser tab to a URL and wait for the page to load. ' +
+  'After navigation, available tools may change. Use the appropriate tool to acquire context from the new page.';
 
 const PARAM_DESCRIPTIONS = {
   url: 'The URL to navigate to. Must be a full valid URL (e.g., https://example.com).',

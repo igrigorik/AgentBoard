@@ -220,13 +220,27 @@ async function getPageContext(): Promise<{ url: string; title: string } | null> 
 
 /**
  * Build XML context string to prepend to user messages.
- * Provides page awareness to the model without tool calls.
+ * Provides page awareness and domain-specific tool hints to the model.
+ *
+ * When siteToolHints are present, a <site_tools> block is appended to prime
+ * the LLM toward page-specific tools (e.g., youtube_transcript on YouTube).
+ * This is a steering hint — the full tool set is still sent via the API.
  */
-function buildPageContextXml(ctx: { url: string; title: string }): string {
+function buildPageContextXml(
+  ctx: { url: string; title: string },
+  siteToolHints?: Array<{ name: string; description: string }>
+): string {
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  let siteToolsBlock = '';
+  if (siteToolHints && siteToolHints.length > 0) {
+    const lines = siteToolHints.map((t) => `- ${esc(t.name)}: ${esc(t.description)}`).join('\n');
+    siteToolsBlock = `\n<site_tools>\nThese tools run in YOUR active browser tab with your full session and credentials:\n${lines}\n</site_tools>`;
+  }
+
   return `<page_context>
 <url>${esc(ctx.url)}</url>
-<title>${esc(ctx.title)}</title>
+<title>${esc(ctx.title)}</title>${siteToolsBlock}
 </page_context>
 
 `;
@@ -679,9 +693,17 @@ async function streamAIResponse() {
     metadata: { agentId: currentAgentId, agentName: currentAgent.name },
   };
 
-  // Get page context to prepend to user messages (gives model URL/title awareness)
+  // Get page context and domain-specific tool hints to prepend to user messages
   const pageContext = await getPageContext();
-  const contextPrefix = pageContext ? buildPageContextXml(pageContext) : '';
+  const siteToolHints = attachedTabId
+    ? (
+        await chrome.runtime.sendMessage({
+          type: 'GET_SITE_TOOL_HINTS',
+          tabId: attachedTabId,
+        })
+      )?.hints
+    : undefined;
+  const contextPrefix = pageContext ? buildPageContextXml(pageContext, siteToolHints) : '';
 
   return new Promise<void>((resolve, reject) => {
     if (!currentSession) {

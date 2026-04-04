@@ -4,7 +4,7 @@ export const metadata = {
   name: 'youtube_transcript',
   namespace: 'agentboard',
   version: '1.0.0',
-  description: 'Extract transcript and metadata from the current YouTube video. Returns title, author, duration, description, view count, and full transcript with timestamps.',
+  description: "Get the current YouTube video's transcript with timestamps and metadata.",
   match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
   inputSchema: {
     type: 'object',

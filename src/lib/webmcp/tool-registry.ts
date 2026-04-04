@@ -28,6 +28,7 @@ export interface ToolWithMetadata {
   tool: AISDKTool;
   source: ToolSourceType;
   origin?: string; // URL for site tools, script ID for user tools, server name for remote tools
+  description?: string; // One-line tool description for LLM grounding in <site_tools>
 }
 
 /**
@@ -76,6 +77,7 @@ export class ToolRegistryManager {
       tool: fetchUrlTool,
       source: 'system',
       origin: 'system',
+      description: 'Fetch content from external URLs (not the current page)',
     });
 
     // Register tab-bound system tools (created per-tab via factory)
@@ -198,6 +200,33 @@ export class ToolRegistryManager {
 
     log.info(`[ToolRegistry] Providing ${debug.length} tools for tab ${tabId}:`, debug);
     return tools;
+  }
+
+  /**
+   * Domain-specific tools for a tab, for LLM steering in <site_tools>.
+   *
+   * Returns tools registered for this tab whose URL patterns are specific
+   * enough to warrant priming the LLM (score > 30). This filters out generic
+   * <all_urls> matchers (score 30) while keeping domain/path-specific tools
+   * (31-70) and page-provided tools (100).
+   *
+   * This is a HINT — the full tool set is still sent to the API via getToolsForTab.
+   */
+  getSiteToolHints(tabId: number): Array<{ name: string; description: string }> {
+    const hints: Array<{ name: string; description: string; score: number }> = [];
+
+    for (const [name, meta] of this.tools.entries()) {
+      if (meta.origin !== `tab-${tabId}`) continue;
+
+      const score = calculateSpecificityScore(name, meta.source);
+      if (score <= 30) continue; // Skip generic <all_urls> tools
+
+      hints.push({ name, description: meta.description || name, score });
+    }
+
+    return hints
+      .sort((a, b) => b.score - a.score)
+      .map(({ name, description }) => ({ name, description }));
   }
 
   /**
@@ -335,6 +364,7 @@ export class ToolRegistryManager {
           tool: aiTool,
           source: 'remote',
           origin: serverName,
+          description: mcpTool.description,
         });
       }
 
@@ -368,6 +398,7 @@ export class ToolRegistryManager {
         tool: aiTool,
         source: 'site', // Both site and user tools come through as 'site' for now
         origin: `tab-${tabId}`,
+        description: webmcpTool.description,
       });
     }
 

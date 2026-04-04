@@ -53,24 +53,24 @@ The tool ID becomes `{namespace}_{name}` (e.g., `myapp_get_context`).
 The LLM reads this to decide when to use your tool. A good description answers three questions:
 
 1. **What does it do?** Be specific about the action and target
-2. **What does it return?** Mention key fields in the response
-3. **When to use it?** Differentiate from other tools, especially generic ones
+2. **What context does it provide?** Mention key capabilities (e.g., "with timestamps", "with author names")
+3. **Any constraints?** Note requirements that affect success (e.g., "Requires captions")
 
 **Best practices:**
 
-- For site-specific tools, add "Always prefer this over generic page tools for [site]"
-- Mention key return values (e.g., "with timestamps", "with author names")
-- Keep under 300 characters - LLMs process many tool descriptions
+- Describe capabilities, not routing. Tool selection priority is handled by the system prompt via `<site_tools>`.
+- Keep under 200 characters. The description appears inline in `<site_tools>` hints.
+- No need to list response fields. The model sees the output.
 
 **Good examples:**
 
 ```
-"Fetch Slack conversation from the current channel, DM, or thread. Returns messages with author names, timestamps, reactions, and nested thread replies. Always prefer this over generic page tools for Slack context."
+"Fetch Slack conversation from the current channel, DM, or thread with author names, timestamps, reactions, and thread replies."
 
-"Query specific DOM elements using CSS selectors. Returns element metadata (tag, class, visibility, bounds) for each match. Use extractText/extractHtml params for content."
+"Extract content, selection, comments, and structure from the current Google Doc."
 ```
 
-**Bad:** "Gets app data" (vague, no return info, no guidance)
+**Bad:** "Gets app data" (vague, no capability info)
 
 ### `match` (required)
 

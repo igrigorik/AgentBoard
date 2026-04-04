@@ -5,7 +5,7 @@ export const metadata = {
   namespace: 'google_docs',
   version: '0.5.0',
   description:
-    'Extract content, selection, comments, and structure from the current Google Doc. Returns full text, selected text with position, comments with anchor text, and outline with reading position. Always prefer this over generic page tools for Google Docs.',
+    'Extract content, selection, comments, and structure from the current Google Doc.',
   match: 'https://docs.google.com/document/*',
   inputSchema: {
     type: 'object',

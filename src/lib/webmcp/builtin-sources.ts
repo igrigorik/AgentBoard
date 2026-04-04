@@ -2345,7 +2345,7 @@ export const metadata = {
   name: 'read_page',
   namespace: 'agentboard',
   version: '4.0.1',
-  description: "Extract the current tab's content as clean markdown with metadata (title, author, date). Primary grounding context for pages. For external URLs, use fetch_url.",
+  description: "Read the current page as clean markdown with metadata (title, author, date, excerpt).",
   match: ['<all_urls>'],
   inputSchema: {
     type: 'object',
@@ -2789,7 +2789,7 @@ export const metadata = {
   name: 'youtube_transcript',
   namespace: 'agentboard',
   version: '1.0.0',
-  description: 'Extract transcript and metadata from the current YouTube video. Returns title, author, duration, description, view count, and full transcript with timestamps.',
+  description: "Get the current YouTube video's transcript with timestamps and metadata.",
   match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
   inputSchema: {
     type: 'object',
@@ -2980,9 +2980,8 @@ import { z } from 'zod';
 export const FETCH_URL_TOOL_NAME = 'agentboard_fetch_url';
 const TOOL_VERSION = '1.0.0';
 const TOOL_DESCRIPTION =
-  'Fetch content from external URLs (not the current page). ' +
-  'For current page content, use site-specific or agentboard_dom_* tools instead. ' +
-  'Returns raw content (HTML, JSON, etc.) or optionally converts to markdown.';
+  'Fetch content from external URLs. For the current page, prefer site-specific tools instead. ' +
+  'Returns raw content or optionally converts HTML to clean markdown.';
 
 const PARAM_DESCRIPTIONS = {
   url: 'URL to fetch (supports http, https, localhost, private IPs)',
