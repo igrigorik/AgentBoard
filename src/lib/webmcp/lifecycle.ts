@@ -472,7 +472,13 @@ export class TabManager {
         });
       }
     } catch (error) {
-      log.error(`[WebMCP Lifecycle] Failed to inject scripts into tab ${tabId}:`, error);
+      // "No tab with id" is expected for prerendered/discarded tabs — not an error
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('No tab with id')) {
+        log.debug(`[WebMCP Lifecycle] Tab ${tabId} gone before injection (prerender/discard)`);
+      } else {
+        log.error(`[WebMCP Lifecycle] Failed to inject scripts into tab ${tabId}:`, error);
+      }
     }
   }
 
