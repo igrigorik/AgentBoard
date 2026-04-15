@@ -422,16 +422,35 @@ Page globals (like `window.__INITIAL_DATA__`) are set at page load. If they cont
 
 ### Trusted Types CSP
 
-Some sites have strict CSP that blocks:
+Sites like Gmail, YouTube, and Google Docs enforce Trusted Types, which blocks raw string assignments to **all** HTML sinks — both `element.innerHTML` and `DOMParser.parseFromString()`.
 
-- `DOMParser.parseFromString()`
-- `element.innerHTML = ...` assignments
+The fix is a passthrough Trusted Types policy:
 
-Solutions:
+```javascript
+// Create a TT policy (once, at module level)
+const _safeHTML = (() => {
+  if (typeof trustedTypes !== 'undefined') {
+    try {
+      const p = trustedTypes.createPolicy('my-tool-name', {
+        createHTML: (s) => s,
+      });
+      return (html) => p.createHTML(html);
+    } catch (_) {
+      // Site restricts policy names — fall through
+    }
+  }
+  return (html) => html;
+})();
 
-- Request JSON format instead of XML/HTML
-- Use regex parsing as fallback for simple structures
-- Avoid innerHTML for untrusted content
+// Now use _safeHTML() at TT sink boundaries:
+const doc = new DOMParser().parseFromString(_safeHTML(html), 'text/html');
+```
+
+Key points:
+
+- The DOMParser-returned document is **TT-free** — subsequent innerHTML writes on it work without wrapping
+- `document.cloneNode(true)` inherits TT enforcement — prefer DOMParser for document cloning
+- Request JSON format from APIs when available (avoids HTML parsing entirely)
 
 ### API Response Differences
 

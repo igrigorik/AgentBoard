@@ -1303,7 +1303,7 @@ Readability.prototype = {
       var textLength = this._getInnerText(articleContent, true).length;
       if (textLength < this._charThreshold) {
         parseSuccessful = false;
-        page.innerHTML = pageCacheHtml;
+        page.innerHTML = _safeHTML(pageCacheHtml);
 
         if (this._flagIsActive(this.FLAG_STRIP_UNLIKELYS)) {
           this._removeFlag(this.FLAG_STRIP_UNLIKELYS);
@@ -1634,7 +1634,7 @@ Readability.prototype = {
     this._forEachNode(noscripts, function (noscript) {
       // Parse content of noscript and make sure it only contains image
       var tmp = doc.createElement("div");
-      tmp.innerHTML = noscript.innerHTML;
+      tmp.innerHTML = _safeHTML(noscript.innerHTML);
       if (!this._isSingleImage(tmp)) {
         return;
       }
@@ -2362,16 +2362,36 @@ export const metadata = {
 };
 
 /**
+ * Trusted Types passthrough policy for HTML parsing on TT-enforcing sites.
+ * DOMParser.parseFromString() and innerHTML are both TT sinks — raw strings are
+ * rejected. This policy wraps strings as TrustedHTML so they pass the check.
+ * The DOMParser-returned document is TT-free, so Readability's internal innerHTML
+ * writes work without wrapping.
+ */
+const _safeHTML = (() => {
+  if (typeof trustedTypes !== 'undefined') {
+    try {
+      const p = trustedTypes.createPolicy('agentboard-read-page', {
+        createHTML: (s) => s,
+      });
+      return (html) => p.createHTML(html);
+    } catch (e) { // eslint-disable-line no-unused-vars
+      // Site's trusted-types CSP restricts policy names — fall through to raw string
+    }
+  }
+  return (html) => html;
+})();
+
+/**
  * Convert HTML to Markdown optimized for LLM consumption
  * Prioritizes structure and readability over formatting fidelity
- * 
+ *
  * DUPLICATION: Similar code exists in fetch/html-to-markdown.ts
  * This version uses native document (page context), that one accepts doc parameter (service worker)
  * Cannot be shared due to WebMCP CSP injection requirements (tools must be self-contained)
  */
 function htmlToMarkdown(html, options = {}) {
-  const container = document.createElement('div');
-  container.innerHTML = html;
+  const container = new DOMParser().parseFromString(_safeHTML(html), 'text/html').body;
 
   function processNode(node, depth = 0) {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -2665,8 +2685,11 @@ export async function execute(args = {}) {
     };
   }
 
-  // Clone document to avoid DOM mutations
-  const documentClone = document.cloneNode(true);
+  // DOMParser clone wrapped in _safeHTML to satisfy Trusted Types on sites like Gmail.
+  // The returned document is TT-free, so Readability's internal innerHTML writes work.
+  const documentClone = new DOMParser().parseFromString(
+    _safeHTML(document.documentElement.outerHTML), 'text/html'
+  );
 
   try {
     // Parse with Readability using configured settings
