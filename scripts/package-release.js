@@ -25,7 +25,7 @@ const rootDir = path.join(__dirname, '..');
 // Verify dist exists
 const distDir = path.join(rootDir, 'dist');
 if (!fs.existsSync(distDir)) {
-  console.error('✗ dist/ directory not found. Run `npm run build:release` first.');
+  console.error('✗ dist/ directory not found. Run `pnpm run build:release` first.');
   process.exit(1);
 }
 

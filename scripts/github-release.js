@@ -33,7 +33,7 @@ console.log(`Preparing GitHub release ${tag}...\n`);
 // Verify release zip exists
 if (!fs.existsSync(zipFile)) {
   console.error(`✗ Release zip not found: release/agentboard-${version}.zip`);
-  console.error('  Run `npm run release` first to build the release package');
+  console.error('  Run `pnpm run release` first to build the release package');
   process.exit(1);
 }
 

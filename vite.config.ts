@@ -17,14 +17,16 @@ export default defineConfig({
     crx({ manifest: manifestWithVersion }),
   ],
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-      '@lib': path.resolve(__dirname, './src/lib'),
-      '@types': path.resolve(__dirname, './src/types'),
+    alias: [
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+      { find: '@lib', replacement: path.resolve(__dirname, './src/lib') },
+      { find: '@types', replacement: path.resolve(__dirname, './src/types') },
       // Use CSP-safe Ajv shim - real Ajv uses new Function() which violates extension CSP
       // Also fixes ESM import issue (ajv doesn't have default export in ESM)
-      ajv: path.resolve(__dirname, 'src/lib/ajv-csp-safe.js'),
-    },
+      // Regex: only match bare 'ajv' import, not sub-paths like 'ajv/dist/...'
+      // (ajv-formats needs real ajv internals for compilation support)
+      { find: /^ajv$/, replacement: path.resolve(__dirname, 'src/lib/ajv-csp-safe.js') },
+    ],
   },
   build: {
     // Chrome extensions need to output multiple entry points
@@ -53,7 +55,7 @@ export default defineConfig({
       },
     },
     // Chrome extensions have stricter CSP, can't use inline scripts
-    // Only minify for release builds (use RELEASE=1 npm run build for production)
+    // Only minify for release builds (use RELEASE=1 pnpm run build for production)
     minify: process.env.RELEASE ? 'terser' : false,
     terserOptions: process.env.RELEASE
       ? {

@@ -167,11 +167,11 @@ Fast interactions with expansion templates.
 ## Development
 
 ```bash
-npm install       # Install dependencies
-npm run dev       # Start with hot reload
-npm run build     # Production build
-npm test          # Run tests
-npm run check     # Type check + lint + test
+pnpm install      # Install dependencies
+pnpm run dev      # Start with hot reload
+pnpm run build    # Production build
+pnpm test         # Run tests
+pnpm run check    # Type check + lint + test
 ```
 
 Load `dist/` folder in `chrome://extensions` (Developer Mode).
