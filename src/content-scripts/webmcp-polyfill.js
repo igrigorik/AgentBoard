@@ -407,7 +407,26 @@
         throw new TypeError('Callback must be a function');
       }
       toolsChangedCallbacks.push(callback);
-    }
+    },
+    // Chrome Canary (M147+) uses ontoolchange instead of registerToolsChangedCallback
+    set ontoolchange(callback) {
+      if (callback !== null && typeof callback !== 'function') {
+        throw new TypeError('ontoolchange must be a function or null');
+      }
+      // Replace any previously set ontoolchange handler
+      if (modelContextTesting._ontoolchangeHandler) {
+        const idx = toolsChangedCallbacks.indexOf(modelContextTesting._ontoolchangeHandler);
+        if (idx !== -1) toolsChangedCallbacks.splice(idx, 1);
+      }
+      modelContextTesting._ontoolchangeHandler = callback;
+      if (callback) {
+        toolsChangedCallbacks.push(callback);
+      }
+    },
+    get ontoolchange() {
+      return modelContextTesting._ontoolchangeHandler || null;
+    },
+    _ontoolchangeHandler: null
   };
 
   // Make modelContextTesting look like Chrome's native implementation

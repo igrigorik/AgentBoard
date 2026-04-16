@@ -54,6 +54,8 @@ describe('WebMCP Polyfill - API Location', () => {
     expect(typeof (window as any).navigator.modelContextTesting.registerToolsChangedCallback).toBe(
       'function'
     );
+    // Chrome Canary (M139+) ontoolchange property
+    expect('ontoolchange' in (window as any).navigator.modelContextTesting).toBe(true);
   });
 
   it('should expose window.agent as backward-compat combined API', () => {
@@ -328,6 +330,62 @@ describe('WebMCP Polyfill - modelContextTesting (agent-side API)', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(callback).toHaveBeenCalled();
+  });
+
+  it('ontoolchange should be called when tools change', async () => {
+    const callback = vi.fn();
+    modelContextTesting.ontoolchange = callback;
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(callback).toHaveBeenCalled();
+  });
+
+  it('ontoolchange should replace previous handler', async () => {
+    const callback1 = vi.fn();
+    const callback2 = vi.fn();
+    modelContextTesting.ontoolchange = callback1;
+    modelContextTesting.ontoolchange = callback2;
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(callback1).not.toHaveBeenCalled();
+    expect(callback2).toHaveBeenCalled();
+  });
+
+  it('ontoolchange getter should return the current handler', () => {
+    expect(modelContextTesting.ontoolchange).toBeNull();
+    const callback = vi.fn();
+    modelContextTesting.ontoolchange = callback;
+    expect(modelContextTesting.ontoolchange).toBe(callback);
+  });
+
+  it('setting ontoolchange to null should remove the handler', async () => {
+    const callback = vi.fn();
+    modelContextTesting.ontoolchange = callback;
+    modelContextTesting.ontoolchange = null;
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(callback).not.toHaveBeenCalled();
   });
 });
 

@@ -38,12 +38,23 @@
   function getAgentAPI() {
     // Use modelContextTesting (agent-side API) - either native Chrome or our polyfill
     if ('modelContextTesting' in navigator) {
+      const mct = navigator.modelContextTesting;
+      const isNative = !Object.prototype.hasOwnProperty.call(mct, 'errors'); // Native won't have our errors property
       return {
-        native: !Object.prototype.hasOwnProperty.call(navigator.modelContextTesting, 'errors'), // Native won't have our errors property
-        listTools: () => navigator.modelContextTesting.listTools(),
+        native: isNative,
+        listTools: () => mct.listTools(),
         // executeTool expects args as JSON string
-        executeTool: (name, args) => navigator.modelContextTesting.executeTool(name, JSON.stringify(args)),
-        registerToolsChangedCallback: (callback) => navigator.modelContextTesting.registerToolsChangedCallback(callback)
+        executeTool: (name, args) => mct.executeTool(name, JSON.stringify(args)),
+        registerToolsChangedCallback: (callback) => {
+          // Chrome Canary (M147+) switched from registerToolsChangedCallback to ontoolchange
+          if (typeof mct.registerToolsChangedCallback === 'function') {
+            mct.registerToolsChangedCallback(callback);
+          } else if ('ontoolchange' in mct) {
+            mct.ontoolchange = callback;
+          } else {
+            console.warn('[WebMCP Bridge] No tools-changed callback mechanism found on modelContextTesting');
+          }
+        }
       };
     }
     // Legacy fallback: window.agent (backward compat API)
