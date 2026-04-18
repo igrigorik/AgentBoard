@@ -240,6 +240,7 @@
   const tools = new Map();
   const events = createEventTarget();
   const toolsChangedCallbacks = [];
+  let ontoolchangeHandler = null;
 
   // Forward internal events to toolsChangedCallbacks
   events.addEventListener('tools/listChanged', () => {
@@ -402,31 +403,29 @@
      * Register a callback for when tools change (agent-side)
      * Chrome's native API uses this pattern instead of addEventListener
      */
+    // TODO: Remove registerToolsChangedCallback once Chrome stable ships ontoolchange (M147+)
     registerToolsChangedCallback(callback) {
       if (typeof callback !== 'function') {
         throw new TypeError('Callback must be a function');
       }
       toolsChangedCallbacks.push(callback);
     },
-    // Chrome Canary (M147+) uses ontoolchange instead of registerToolsChangedCallback
     set ontoolchange(callback) {
       if (callback !== null && typeof callback !== 'function') {
         throw new TypeError('ontoolchange must be a function or null');
       }
-      // Replace any previously set ontoolchange handler
-      if (modelContextTesting._ontoolchangeHandler) {
-        const idx = toolsChangedCallbacks.indexOf(modelContextTesting._ontoolchangeHandler);
+      if (ontoolchangeHandler) {
+        const idx = toolsChangedCallbacks.indexOf(ontoolchangeHandler);
         if (idx !== -1) toolsChangedCallbacks.splice(idx, 1);
       }
-      modelContextTesting._ontoolchangeHandler = callback;
+      ontoolchangeHandler = callback;
       if (callback) {
         toolsChangedCallbacks.push(callback);
       }
     },
     get ontoolchange() {
-      return modelContextTesting._ontoolchangeHandler || null;
-    },
-    _ontoolchangeHandler: null
+      return ontoolchangeHandler;
+    }
   };
 
   // Make modelContextTesting look like Chrome's native implementation

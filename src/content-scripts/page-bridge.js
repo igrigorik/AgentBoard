@@ -46,11 +46,11 @@
         // executeTool expects args as JSON string
         executeTool: (name, args) => mct.executeTool(name, JSON.stringify(args)),
         registerToolsChangedCallback: (callback) => {
-          // Chrome Canary (M147+) switched from registerToolsChangedCallback to ontoolchange
-          if (typeof mct.registerToolsChangedCallback === 'function') {
-            mct.registerToolsChangedCallback(callback);
-          } else if ('ontoolchange' in mct) {
+          // TODO: Remove registerToolsChangedCallback fallback once Chrome stable ships ontoolchange (M147+)
+          if ('ontoolchange' in mct) {
             mct.ontoolchange = callback;
+          } else if (typeof mct.registerToolsChangedCallback === 'function') {
+            mct.registerToolsChangedCallback(callback);
           } else {
             console.warn('[WebMCP Bridge] No tools-changed callback mechanism found on modelContextTesting');
           }

@@ -54,7 +54,7 @@ describe('WebMCP Polyfill - API Location', () => {
     expect(typeof (window as any).navigator.modelContextTesting.registerToolsChangedCallback).toBe(
       'function'
     );
-    // Chrome Canary (M139+) ontoolchange property
+    // Chrome M147+ ontoolchange property
     expect('ontoolchange' in (window as any).navigator.modelContextTesting).toBe(true);
   });
 
@@ -386,6 +386,36 @@ describe('WebMCP Polyfill - modelContextTesting (agent-side API)', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('ontoolchange and registerToolsChangedCallback should both fire', async () => {
+    const callbackViaRegister = vi.fn();
+    const callbackViaOnchange = vi.fn();
+    modelContextTesting.registerToolsChangedCallback(callbackViaRegister);
+    modelContextTesting.ontoolchange = callbackViaOnchange;
+
+    modelContext.registerTool({
+      name: 'test_tool',
+      description: 'Test tool',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(callbackViaRegister).toHaveBeenCalled();
+    expect(callbackViaOnchange).toHaveBeenCalled();
+  });
+
+  it('ontoolchange should throw for non-function values', () => {
+    expect(() => {
+      modelContextTesting.ontoolchange = 'not a function';
+    }).toThrow('ontoolchange must be a function or null');
+    expect(() => {
+      modelContextTesting.ontoolchange = 42;
+    }).toThrow('ontoolchange must be a function or null');
+    expect(() => {
+      modelContextTesting.ontoolchange = {};
+    }).toThrow('ontoolchange must be a function or null');
   });
 });
 
