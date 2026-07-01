@@ -21,7 +21,7 @@
     // Still set up window.agent alias for backward compat if not present
     if (!('agent' in window)) {
       Object.defineProperty(window, 'agent', {
-        value: navigator.modelContext || document.modelContext,
+        value: document.modelContext || navigator.modelContext,
         writable: false,
         configurable: false,
         enumerable: true
