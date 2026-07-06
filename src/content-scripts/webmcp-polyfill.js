@@ -16,12 +16,12 @@
   'use strict';
 
   // Guard: already initialized (either by us or native browser support)
-  if ('modelContext' in navigator) {
+  if ('modelContext' in navigator || 'modelContext' in document) {
     console.log('[WebMCP] Native navigator.modelContext detected, skipping polyfill');
     // Still set up window.agent alias for backward compat if not present
     if (!('agent' in window)) {
       Object.defineProperty(window, 'agent', {
-        value: navigator.modelContext,
+        value: document.modelContext || navigator.modelContext,
         writable: false,
         configurable: false,
         enumerable: true
