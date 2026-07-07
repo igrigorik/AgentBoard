@@ -33,6 +33,8 @@ describe('WebMCP Polyfill - API Location', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
   });
 
   it('should expose navigator.modelContext (page-side API per WebMCP spec)', () => {
@@ -90,6 +92,8 @@ describe('WebMCP Polyfill - unregisterTool', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     modelContext = (window as any).navigator.modelContext;
     modelContextTesting = (window as any).navigator.modelContextTesting;
@@ -139,6 +143,8 @@ describe('WebMCP Polyfill - clearContext', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     modelContext = (window as any).navigator.modelContext;
     modelContextTesting = (window as any).navigator.modelContextTesting;
@@ -212,6 +218,8 @@ describe('WebMCP Polyfill - modelContextTesting (agent-side API)', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     modelContext = (window as any).navigator.modelContext;
     modelContextTesting = (window as any).navigator.modelContextTesting;
@@ -442,6 +450,8 @@ describe('WebMCP Polyfill - agent context in execute', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     modelContext = (window as any).navigator.modelContext;
     modelContextTesting = (window as any).navigator.modelContextTesting;
@@ -512,6 +522,8 @@ describe('WebMCP Polyfill - provideContext tolerance', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     modelContext = (window as any).navigator.modelContext;
     modelContextTesting = (window as any).navigator.modelContextTesting;
@@ -598,6 +610,8 @@ describe('WebMCP Polyfill - annotations', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     modelContext = (window as any).navigator.modelContext;
     modelContextTesting = (window as any).navigator.modelContextTesting;
@@ -680,6 +694,8 @@ describe('WebMCP Polyfill - JSON Schema Validation', () => {
     const script = dom.window.document.createElement('script');
     script.textContent = polyfillCode;
     dom.window.document.body.appendChild(script);
+    // Polyfill defers registration to DOMContentLoaded (installed at document_start in prod)
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
 
     // Use window.agent (backward compat API with both page-side and agent-side methods)
     agent = (window as any).agent;

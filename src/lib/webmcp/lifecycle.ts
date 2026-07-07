@@ -400,8 +400,11 @@ export class TabManager {
 
       log.debug(`[WebMCP Lifecycle] Injecting scripts into tab ${tabId} (${tab.url})`);
 
-      // Polyfill is injected via manifest content_scripts (world: MAIN, run_at: document_start)
-      // so it's guaranteed to be available before any page scripts run.
+      // Polyfill is injected via manifest content_scripts (world: MAIN, run_at: document_start),
+      // but it DEFERS its API registration to DOMContentLoaded so OriginTrial registrants can
+      // enable the native modelContext first. It is therefore NOT guaranteed to be present when
+      // the scripts below are injected. Each consumer (page-bridge, built-in tools, user scripts)
+      // tolerates a late polyfill by waiting for the 'webmcp:polyfill-ready' signal / window.agent.
 
       // 1. Inject the relay content script (isolated world)
       // CRITICAL: Must be first so it's listening when bridge sends initial snapshot

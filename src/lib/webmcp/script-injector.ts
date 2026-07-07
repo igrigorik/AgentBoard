@@ -70,34 +70,49 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
       hasShouldRegister: typeof shouldRegister !== 'undefined'
     });
 
-    if (typeof shouldRegister === 'function') {
-      try {
-        if (!shouldRegister()) {
-          console.log('[WebMCP] Tool ${scriptName} skipped registration (shouldRegister returned false)');
-          return;
+    // Registration must wait for window.agent, which is installed by the polyfill.
+    // The polyfill registers asynchronously (deferred to DOMContentLoaded so OriginTrial
+    // registrants can enable the native API first), so window.agent may not exist yet.
+    function registerNow() {
+      if (typeof shouldRegister === 'function') {
+        try {
+          if (!shouldRegister()) {
+            console.log('[WebMCP] Tool ${scriptName} skipped registration (shouldRegister returned false)');
+            return;
+          }
+        } catch (error) {
+          console.error('[WebMCP] Error in shouldRegister for ${scriptName}:', error);
+          // Continue with registration if shouldRegister throws (fail-open)
         }
-      } catch (error) {
-        console.error('[WebMCP] Error in shouldRegister for ${scriptName}:', error);
-        // Continue with registration if shouldRegister throws (fail-open)
+      }
+
+      if (window.agent && typeof metadata !== 'undefined' && typeof execute !== 'undefined') {
+        const tool = {
+          name: '${toolName}',
+          description: metadata.description || '${metadata.description || ''}',
+          inputSchema: metadata.inputSchema || { type: 'object', properties: {} },
+          execute: execute
+        };
+
+        window.agent.registerTool(tool);
+        console.log('[WebMCP] Registered tool ${toolName} v${metadata.version}');
+      } else {
+        console.error('[WebMCP] Failed to register ${scriptName}:', {
+          hasAgent: !!window.agent,
+          hasMetadata: typeof metadata !== 'undefined',
+          hasExecute: typeof execute !== 'undefined'
+        });
       }
     }
 
-    if (window.agent && typeof metadata !== 'undefined' && typeof execute !== 'undefined') {
-      const tool = {
-        name: '${toolName}',
-        description: metadata.description || '${metadata.description || ''}',
-        inputSchema: metadata.inputSchema || { type: 'object', properties: {} },
-        execute: execute
-      };
-
-      window.agent.registerTool(tool);
-      console.log('[WebMCP] Registered tool ${toolName} v${metadata.version}');
+    if (window.agent) {
+      registerNow();
+    } else if (window.__webmcpReady) {
+      // Polyfill finished but did not install window.agent — register anyway to log diagnostics.
+      registerNow();
     } else {
-      console.error('[WebMCP] Failed to register ${scriptName}:', {
-        hasAgent: !!window.agent,
-        hasMetadata: typeof metadata !== 'undefined',
-        hasExecute: typeof execute !== 'undefined'
-      });
+      console.log('[WebMCP] window.agent not ready for ${scriptName}, waiting for polyfill');
+      window.addEventListener('webmcp:polyfill-ready', registerNow, { once: true });
     }
 
   } catch (error) {

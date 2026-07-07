@@ -12,10 +12,43 @@
  * - navigator.modelContextTesting (agent-side: listTools, executeTool, registerToolsChangedCallback)
  * - navigator.modelContext (page-side: provideContext, registerTool) - when available
  */
-(function () {
+(function installWebmcpPolyfill(domContentLoadedEvent) {
   'use strict';
 
-  // Guard: already initialized (either by us or native browser support)
+  // Defer registration until DOMContentLoaded. This content script runs at
+  // document_start (readyState === 'loading'), before the parser has processed any
+  // OriginTrial meta tokens or run page scripts. OriginTrial tokens are applied
+  // during parsing, so by DOMContentLoaded the native modelContext API is enabled
+  // if the trial is present, letting us correctly defer to native instead of
+  // installing our polyfill. Re-running at the page's own DCL also lands before the
+  // extension injects its consumer scripts (page-bridge, tools, user scripts), which
+  // arrive via webNavigation.onDOMContentLoaded — a background round-trip that runs
+  // after the page's DCL handlers — so the API is ready when they need it.
+  //
+  // domContentLoadedEvent is set only when invoked by the listener below; on the
+  // initial synchronous call it is undefined, which is how we tell "defer" from
+  // "install now" without relying on readyState (which some environments don't
+  // advance when the event is dispatched synchronously).
+  if (!domContentLoadedEvent && document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installWebmcpPolyfill, { once: true });
+    return;
+  }
+
+  // Readiness signal for any consumer that still runs before this does
+  // (defense-in-depth): a window.__webmcpReady flag plus a 'webmcp:polyfill-ready'
+  // event, both emitted once the API (native or polyfill) is ready.
+  function signalReady() {
+    window.__webmcpReady = true;
+    try {
+      window.dispatchEvent(new Event('webmcp:polyfill-ready'));
+    } catch {
+      /* dispatch must never break registration */
+    }
+  }
+
+  // Guard: already initialized (either by us or native browser support).
+  // Re-checked here at DCL time so OriginTrial registrants have had a chance to
+  // enable the native API before we decide to polyfill.
   if ('modelContext' in navigator || 'modelContext' in document) {
     console.log('[WebMCP] Native navigator.modelContext detected, skipping polyfill');
     // Still set up window.agent alias for backward compat if not present
@@ -27,6 +60,7 @@
         enumerable: true
       });
     }
+    signalReady();
     return;
   }
 
@@ -505,4 +539,5 @@
   }
 
   console.log('[WebMCP] Polyfill ready: navigator.modelContext, navigator.modelContextTesting (also: window.agent)');
+  signalReady();
 })();

@@ -214,13 +214,25 @@
     console.log('[WebMCP Bridge] Ready and listening');
   }
 
-  // Initialize immediately if any WebMCP API exists
-  const agentAPI = getAgentAPI();
-  if (agentAPI) {
+  // Guard against initializing more than once (injection + ready event could both fire)
+  let bridgeInitialized = false;
+  function initBridgeOnce() {
+    if (bridgeInitialized || !getAgentAPI()) return;
+    bridgeInitialized = true;
     initBridge();
+  }
+
+  // The polyfill defers its API registration to DOMContentLoaded (so OriginTrial
+  // registrants can enable the native API first), so the WebMCP API may not exist
+  // when we're injected. Instead of giving up, wait for the 'webmcp:polyfill-ready'
+  // signal. Native APIs are present immediately, so this also handles them without delay.
+  if (getAgentAPI()) {
+    initBridgeOnce();
+  } else if (!window.__webmcpReady) {
+    console.log('[WebMCP Bridge] WebMCP API not ready yet, waiting for polyfill');
+    window.addEventListener('webmcp:polyfill-ready', initBridgeOnce, { once: true });
   } else {
-    // If no API exists yet, it might be loaded later
-    // This shouldn't happen if polyfill is injected at document_start
-    console.warn('[WebMCP Bridge] No WebMCP API found at injection time');
+    // Ready flag set but no API surfaced — nothing to bridge (should not happen)
+    console.warn('[WebMCP Bridge] Polyfill ready but no WebMCP API found');
   }
 })();
