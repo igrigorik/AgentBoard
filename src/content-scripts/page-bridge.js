@@ -1,10 +1,11 @@
 /**
  * WebMCP Page Bridge (MAIN World)
- * Bridges navigator.modelContext events to the extension via postMessage
+ * Bridges document.modelContext events to the extension via postMessage
  * Executes in MAIN world with full access to page runtime
  *
- * Aligns with WebMCP proposed spec:
- * https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md
+ * Aligns with the current WebMCP shape (Chrome 150+): the page-side and agent-side
+ * APIs are unified on document.modelContext (navigator.modelContext is the deprecated
+ * alias). There is no more navigator.modelContextTesting.
  */
 (function () {
   'use strict';
@@ -27,43 +28,62 @@
   }
 
   /**
-   * Get the agent-side API for discovering and executing tools
-   * 
-   * Chrome's WebMCP implementation:
-   * - navigator.modelContextTesting = agent-side (listTools, executeTool, registerToolsChangedCallback)
-   * - navigator.modelContext = page-side (registerTool, unregisterTool, provideContext)
-   * 
-   * Our polyfill provides the same separation.
+   * Strip native-only / non-serializable fields (e.g. the tool's `window`) so the
+   * descriptors survive structured-clone when posted to the extension. inputSchema
+   * is left as-is (a JSON string in the native shape); the background parses it.
+   */
+  function sanitizeTools(list) {
+    return (list || []).map((t) => {
+      const entry = { name: t.name, description: t.description, inputSchema: t.inputSchema };
+      if (t.annotations != null) entry.annotations = t.annotations;
+      return entry;
+    });
+  }
+
+  /**
+   * Get the WebMCP agent-side API for discovering and executing tools.
+   *
+   * Current shape (Chrome 150+): everything lives on document.modelContext
+   * (navigator.modelContext is the deprecated alias; our polyfill mirrors both).
+   *   - getTools({ fromOrigins })                async discovery
+   *   - executeTool(toolObject, argsJson)        async execution (takes the tool obj)
+   *   - 'toolchange' event                       via addEventListener
    */
   function getAgentAPI() {
-    // Use modelContextTesting (agent-side API) - either native Chrome or our polyfill
-    if ('modelContextTesting' in navigator) {
-      const mct = navigator.modelContextTesting;
-      const isNative = !Object.prototype.hasOwnProperty.call(mct, 'errors'); // Native won't have our errors property
+    const mc = (typeof document !== 'undefined' && document.modelContext) || navigator.modelContext;
+
+    if (mc && typeof mc.getTools === 'function') {
+      // Our polyfill tags modelContext with an `errors` property; native does not.
+      const native = !Object.prototype.hasOwnProperty.call(mc, 'errors');
       return {
-        native: isNative,
-        listTools: () => mct.listTools(),
-        // executeTool expects args as JSON string
-        executeTool: (name, args) => mct.executeTool(name, JSON.stringify(args)),
-        registerToolsChangedCallback: (callback) => {
-          // TODO: Remove registerToolsChangedCallback fallback once Chrome stable ships ontoolchange (M147+)
-          if ('ontoolchange' in mct) {
-            mct.ontoolchange = callback;
-          } else if (typeof mct.registerToolsChangedCallback === 'function') {
-            mct.registerToolsChangedCallback(callback);
-          } else {
-            console.warn('[WebMCP Bridge] No tools-changed callback mechanism found on modelContextTesting');
-          }
-        }
+        native,
+        // Async snapshot of serializable descriptors.
+        listTools: async () => sanitizeTools(await mc.getTools()),
+        // Native executeTool takes the tool OBJECT + JSON-string args; resolve name -> tool.
+        executeTool: async (name, args) => {
+          const list = await mc.getTools();
+          const tool = list.find((t) => t && t.name === name);
+          if (!tool) throw new Error(`Tool '${name}' not found`);
+          return mc.executeTool(tool, JSON.stringify(args ?? {}));
+        },
+        // Fires whenever the tool list changes.
+        subscribe: (cb) => mc.addEventListener('toolchange', cb)
       };
     }
-    // Legacy fallback: window.agent (backward compat API)
-    if ('agent' in window) {
+
+    // Legacy fallback: window.agent shim (older AgentBoard polyfills).
+    if (window.agent && typeof window.agent.getTools === 'function') {
+      const a = window.agent;
       return {
         native: false,
-        listTools: () => window.agent.listTools(),
-        executeTool: (name, args) => window.agent.callTool(name, args),
-        registerToolsChangedCallback: (callback) => window.agent.addEventListener('tools/listChanged', callback)
+        listTools: async () => sanitizeTools(await a.getTools()),
+        executeTool: async (name, args) => {
+          const list = await a.getTools();
+          const tool = list.find((t) => t && t.name === name);
+          if (!tool) throw new Error(`Tool '${name}' not found`);
+          return a.executeTool(tool, JSON.stringify(args ?? {}));
+        },
+        subscribe: (cb) => a.addEventListener('toolchange', cb)
       };
     }
     return null;
@@ -72,52 +92,51 @@
   /**
    * Initialize bridge using the agent-side API
    */
-  function initBridge() {
+  async function initBridge() {
     const agentAPI = getAgentAPI();
 
     if (!agentAPI) {
-      console.warn('[WebMCP Bridge] No WebMCP API found (modelContextTesting, modelContext, or agent)');
+      console.warn('[WebMCP Bridge] No WebMCP API found (document.modelContext, navigator.modelContext, or window.agent)');
       return;
     }
 
     console.log('[WebMCP Bridge] Initializing in MAIN world', agentAPI.native ? '(native Chrome API)' : '(polyfill)');
 
-    // Get current tools immediately - in case any were registered before we got here
-    const currentTools = agentAPI.listTools();
-    console.log('[WebMCP Bridge] Current tools on init:', currentTools);
-
-    // Send initial snapshot if there are already tools
-    if (currentTools.length > 0) {
+    // Fetch the current tool list and forward it to the extension as tools/listChanged.
+    const forwardTools = async (extra) => {
+      const tools = await agentAPI.listTools();
       postToExtension({
         jsonrpc: JSONRPC,
         method: 'tools/listChanged',
         params: {
-          tools: currentTools,
+          tools,
           origin: location.origin,
           timestamp: Date.now(),
-          initial: true
+          ...(extra || {})
         }
       });
-      console.log('[WebMCP Bridge] Sent initial snapshot with', currentTools.length, 'existing tools');
+      return tools;
+    };
+
+    // Send initial snapshot if there are already tools (registered before we got here)
+    try {
+      const currentTools = await agentAPI.listTools();
+      console.log('[WebMCP Bridge] Current tools on init:', currentTools);
+      if (currentTools.length > 0) {
+        await forwardTools({ initial: true });
+        console.log('[WebMCP Bridge] Sent initial snapshot with', currentTools.length, 'existing tools');
+      }
+    } catch (err) {
+      console.error('[WebMCP Bridge] Failed initial tools snapshot:', err);
     }
 
-    // Subscribe to tool registry changes
-    agentAPI.registerToolsChangedCallback(() => {
-      try {
-        const tools = agentAPI.listTools();
-        postToExtension({
-          jsonrpc: JSONRPC,
-          method: 'tools/listChanged',
-          params: {
-            tools,
-            origin: location.origin,
-            timestamp: Date.now()
-          }
-        });
-        console.log('[WebMCP Bridge] Forwarded tools/listChanged', tools.length, 'tools');
-      } catch (err) {
-        console.error('[WebMCP Bridge] Failed to forward tools/listChanged:', err);
-      }
+    // Subscribe to tool registry changes ('toolchange' event)
+    agentAPI.subscribe(() => {
+      forwardTools()
+        .then((tools) =>
+          console.log('[WebMCP Bridge] Forwarded tools/listChanged', tools.length, 'tools')
+        )
+        .catch((err) => console.error('[WebMCP Bridge] Failed to forward tools/listChanged:', err));
     });
 
     // Listen for requests from extension
@@ -139,20 +158,7 @@
         console.log('[WebMCP Bridge] Received tools/list request');
 
         try {
-          const tools = agentAPI.listTools();
-
-          // Send tools via notification (not a response to preserve protocol semantics)
-          postToExtension({
-            jsonrpc: JSONRPC,
-            method: 'tools/listChanged',
-            params: {
-              tools,
-              origin: location.origin,
-              timestamp: Date.now(),
-              requested: true // Flag to indicate this was explicitly requested
-            }
-          });
-
+          const tools = await forwardTools({ requested: true });
           console.log('[WebMCP Bridge] Sent tools list:', tools.length, 'tools');
         } catch (error) {
           console.error('[WebMCP Bridge] Failed to list tools:', error);

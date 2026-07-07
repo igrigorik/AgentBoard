@@ -5,12 +5,15 @@
  * Aligns with WebMCP proposed spec:
  * https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md
  *
- * API: window.navigator.modelContext
- * Backward compat: window.agent (alias)
+ * Primary API: document.modelContext (Chrome 150+; navigator.modelContext is the
+ * deprecated alias and is mirrored for older callers).
+ * Backward compat: window.agent (thin alias for AgentBoard's own injected tools).
  *
- * Chrome Canary native support:
- * - navigator.modelContextTesting (agent-side: listTools, executeTool, registerToolsChangedCallback)
- * - navigator.modelContext (page-side: provideContext, registerTool) - when available
+ * Matches the native document.modelContext shape:
+ * - registerTool(tool, { signal })          page-side; AbortSignal unregisters
+ * - getTools({ fromOrigins })               agent-side discovery (async)
+ * - executeTool(tool, argsJson, { signal })  agent-side execution (async)
+ * - 'toolchange' event                       fired via addEventListener
  */
 (function installWebmcpPolyfill(domContentLoadedEvent) {
   'use strict';
@@ -219,29 +222,6 @@
     return errors;
   }
 
-  // Lightweight EventTarget-like impl
-  function createEventTarget() {
-    const listeners = new Map();
-    return {
-      addEventListener(type, listener) {
-        if (typeof listener !== 'function') return;
-        if (!listeners.has(type)) listeners.set(type, new Set());
-        listeners.get(type).add(listener);
-      },
-      removeEventListener(type, listener) {
-        if (!listeners.has(type)) return;
-        listeners.get(type).delete(listener);
-      },
-      dispatchEvent(event) {
-        const cbs = listeners.get(event.type);
-        if (!cbs) return;
-        cbs.forEach(cb => {
-          try { cb.call(this, event); } catch { /* swallow to not break others */ }
-        });
-      }
-    };
-  }
-
   /**
    * Create an agent context object to pass to tool execute functions
    * Per WebMCP spec, this provides requestUserInteraction() API
@@ -270,22 +250,10 @@
     };
   }
 
-  // Shared state between page-side (modelContext) and agent-side (modelContextTesting) APIs
+  // Shared tool registry, keyed by name. We keep the parsed (object) inputSchema and
+  // the execute() fn internally; getTools() exposes the native-shaped descriptor with
+  // inputSchema serialized as a JSON string.
   const tools = new Map();
-  const events = createEventTarget();
-  const toolsChangedCallbacks = [];
-  let ontoolchangeHandler = null;
-
-  // Forward internal events to toolsChangedCallbacks
-  events.addEventListener('tools/listChanged', () => {
-    for (const callback of toolsChangedCallbacks) {
-      try {
-        callback();
-      } catch (err) {
-        console.error('[WebMCP] Error in toolsChangedCallback:', err);
-      }
-    }
-  });
 
   function validateAndNormalizeTool(tool) {
     if (!tool || typeof tool !== 'object') {
@@ -307,8 +275,8 @@
   }
 
   /**
-   * Internal function to execute a tool
-   * Used by both modelContext.callTool (legacy) and modelContextTesting.executeTool
+   * Internal function to execute a tool by name with parsed (object) params.
+   * Backs modelContext.executeTool() and the window.agent legacy shim.
    */
   async function executeToolInternal(toolName, params = {}) {
     if (!tools.has(toolName)) {
@@ -333,142 +301,107 @@
   }
 
   /**
-   * Internal function to list tools
-   * Used by both APIs
+   * Build the native-shaped descriptors returned by getTools(): sorted alphabetically
+   * by name, inputSchema serialized as a JSON string, plus the tool's origin. The
+   * execute() fn is intentionally omitted (agents invoke via executeTool()).
    */
   function listToolsInternal() {
-    return Array.from(tools.values()).map(({ name, description, inputSchema, annotations }) => {
-      const entry = { name, description, inputSchema };
-      if (annotations != null) entry.annotations = annotations;
-      return entry;
-    });
+    return Array.from(tools.values())
+      .map(({ name, description, inputSchema, annotations }) => {
+        const entry = {
+          name,
+          description,
+          inputSchema: typeof inputSchema === 'string' ? inputSchema : JSON.stringify(inputSchema),
+          origin: location.origin
+        };
+        if (annotations != null) entry.annotations = annotations;
+        return entry;
+      })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
   /**
-   * PAGE-SIDE API: navigator.modelContext
-   * For pages to register tools with the agent
+   * WebMCP API: document.modelContext (mirrored on navigator.modelContext).
+   * Matches Chrome's native shape exactly:
+   *   - registerTool(tool, { signal })           page-side; AbortSignal unregisters
+   *   - getTools({ fromOrigins })                agent-side discovery (async)
+   *   - executeTool(tool, argsJson, { signal })  agent-side execution (async)
+   *   - 'toolchange' event                       via addEventListener (EventTarget)
    */
-  const modelContext = {
+  class ModelContext extends EventTarget {
     /**
-     * Replace entire tool set (per WebMCP spec)
-     * Clears any pre-existing tools before registering new ones
+     * Register a single tool. Pass { signal } to unregister when the signal aborts.
+     * Returns a promise to match the native (awaitable) API.
      */
-    provideContext(context) {
-      if (!context || typeof context !== 'object') {
-        throw new ValidationError('provideContext requires an object argument');
-      }
-      const toolList = Array.isArray(context.tools) ? context.tools : [];
-      tools.clear();
-      for (const raw of toolList) {
-        const tool = validateAndNormalizeTool(raw);
-        if (tools.has(tool.name)) {
-          throw new ValidationError(`Duplicate tool name: ${tool.name}`);
-        }
-        tools.set(tool.name, tool);
-      }
-      // Notify listeners
-      queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-    },
-
-    /**
-     * Register a single tool (per WebMCP spec)
-     * Adds to existing tools without clearing
-     */
-    registerTool(rawTool) {
+    registerTool(rawTool, options = {}) {
       const tool = validateAndNormalizeTool(rawTool);
       if (tools.has(tool.name)) {
         // Allow replacement for hot reload
         console.warn(`[WebMCP] Replacing existing tool: ${tool.name}`);
       }
       tools.set(tool.name, tool);
-      queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-    },
 
-    /**
-     * Unregister a tool by name (per WebMCP spec)
-     */
-    unregisterTool(toolName) {
-      if (typeof toolName !== 'string') {
-        throw new ValidationError('Tool name must be a string');
+      // AbortSignal-based unregistration (native contract).
+      const signal = options && options.signal;
+      if (signal) {
+        if (signal.aborted) {
+          tools.delete(tool.name);
+        } else {
+          signal.addEventListener(
+            'abort',
+            () => {
+              // Only remove if this exact registration is still the active one.
+              if (tools.get(tool.name) === tool) {
+                tools.delete(tool.name);
+                notifyToolChange();
+              }
+            },
+            { once: true }
+          );
+        }
       }
-      const existed = tools.delete(toolName);
-      if (existed) {
-        queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-      }
-      return existed;
-    },
 
-    /**
-     * Clear all tools (per Chrome's WebMCP implementation)
-     */
-    clearContext() {
-      const hadTools = tools.size > 0;
-      tools.clear();
-      if (hadTools) {
-        queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-      }
+      notifyToolChange();
+      return Promise.resolve();
     }
-  };
 
-  /**
-   * AGENT-SIDE API: navigator.modelContextTesting
-   * For agents to discover and call tools registered by pages
-   */
-  const modelContextTesting = {
     /**
-     * List all registered tools (agent-side)
-     * Returns tool descriptors without execute functions
+     * Discover registered tools (agent-side). Async; returns native-shaped
+     * descriptors. fromOrigins is accepted for API compatibility but the polyfill
+     * is single-origin, so only same-origin tools ever exist.
      */
-    listTools() {
+    async getTools() {
       return listToolsInternal();
-    },
+    }
 
     /**
-     * Execute a tool by name (agent-side)
-     * Chrome's native API expects args as JSON string
+     * Execute a tool (agent-side). Native passes the tool object returned by
+     * getTools(); we also accept a bare tool name. args may be a JSON string
+     * (native) or an object (convenience).
      */
-    async executeTool(name, args = '{}') {
-      // Parse args if it's a JSON string (Chrome's native format)
+    async executeTool(tool, args = '{}') {
+      const name = typeof tool === 'string' ? tool : tool && tool.name;
       const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args;
       return executeToolInternal(name, parsedArgs);
-    },
-
-    /**
-     * Register a callback for when tools change (agent-side)
-     * Chrome's native API uses this pattern instead of addEventListener
-     */
-    // TODO: Remove registerToolsChangedCallback once Chrome stable ships ontoolchange (M147+)
-    registerToolsChangedCallback(callback) {
-      if (typeof callback !== 'function') {
-        throw new TypeError('Callback must be a function');
-      }
-      toolsChangedCallbacks.push(callback);
-    },
-    set ontoolchange(callback) {
-      if (callback !== null && typeof callback !== 'function') {
-        throw new TypeError('ontoolchange must be a function or null');
-      }
-      if (ontoolchangeHandler) {
-        const idx = toolsChangedCallbacks.indexOf(ontoolchangeHandler);
-        if (idx !== -1) toolsChangedCallbacks.splice(idx, 1);
-      }
-      ontoolchangeHandler = callback;
-      if (callback) {
-        toolsChangedCallbacks.push(callback);
-      }
-    },
-    get ontoolchange() {
-      return ontoolchangeHandler;
     }
-  };
+  }
 
-  // Make modelContextTesting look like Chrome's native implementation
-  Object.defineProperty(modelContextTesting, Symbol.toStringTag, {
-    value: 'ModelContextTesting',
-    configurable: true
+  const modelContext = new ModelContext();
+
+  // Dispatch 'toolchange' on the next microtask so a burst of synchronous
+  // registrations coalesces into a single notification.
+  function notifyToolChange() {
+    queueMicrotask(() => modelContext.dispatchEvent(new Event('toolchange')));
+  }
+
+  // Define document.modelContext (primary, per Chrome 150+) and mirror it on
+  // navigator.modelContext (deprecated in Chrome 150, kept for older callers).
+  Object.defineProperty(document, 'modelContext', {
+    value: modelContext,
+    writable: false,
+    configurable: false,
+    enumerable: true
   });
-
-  // Define navigator.modelContext (page-side API)
   Object.defineProperty(navigator, 'modelContext', {
     value: modelContext,
     writable: false,
@@ -476,29 +409,16 @@
     enumerable: true
   });
 
-  // Define navigator.modelContextTesting (agent-side API)
-  Object.defineProperty(navigator, 'modelContextTesting', {
-    value: modelContextTesting,
-    writable: false,
-    configurable: false,
-    enumerable: true
-  });
-
-  // Backward compatibility: window.agent combines both APIs for legacy scripts
+  // Backward-compatibility alias for AgentBoard's own injected tools and user
+  // scripts, which register via window.agent.registerTool(...). Thin shim over the
+  // unified modelContext; exposes just enough of the agent-side surface for console use.
   const agentCompat = {
-    // Page-side methods
-    provideContext: modelContext.provideContext.bind(modelContext),
-    registerTool: modelContext.registerTool.bind(modelContext),
-    unregisterTool: modelContext.unregisterTool.bind(modelContext),
-    clearContext: modelContext.clearContext.bind(modelContext),
-    // Agent-side methods (legacy support)
-    listTools: modelContextTesting.listTools.bind(modelContextTesting),
-    callTool: (name, args) => executeToolInternal(name, args), // Direct call, not JSON string
-    // Legacy event API
-    addEventListener: events.addEventListener.bind(events),
-    removeEventListener: events.removeEventListener.bind(events)
+    registerTool: (tool, options) => modelContext.registerTool(tool, options),
+    getTools: () => modelContext.getTools(),
+    executeTool: (tool, args) => modelContext.executeTool(tool, args),
+    addEventListener: (type, cb) => modelContext.addEventListener(type, cb),
+    removeEventListener: (type, cb) => modelContext.removeEventListener(type, cb)
   };
-
   Object.defineProperty(window, 'agent', {
     value: agentCompat,
     writable: false,
@@ -506,7 +426,7 @@
     enumerable: true
   });
 
-  // Expose error classes on all APIs for consumers
+  // Expose error classes for consumers
   const errorClasses = {
     WebMCPError,
     ToolNotFoundError,
@@ -514,7 +434,6 @@
     ExecutionError
   };
   modelContext.errors = errorClasses;
-  modelContextTesting.errors = errorClasses;
   window.agent.errors = errorClasses;
 
   // Create Trusted Types policy for user script injection
@@ -538,6 +457,6 @@
     }
   }
 
-  console.log('[WebMCP] Polyfill ready: navigator.modelContext, navigator.modelContextTesting (also: window.agent)');
+  console.log('[WebMCP] Polyfill ready: document.modelContext (also navigator.modelContext, window.agent)');
   signalReady();
 })();
