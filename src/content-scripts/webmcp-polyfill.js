@@ -15,9 +15,12 @@
 (function () {
   'use strict';
 
-  // Guard: already initialized (either by us or native browser support)
+  // Guard: already initialized (either by us or native browser support).
+  // Per W3C spec PR #184, Chrome 150+ exposes native `document.modelContext`; in
+  // older builds native `navigator.modelContext` may be present. Either means a
+  // native surface already owns the tool store, so we skip our polyfill.
   if ('modelContext' in navigator || 'modelContext' in document) {
-    console.log('[WebMCP] Native navigator.modelContext detected, skipping polyfill');
+    console.log('[WebMCP] Native modelContext detected (document.modelContext or navigator.modelContext), skipping polyfill');
     // Still set up window.agent alias for backward compat if not present
     if (!('agent' in window)) {
       Object.defineProperty(window, 'agent', {
