@@ -311,6 +311,49 @@
   }
 
   /**
+   * Returns the browser's native document.modelContext if it has appeared.
+   *
+   * W3C WebMCP spec PR #184 moved modelContext from Navigator to Document.
+   * Chrome 150+ initializes native `document.modelContext` AFTER document_start,
+   * so when this polyfill runs it is not yet present and we install our own
+   * navigator.modelContext/modelContextTesting with a separate tool store.
+   * When the native surface shows up later, tools registered through our
+   * polyfill (via window.agent / navigator.modelContext, e.g. AgentBoard's
+   * compiled and user 'use webmcp-tool v1' scripts) would otherwise be
+   * invisible to agents reading the canonical document.modelContext.
+   *
+   * This polyfill never installs document.modelContext, so any
+   * document.modelContext present is the native implementation.
+   */
+  function getNativeDocumentModelContext() {
+    const native = document.modelContext;
+    if (native && native !== modelContext && typeof native.registerTool === 'function') {
+      return native;
+    }
+    return null;
+  }
+
+  /**
+   * Forward an additive page-side mutation to the native document.modelContext
+   * (Chrome 150+) so tools registered through the polyfill are also visible on
+   * the spec-canonical surface. Swallows errors so a native rejection never
+   * breaks polyfill callers.
+   *
+   * Note: provideContext/clearContext are intentionally NOT forwarded — they
+   * are destructive replace/clear operations and forwarding them would clobber
+   * site-registered tools in the native store. Only additive single-tool
+   * operations (register/unregister) are mirrored.
+   */
+  function forwardToNative(fn) {
+    try {
+      const native = getNativeDocumentModelContext();
+      if (native) fn(native);
+    } catch (e) {
+      console.warn('[WebMCP] Failed to forward to native document.modelContext:', e);
+    }
+  }
+
+  /**
    * PAGE-SIDE API: navigator.modelContext
    * For pages to register tools with the agent
    */
@@ -338,7 +381,9 @@
 
     /**
      * Register a single tool (per WebMCP spec)
-     * Adds to existing tools without clearing
+     * Adds to existing tools without clearing. Also forwards to the native
+     * document.modelContext (Chrome 150+) so the tool is discoverable via the
+     * spec-canonical surface.
      */
     registerTool(rawTool) {
       const tool = validateAndNormalizeTool(rawTool);
@@ -348,10 +393,12 @@
       }
       tools.set(tool.name, tool);
       queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
+      forwardToNative((native) => native.registerTool(rawTool));
     },
 
     /**
      * Unregister a tool by name (per WebMCP spec)
+     * Also forwards to the native document.modelContext (Chrome 150+).
      */
     unregisterTool(toolName) {
       if (typeof toolName !== 'string') {
@@ -360,6 +407,7 @@
       const existed = tools.delete(toolName);
       if (existed) {
         queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
+        forwardToNative((native) => native.unregisterTool(toolName));
       }
       return existed;
     },

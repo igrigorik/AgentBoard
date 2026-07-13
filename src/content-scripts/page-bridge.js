@@ -28,21 +28,51 @@
 
   /**
    * Get the agent-side API for discovering and executing tools
-   * 
-   * Chrome's WebMCP implementation:
-   * - navigator.modelContextTesting = agent-side (listTools, executeTool, registerToolsChangedCallback)
-   * - navigator.modelContext = page-side (registerTool, unregisterTool, provideContext)
-   * 
-   * Our polyfill provides the same separation.
+   *
+   * Per W3C WebMCP spec PR #184 (merged May 27, 2026), the `modelContext` API moved
+   * from `Navigator` to `Document`. Chrome 150+ ships a unified `document.modelContext`
+   * with both page-side (registerTool/unregisterTool) and agent-side (getTools/executeTool)
+   * methods. `navigator.modelContext` / `navigator.modelContextTesting` are deprecated.
+   *
+   * Resolution priority (spec-canonical first):
+   *   1. document.modelContext (native, Chrome 150+) — getTools() returns a Promise
+   *   2. navigator.modelContextTesting (polyfill or old native) — listTools() is sync
+   *   3. window.agent (legacy compat)
+   *
+   * `listTools` is normalized to ALWAYS return a Promise so callers can `await` it
+   * regardless of which surface was found.
    */
   function getAgentAPI() {
-    // Use modelContextTesting (agent-side API) - either native Chrome or our polyfill
+    // 1. document.modelContext (W3C spec PR #184, Chrome 150+) — canonical unified surface
+    const dmc = document.modelContext;
+    if (dmc && typeof dmc.getTools === 'function') {
+      return {
+        native: true,
+        // getTools() returns a Promise; normalize just in case a future impl is sync
+        listTools: () => Promise.resolve(dmc.getTools()),
+        // Native executeTool(name, args) takes args as an object (not a JSON string)
+        executeTool: (name, args) => dmc.executeTool(name, args),
+        registerToolsChangedCallback: (callback) => {
+          if ('ontoolchange' in dmc) {
+            dmc.ontoolchange = callback;
+          } else if (typeof dmc.registerToolsChangedCallback === 'function') {
+            // Fallback for older native builds predating ontoolchange
+            dmc.registerToolsChangedCallback(callback);
+          } else {
+            console.warn('[WebMCP Bridge] No tools-changed callback mechanism on document.modelContext');
+          }
+        }
+      };
+    }
+
+    // 2. navigator.modelContextTesting (polyfill or old native) — agent-side API
     if ('modelContextTesting' in navigator) {
       const mct = navigator.modelContextTesting;
       const isNative = !Object.prototype.hasOwnProperty.call(mct, 'errors'); // Native won't have our errors property
       return {
         native: isNative,
-        listTools: () => mct.listTools(),
+        // listTools() is sync; normalize to a Promise
+        listTools: () => Promise.resolve(mct.listTools()),
         // executeTool expects args as JSON string
         executeTool: (name, args) => mct.executeTool(name, JSON.stringify(args)),
         registerToolsChangedCallback: (callback) => {
@@ -57,11 +87,12 @@
         }
       };
     }
-    // Legacy fallback: window.agent (backward compat API)
+
+    // 3. Legacy fallback: window.agent (backward compat API)
     if ('agent' in window) {
       return {
         native: false,
-        listTools: () => window.agent.listTools(),
+        listTools: () => Promise.resolve(window.agent.listTools()),
         executeTool: (name, args) => window.agent.callTool(name, args),
         registerToolsChangedCallback: (callback) => window.agent.addEventListener('tools/listChanged', callback)
       };
@@ -72,18 +103,25 @@
   /**
    * Initialize bridge using the agent-side API
    */
-  function initBridge() {
+  async function initBridge() {
     const agentAPI = getAgentAPI();
 
     if (!agentAPI) {
-      console.warn('[WebMCP Bridge] No WebMCP API found (modelContextTesting, modelContext, or agent)');
+      console.warn('[WebMCP Bridge] No WebMCP API found (document.modelContext, modelContextTesting, or agent)');
       return;
     }
 
     console.log('[WebMCP Bridge] Initializing in MAIN world', agentAPI.native ? '(native Chrome API)' : '(polyfill)');
 
-    // Get current tools immediately - in case any were registered before we got here
-    const currentTools = agentAPI.listTools();
+    // Get current tools immediately - in case any were registered before we got here.
+    // listTools() is async (document.modelContext.getTools() returns a Promise).
+    let currentTools;
+    try {
+      currentTools = await agentAPI.listTools();
+    } catch (err) {
+      console.error('[WebMCP Bridge] Failed to list tools on init:', err);
+      currentTools = [];
+    }
     console.log('[WebMCP Bridge] Current tools on init:', currentTools);
 
     // Send initial snapshot if there are already tools
@@ -102,9 +140,9 @@
     }
 
     // Subscribe to tool registry changes
-    agentAPI.registerToolsChangedCallback(() => {
+    agentAPI.registerToolsChangedCallback(async () => {
       try {
-        const tools = agentAPI.listTools();
+        const tools = await agentAPI.listTools();
         postToExtension({
           jsonrpc: JSONRPC,
           method: 'tools/listChanged',
@@ -139,7 +177,7 @@
         console.log('[WebMCP Bridge] Received tools/list request');
 
         try {
-          const tools = agentAPI.listTools();
+          const tools = await agentAPI.listTools();
 
           // Send tools via notification (not a response to preserve protocol semantics)
           postToExtension({

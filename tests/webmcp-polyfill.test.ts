@@ -1261,3 +1261,175 @@ describe('WebMCP Polyfill - JSON Schema Validation', () => {
     });
   });
 });
+
+describe('WebMCP Polyfill - forwarding to native document.modelContext (spec PR #184)', () => {
+  let dom: JSDOM;
+  let window: Window & typeof globalThis;
+  let modelContext: any;
+  let modelContextTesting: any;
+
+  beforeEach(() => {
+    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+      url: 'https://example.com',
+      runScripts: 'dangerously',
+    });
+
+    window = dom.window as any;
+    global.window = window as any;
+
+    const polyfillCode = fs.readFileSync(
+      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+      'utf8'
+    );
+
+    const script = dom.window.document.createElement('script');
+    script.textContent = polyfillCode;
+    dom.window.document.body.appendChild(script);
+
+    modelContext = (window as any).navigator.modelContext;
+    modelContextTesting = (window as any).navigator.modelContextTesting;
+  });
+
+  /**
+   * Simulate Chrome 150+ native document.modelContext appearing AFTER the
+   * polyfill installed at document_start (the race described in spec PR #184).
+   */
+  function installNativeDocumentModelContext() {
+    const store = new Map<string, any>();
+    const native = {
+      registerTool: vi.fn((tool: any) => store.set(tool.name, tool)),
+      unregisterTool: vi.fn((name: string) => store.delete(name)),
+      getTools: vi.fn(() =>
+        Promise.resolve(
+          Array.from(store.values()).map(({ name, description, inputSchema }) => ({
+            name,
+            description,
+            inputSchema,
+          }))
+        )
+      ),
+      executeTool: vi.fn(async (name: string, args: any) => {
+        const t = store.get(name);
+        return t ? t.execute(args) : undefined;
+      }),
+      ontoolchange: null as any,
+    };
+    Object.defineProperty(window.document, 'modelContext', {
+      value: native,
+      configurable: true,
+      enumerable: true,
+    });
+    return native;
+  }
+
+  it('forwards registerTool to native document.modelContext when it appears later', async () => {
+    const native = installNativeDocumentModelContext();
+
+    modelContext.registerTool({
+      name: 'forwarded_tool',
+      description: 'registered via polyfill',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    expect(native.registerTool).toHaveBeenCalledTimes(1);
+    expect(native.registerTool.mock.calls[0][0].name).toBe('forwarded_tool');
+
+    // The tool is now visible via the native surface
+    const tools = await native.getTools();
+    expect(tools.map((t: any) => t.name)).toContain('forwarded_tool');
+  });
+
+  it('also forwards registrations made via window.agent (user scripts)', async () => {
+    const native = installNativeDocumentModelContext();
+    const agent = (window as any).agent;
+
+    agent.registerTool({
+      name: 'user_script_tool',
+      description: 'from a use webmcp-tool v1 script',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+
+    expect(native.registerTool).toHaveBeenCalledTimes(1);
+    expect(native.registerTool.mock.calls[0][0].name).toBe('user_script_tool');
+  });
+
+  it('forwards unregisterTool to native document.modelContext', async () => {
+    const native = installNativeDocumentModelContext();
+
+    modelContext.registerTool({
+      name: 'temp_tool',
+      description: 'temp',
+      inputSchema: { type: 'object', properties: {} },
+      execute: vi.fn(),
+    });
+    expect(native.registerTool).toHaveBeenCalledTimes(1);
+
+    modelContext.unregisterTool('temp_tool');
+    expect(native.unregisterTool).toHaveBeenCalledTimes(1);
+    expect(native.unregisterTool.mock.calls[0][0]).toBe('temp_tool');
+  });
+
+  it('does NOT forward provideContext (avoids clobbering native site tools)', async () => {
+    const native = installNativeDocumentModelContext();
+
+    // A site already registered a tool on the native store
+    native.registerTool({
+      name: 'site_tool',
+      description: 'from the page',
+      inputSchema: {},
+      execute: vi.fn(),
+    });
+    native.registerTool.mockClear();
+
+    // A user script calls provideContext on the polyfill surface
+    modelContext.provideContext({
+      tools: [
+        {
+          name: 'replace_tool',
+          description: 'replace',
+          inputSchema: { type: 'object', properties: {} },
+          execute: vi.fn(),
+        },
+      ],
+    });
+
+    // provideContext must NOT be forwarded (would wipe site_tool from native)
+    expect(native.registerTool).not.toHaveBeenCalled();
+    const tools = await native.getTools();
+    expect(tools.map((t: any) => t.name)).toEqual(['site_tool']);
+  });
+
+  it('does not forward when there is no native document.modelContext', () => {
+    // No native installed — forwarding should be a no-op (no throw)
+    expect(() =>
+      modelContext.registerTool({
+        name: 'no_native',
+        description: 'no native',
+        inputSchema: { type: 'object', properties: {} },
+        execute: vi.fn(),
+      })
+    ).not.toThrow();
+
+    // Polyfill store still has the tool
+    expect(modelContextTesting.listTools().map((t: any) => t.name)).toContain('no_native');
+  });
+
+  it('keeps the polyfill store in sync independently of native', async () => {
+    const native = installNativeDocumentModelContext();
+
+    modelContext.registerTool({
+      name: 'synced',
+      description: 'in both stores',
+      inputSchema: {},
+      execute: vi.fn(),
+    });
+
+    // Polyfill (modelContextTesting) sees it
+    expect(modelContextTesting.listTools().map((t: any) => t.name)).toContain('synced');
+    // Native sees it (forwarded)
+    const nativeTools = await native.getTools();
+    expect(nativeTools.map((t: any) => t.name)).toContain('synced');
+  });
+});
