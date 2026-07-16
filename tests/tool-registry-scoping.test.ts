@@ -71,6 +71,88 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(Object.keys(tab200Tools)).not.toContain('google_docs_document_context');
     });
 
+    it('should keep same-named tools isolated to their registering tabs', () => {
+      const tab100Tool = { execute: vi.fn() };
+      const tab200Tool = { execute: vi.fn() };
+
+      registry.addTool('shared_tool', {
+        tool: tab100Tool,
+        source: 'site',
+        origin: 'tab-100',
+      });
+      registry.addTool('shared_tool', {
+        tool: tab200Tool,
+        source: 'site',
+        origin: 'tab-200',
+      });
+
+      expect(registry.getToolsForTab(100).shared_tool).toBe(tab100Tool);
+      expect(registry.getToolsForTab(200).shared_tool).toBe(tab200Tool);
+
+      registry.removeToolsByOrigin('tab-200');
+      expect(registry.getToolsForTab(100).shared_tool).toBe(tab100Tool);
+      expect(registry.getToolsForTab(200)).not.toHaveProperty('shared_tool');
+    });
+
+    it('should prefer extension-owned global tools over same-named page tools', () => {
+      const systemTool = { execute: vi.fn() };
+      const pageTool = { execute: vi.fn() };
+
+      registry.addTool('agentboard_fetch_url', {
+        tool: systemTool,
+        source: 'system',
+        origin: 'system',
+      });
+      registry.addTool('agentboard_fetch_url', {
+        tool: pageTool,
+        source: 'site',
+        origin: 'tab-100',
+      });
+
+      expect(registry.getToolsForTab(100).agentboard_fetch_url).toBe(systemTool);
+      expect(registry.isProtectedToolName('agentboard_fetch_url')).toBe(true);
+      expect(registry.getSiteToolHints(100)).not.toContainEqual(
+        expect.objectContaining({ name: 'agentboard_fetch_url' })
+      );
+    });
+
+    it('should never let a remote tool replace a protected system capability', () => {
+      const systemTool = { execute: vi.fn() };
+      const remoteTool = { execute: vi.fn() };
+
+      registry.addTool('agentboard_fetch_url', {
+        tool: systemTool,
+        source: 'system',
+        origin: 'system',
+      });
+      registry.addTool('agentboard_fetch_url', {
+        tool: remoteTool,
+        source: 'remote',
+        origin: 'agentboard',
+      });
+
+      expect(registry.getAllTools().agentboard_fetch_url).toBe(systemTool);
+      expect(registry.getToolsForTab(100).agentboard_fetch_url).toBe(systemTool);
+    });
+
+    it('should reject site tools that lack an explicit tab scope', () => {
+      const systemTool = { execute: vi.fn() };
+      registry.addTool('protected_tool', {
+        tool: systemTool,
+        source: 'system',
+        origin: 'system',
+      });
+
+      expect(() =>
+        registry.addTool('protected_tool', {
+          tool: { execute: vi.fn() },
+          source: 'site',
+          origin: 'https://example.com',
+        })
+      ).toThrow('requires a tab-scoped origin');
+      expect(registry.getAllTools().protected_tool).toBe(systemTool);
+    });
+
     it('should return empty object for tab with no tools', () => {
       registry.addTool('some_tool', {
         tool: { execute: vi.fn() },
@@ -187,6 +269,21 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(Object.keys(allTools)).toContain('tool_tab_3');
     });
 
+    it('getAllTools should omit same-named page tools that lack a tab execution context', () => {
+      registry.addTool('shared_tool', {
+        tool: { execute: vi.fn() },
+        source: 'site',
+        origin: 'tab-100',
+      });
+      registry.addTool('shared_tool', {
+        tool: { execute: vi.fn() },
+        source: 'site',
+        origin: 'tab-200',
+      });
+
+      expect(registry.getAllTools()).not.toHaveProperty('shared_tool');
+    });
+
     it('getToolsForTab should NOT leak tools from other tabs', () => {
       // This is the regression test for the bug
       registry.addTool('google_docs_tool', {
@@ -248,6 +345,29 @@ describe('ToolRegistryManager Tab Scoping', () => {
       const tools = registry.getToolsForTab(100);
       expect(Object.keys(tools)).toContain('new_tool');
       expect(Object.keys(tools)).not.toContain('old_tool');
+    });
+
+    it('should notify global listeners once with the complete replacement snapshot', () => {
+      registry.addTool('old_tool', {
+        tool: { execute: vi.fn() },
+        source: 'site',
+        origin: 'tab-100',
+      });
+      const listener = vi.fn();
+      registry.addListener(listener);
+
+      registry.updateWebMCPTools(
+        100,
+        [
+          { name: 'first_tool', description: 'First' },
+          { name: 'second_tool', description: 'Second' },
+        ],
+        'https://example.com'
+      );
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(Object.keys(listener.mock.calls[0][0])).toEqual(['first_tool', 'second_tool']);
+      expect(listener.mock.calls[0][0]).not.toHaveProperty('old_tool');
     });
   });
 

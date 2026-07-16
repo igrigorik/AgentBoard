@@ -1,4 +1,4 @@
-# dom_readability Tool v2.1
+# read_page Tool v4.0.1
 
 A WebMCP tool that extracts readable article content from web pages using Mozilla's Readability library, optimized for LLM consumption.
 
@@ -9,7 +9,7 @@ This tool inlines the entire Readability library directly into `script.js` for C
 ## File Structure
 
 ```
-dom_readability/
+read_page/
 ├── script.js              # Complete tool with inlined Readability (canonical source)
 └── README.md              # This documentation
 ../../vendor/
@@ -19,8 +19,14 @@ dom_readability/
 ## Usage
 
 ```javascript
-// Simple - just one optional parameter
-const result = await window.agent.callTool('agentboard_dom_readability', {
+async function readPage(args = {}) {
+  const tools = await document.modelContext.getTools();
+  const tool = tools.find(({ name }) => name === 'agentboard_read_page');
+  if (!tool) throw new Error('agentboard_read_page is not registered');
+  return JSON.parse(await document.modelContext.executeTool(tool, JSON.stringify(args)));
+}
+
+const result = await readPage({
   maxLength: 10000, // Optional, defaults to unlimited
 });
 ```
@@ -106,7 +112,7 @@ The tool uses carefully chosen defaults that work well across diverse content:
 ### Basic Extraction
 
 ```javascript
-const result = await window.agent.callTool('agentboard_dom_readability', {});
+const result = await readPage();
 
 if (result.success) {
   console.log('Title:', result.metadata.title);
@@ -117,7 +123,7 @@ if (result.success) {
 ### With Length Limit
 
 ```javascript
-const result = await window.agent.callTool('agentboard_dom_readability', {
+const result = await readPage({
   maxLength: 5000, // ~1000 tokens for LLM
 });
 ```
@@ -125,7 +131,7 @@ const result = await window.agent.callTool('agentboard_dom_readability', {
 ### Quality Check
 
 ```javascript
-const result = await window.agent.callTool('agentboard_dom_readability', {});
+const result = await readPage();
 
 if (result.success && result.stats.wordCount > 300) {
   // Good quality article

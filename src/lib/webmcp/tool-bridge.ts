@@ -142,7 +142,7 @@ export function convertWebMCPToAISDKTool(
   const toolDefinition = {
     description: webmcpTool.description || `Tool: ${webmcpTool.name}`,
     inputSchema: zodSchema,
-    execute: async (args: unknown) => {
+    execute: async (args: unknown, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       log.debug(`[WebMCP Tool Bridge] Executing tool ${webmcpTool.name}:`, args);
       log.debug(`[WebMCP Tool Bridge] Tool was registered from tab ${tabId}`);
 
@@ -153,33 +153,16 @@ export function convertWebMCPToAISDKTool(
         // Directly use the tab manager
         const tabManager = getTabManager();
 
-        // Find the right tab - prefer one with an active connection
-        const registries = tabManager.getAllRegistries();
-        let targetTabId = tabId;
-
-        // Check if original tab still has connection
-        if (!registries.has(tabId)) {
-          log.debug(
-            `[WebMCP Tool Bridge] Original tab ${tabId} not connected, searching for alternative`
-          );
-          // Find any tab with this tool
-          for (const [tid, registry] of registries) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            if (registry.tools.some((t: any) => t.name === webmcpTool.name)) {
-              targetTabId = tid;
-              log.debug(`[WebMCP Tool Bridge] Found tool in tab ${targetTabId}`);
-              break;
-            }
-          }
-        }
-
-        if (!registries.has(targetTabId)) {
+        // A page tool is a capability owned by the tab that registered it. Falling back to a
+        // different tab by name can execute the same-named side effect against unrelated state.
+        const activeRegistry = tabManager.getToolRegistry(tabId);
+        if (!activeRegistry?.tools.some((tool) => tool === webmcpTool)) {
           throw new Error(
-            `No active tab found with tool "${webmcpTool.name}". Make sure the page is still open.`
+            `The tool catalog entry for "${webmcpTool.name}" is no longer active in tab ${tabId}.`
           );
         }
 
-        const result = await tabManager.callTool(targetTabId, webmcpTool.name, args || {});
+        const result = await tabManager.callTool(tabId, webmcpTool.name, args ?? {}, abortSignal);
         log.debug(`[WebMCP Tool Bridge] Tool executed successfully:`, result);
         return result;
       } catch (error) {

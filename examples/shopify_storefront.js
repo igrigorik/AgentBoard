@@ -8,7 +8,7 @@ export const metadata = {
   match: ['<all_urls>']
 };
 
-export function shouldRegister() {
+export function shouldRegister({ signal } = {}) {
   // 1. Check if Shopify site
   if (typeof window.Shopify === 'undefined' || !window.Shopify.shop) {
     return false;
@@ -24,9 +24,15 @@ export function shouldRegister() {
   // 3. Mark as bootstrapped immediately to prevent race conditions
   window.__shopifyMCPBootstrapped = true;
 
-  // 4. Fire-and-forget async discovery
-  discoverAndRegisterShopifyTools().catch(error => {
-    console.error('[Shopify Bootstrap] Failed to discover tools:', error);
+  signal?.addEventListener('abort', () => {
+    window.__shopifyMCPBootstrapped = false;
+  }, { once: true });
+
+  // 4. Fire-and-forget async discovery owned by this injected script's lifetime.
+  discoverAndRegisterShopifyTools(signal).catch(error => {
+    if (!signal?.aborted) {
+      console.error('[Shopify Bootstrap] Failed to discover tools:', error);
+    }
     // Reset flag on error to allow retry on next injection
     window.__shopifyMCPBootstrapped = false;
   });
@@ -35,7 +41,7 @@ export function shouldRegister() {
   return false;
 }
 
-async function discoverAndRegisterShopifyTools() {
+async function discoverAndRegisterShopifyTools(signal) {
   const shopDomain = window.location.hostname;
   const mcpEndpoint = `${window.location.protocol}//${shopDomain}/api/mcp`;
 
@@ -43,6 +49,7 @@ async function discoverAndRegisterShopifyTools() {
     // Step 1: List available tools
     const listResponse = await fetch(mcpEndpoint, {
       method: 'POST',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
@@ -110,10 +117,10 @@ async function discoverAndRegisterShopifyTools() {
       console.log(`[Shopify Bootstrap] ${tool.name} raw schema:`, JSON.stringify(tool.inputSchema, null, 2));
     });
 
-    // Step 2: Register each tool
+    // Step 2: Every discovered tool shares the injected script's standard lifetime signal.
     tools.forEach(tool => {
       try {
-        registerShopifyTool(tool, mcpEndpoint);
+        registerShopifyTool(tool, mcpEndpoint, signal);
       } catch (error) {
         console.error(`[Shopify Bootstrap] Failed to register tool ${tool.name}:`, error);
       }
@@ -127,7 +134,7 @@ async function discoverAndRegisterShopifyTools() {
   }
 }
 
-function registerShopifyTool(toolSchema, mcpEndpoint) {
+function registerShopifyTool(toolSchema, mcpEndpoint, signal) {
   const toolName = `shopify_${toolSchema.name}`;
 
   console.log(`[Shopify Bootstrap] Registering tool: ${toolName}`, {
@@ -145,21 +152,23 @@ function registerShopifyTool(toolSchema, mcpEndpoint) {
     description: toolSchema.description || `Shopify MCP tool: ${toolSchema.name}`,
     inputSchema: toolSchema.inputSchema || { type: 'object', properties: {} },
 
-    // Create an execute function that proxies to MCP
-    // Per WebMCP spec: execute receives (args, agent)
+    // Create an execute function that proxies to MCP.
     execute: createExecutor(toolSchema.name, mcpEndpoint)
   };
 
-  // Register with modelContext (per WebMCP spec)
-  // Falls back to window.agent for backward compat
-  const modelContext = ('modelContext' in navigator) ? navigator.modelContext : window.agent;
-  
-  if (modelContext && typeof modelContext.registerTool === 'function') {
-    modelContext.registerTool(tool);
-    console.log(`[Shopify Bootstrap] ✅ Successfully registered: ${toolName}`);
-  } else {
-    throw new Error('navigator.modelContext.registerTool not available');
+  const modelContext = document.modelContext;
+  if (!modelContext || typeof modelContext.registerTool !== 'function') {
+    throw new Error('document.modelContext.registerTool not available');
   }
+
+  Promise.resolve(modelContext.registerTool(tool, { signal })).then(
+    () => console.log(`[Shopify Bootstrap] ✅ Successfully registered: ${toolName}`),
+    (error) => {
+      if (!signal.aborted) {
+        console.error(`[Shopify Bootstrap] Failed to register ${toolName}:`, error);
+      }
+    }
+  );
 }
 
 function createExecutor(originalToolName, mcpEndpoint) {

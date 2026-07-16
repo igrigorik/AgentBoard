@@ -321,10 +321,10 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       return true;
 
     case 'WEBMCP_SCRIPTS_UPDATED':
-      // Hot reload: Re-inject user scripts into all tabs
+      // Hot reload: rebuild built-in and user WebMCP registrations in all tabs
       log.debug('[Background] Received script update notification, triggering hot reload');
       webmcp
-        .reinjectAllUserScripts()
+        .reinjectAllScripts()
         .then(() => {
           log.debug('[Background] Hot reload completed');
           sendResponse({ success: true });
@@ -498,6 +498,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
         }
 
         const toolsArray: Array<{ name: string; description: string; inputSchema?: unknown }> = [];
+        const unifiedRegistry = getToolRegistry();
 
         // Get WebMCP tools only from the current tab (not all tabs)
         // Each tab has its own URL-filtered set of tools
@@ -505,6 +506,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           const currentTabRegistry = webmcp.getToolRegistry(tabId);
           if (currentTabRegistry) {
             for (const tool of currentTabRegistry.tools) {
+              if (unifiedRegistry.isProtectedToolName(tool.name)) continue;
               toolsArray.push({
                 name: tool.name,
                 description: tool.description || 'No description available',
@@ -516,7 +518,6 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
 
         // Also get system/remote MCP tools from unified registry
         // Use getToolsForTab to get tab-scoped tools + global (remote/system) tools
-        const unifiedRegistry = getToolRegistry();
         const scopedTools = tabId
           ? unifiedRegistry.getToolsForTab(tabId)
           : unifiedRegistry.getAllTools();

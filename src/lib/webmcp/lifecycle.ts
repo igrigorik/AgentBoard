@@ -18,6 +18,8 @@ export interface PendingPromise {
   reject: (reason: unknown) => void;
   timeout: ReturnType<typeof setTimeout>;
   tabId: number;
+  abortSignal?: AbortSignal;
+  abortHandler?: () => void;
 }
 
 export interface ToolRegistry {
@@ -36,10 +38,13 @@ export interface ToolRegistry {
  */
 export class TabManager {
   private contentPorts = new Map<number, chrome.runtime.Port>();
+  private currentDocumentIds = new Map<number, string>();
+  private navigatingTabs = new Set<number>();
   private pendingMessages = new Map<number, Array<unknown>>();
   private pendingPromises = new Map<string, PendingPromise>();
   private toolRegistries = new Map<number, ToolRegistry>();
   private pendingInjections = new Set<number>();
+  private scriptOperations = new Map<number, Promise<void>>();
   // Track pending tools/list requests that need responses
   private pendingToolsRequests = new Map<
     number,
@@ -66,11 +71,39 @@ export class TabManager {
         return;
       }
 
+      const documentId = port.sender?.documentId;
+      const currentDocumentId = this.currentDocumentIds.get(tabId);
+      const navigationPending = this.navigatingTabs.has(tabId);
+      const isRetiringDocument =
+        navigationPending && Boolean(documentId) && documentId === currentDocumentId;
+      const isUnexpectedDocument =
+        !navigationPending && Boolean(currentDocumentId) && documentId !== currentDocumentId;
+      if (documentId && (isRetiringDocument || isUnexpectedDocument)) {
+        log.debug(`[WebMCP Lifecycle] Rejecting unowned document ${documentId} for tab ${tabId}`);
+        port.disconnect();
+        return;
+      }
+      if (documentId && (navigationPending || documentId !== currentDocumentId)) {
+        this.currentDocumentIds.set(tabId, documentId);
+        this.navigatingTabs.delete(tabId);
+      } else if (!documentId && navigationPending) {
+        // Chromium supplies documentId; this fallback preserves operation in test/older runtimes.
+        this.currentDocumentIds.delete(tabId);
+        this.navigatingTabs.delete(tabId);
+      }
+
       log.debug(`[WebMCP Lifecycle] Tab ${tabId} content script connected`);
 
-      // Clean up old port if exists
+      // Clean up old port if exists. A different document cannot inherit outstanding calls or
+      // a catalog from its predecessor; cancel while the old port still owns the execution.
       const oldPort = this.contentPorts.get(tabId);
+      const oldDocumentId = oldPort?.sender?.documentId;
       if (oldPort) {
+        if (oldDocumentId && documentId && oldDocumentId !== documentId) {
+          this.cancelPendingCallsForTab(tabId);
+          this.toolRegistries.delete(tabId);
+          getToolRegistry().removeToolsByOrigin(`tab-${tabId}`);
+        }
         try {
           oldPort.disconnect();
         } catch {
@@ -100,8 +133,13 @@ export class TabManager {
       // even if the service worker lost its toolRegistries Map.
       this.requestToolsFromTab(tabId);
 
-      // Handle messages from content script
+      // A disconnected or navigated document may still have queued messages. Only the currently
+      // owned port may mutate this tab's registry or settle its tool calls.
       port.onMessage.addListener((msg) => {
+        if (this.contentPorts.get(tabId) !== port) return;
+        if (this.navigatingTabs.has(tabId)) return;
+        const ownedDocumentId = this.currentDocumentIds.get(tabId);
+        if (documentId && ownedDocumentId && documentId !== ownedDocumentId) return;
         this.handleContentMessage(tabId, msg);
       });
 
@@ -239,9 +277,8 @@ export class TabManager {
 
     // Handle responses (with id)
     if (isResponse) {
-      const promise = this.pendingPromises.get(payload.id);
+      const promise = this.takePendingPromise(payload.id);
       if (promise) {
-        clearTimeout(promise.timeout);
         if ('error' in payload && payload.error) {
           // Preserve structured error data from the page for debugging
           const err: Error & { data?: unknown; code?: number } = new Error(payload.error.message);
@@ -251,7 +288,6 @@ export class TabManager {
         } else if ('result' in payload) {
           promise.resolve(payload.result);
         }
-        this.pendingPromises.delete(payload.id);
       }
     }
 
@@ -314,6 +350,10 @@ export class TabManager {
       if (details.frameId !== 0) return; // Main frame only
 
       this.cancelPendingCallsForTab(details.tabId);
+      // Invalidate the old document immediately; queued messages can otherwise repopulate the
+      // tab registry before its replacement relay connects. While navigation is pending, the
+      // current document ID identifies and rejects reconnects from that retiring document.
+      this.navigatingTabs.add(details.tabId);
       // Clear stale tool registry so requestToolsAndWait doesn't return old data
       this.toolRegistries.delete(details.tabId);
       this.pendingInjections.add(details.tabId);
@@ -333,9 +373,26 @@ export class TabManager {
       if (!this.pendingInjections.has(details.tabId)) return;
 
       this.pendingInjections.delete(details.tabId);
+      // The replacement relay port, rather than event ordering, completes document ownership.
+      // Until it connects, calls and messages remain blocked from the retiring document.
       log.debug(`[WebMCP Lifecycle] DOM ready for tab ${details.tabId}, injecting scripts...`);
 
       await this.injectScripts(details.tabId);
+    });
+
+    // A cancelled provisional navigation leaves the old document alive. Restore its ownership and
+    // request a fresh catalog instead of orphaning its still-connected relay.
+    chrome.webNavigation.onErrorOccurred?.addListener((details) => {
+      if (details.frameId !== 0) return;
+      if (!this.navigatingTabs.has(details.tabId)) return;
+
+      this.navigatingTabs.delete(details.tabId);
+      this.pendingInjections.delete(details.tabId);
+      const survivingPort = this.contentPorts.get(details.tabId);
+      const documentId = survivingPort?.sender?.documentId;
+      if (documentId) this.currentDocumentIds.set(details.tabId, documentId);
+      this.requestToolsFromTab(details.tabId);
+      log.debug(`[WebMCP Lifecycle] Navigation cancelled for tab ${details.tabId}`);
     });
   }
 
@@ -345,7 +402,10 @@ export class TabManager {
   private setupTabCleanup(): void {
     chrome.tabs.onRemoved.addListener((tabId) => {
       this.pendingInjections.delete(tabId);
+      this.scriptOperations.delete(tabId);
       this.contentPorts.delete(tabId);
+      this.currentDocumentIds.delete(tabId);
+      this.navigatingTabs.delete(tabId);
       this.pendingMessages.delete(tabId);
       this.toolRegistries.delete(tabId);
       this.cancelPendingCallsForTab(tabId);
@@ -365,16 +425,92 @@ export class TabManager {
     });
   }
 
+  private takePendingPromise(id: string): PendingPromise | undefined {
+    const promise = this.pendingPromises.get(id);
+    if (!promise) return undefined;
+
+    clearTimeout(promise.timeout);
+    if (promise.abortSignal && promise.abortHandler) {
+      promise.abortSignal.removeEventListener('abort', promise.abortHandler);
+    }
+    this.pendingPromises.delete(id);
+    return promise;
+  }
+
+  private sendToolCancellation(tabId: number, id: string): void {
+    const port = this.contentPorts.get(tabId);
+    if (!port) return;
+
+    try {
+      port.postMessage({
+        type: 'webmcp',
+        payload: {
+          jsonrpc: JSONRPC,
+          method: 'tools/cancel',
+          params: { id },
+        },
+      });
+    } catch (error) {
+      log.debug(`[WebMCP Lifecycle] Failed to cancel tool call ${id}:`, error);
+    }
+  }
+
   /**
    * Cancel all pending tool calls for a tab
    */
   private cancelPendingCallsForTab(tabId: number): void {
-    for (const [id, promise] of this.pendingPromises.entries()) {
-      if (promise.tabId === tabId) {
-        clearTimeout(promise.timeout);
-        promise.reject(new Error('Tool call cancelled'));
-        this.pendingPromises.delete(id);
+    for (const [id, pending] of this.pendingPromises.entries()) {
+      if (pending.tabId !== tabId) continue;
+
+      const promise = this.takePendingPromise(id);
+      if (!promise) continue;
+      this.sendToolCancellation(tabId, id);
+      promise.reject(new Error('Tool call cancelled'));
+    }
+  }
+
+  private runScriptOperation(tabId: number, operation: () => Promise<void>): Promise<void> {
+    const previous = this.scriptOperations.get(tabId) || Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    this.scriptOperations.set(tabId, current);
+
+    return current.finally(() => {
+      if (this.scriptOperations.get(tabId) === current) this.scriptOperations.delete(tabId);
+    });
+  }
+
+  private async injectBuiltInTools(tabId: number, tabUrl: string): Promise<void> {
+    const configStorage = ConfigStorage.getInstance();
+    const urlMatchingTools = COMPILED_TOOLS.filter((tool) =>
+      matchesUrl(tabUrl, {
+        match: tool.match,
+        name: tool.id,
+        namespace: 'agentboard',
+        version: tool.version,
+      })
+    );
+
+    const enabledTools = [];
+    for (const tool of urlMatchingTools) {
+      if (await configStorage.isBuiltinToolEnabled(tool.id)) {
+        enabledTools.push(tool);
+      } else {
+        log.debug(`[WebMCP Lifecycle] Skipping disabled built-in tool: ${tool.id}`);
       }
+    }
+
+    log.debug(
+      `[WebMCP Lifecycle] Injecting ${enabledTools.length}/${COMPILED_TOOLS.length} compiled tools ` +
+        `(${urlMatchingTools.length} matched URL, ${enabledTools.length} enabled)`
+    );
+
+    for (const tool of enabledTools) {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        world: 'MAIN',
+        injectImmediately: false,
+        files: [tool.file],
+      });
     }
   }
 
@@ -382,6 +518,10 @@ export class TabManager {
    * Inject WebMCP scripts into a tab
    */
   async injectScripts(tabId: number): Promise<void> {
+    return this.runScriptOperation(tabId, () => this.injectScriptsNow(tabId));
+  }
+
+  private async injectScriptsNow(tabId: number): Promise<void> {
     try {
       // Get tab info to check URL
       const tab = await chrome.tabs.get(tabId);
@@ -412,46 +552,8 @@ export class TabManager {
         files: ['content-scripts/relay.js'],
       });
 
-      // 2. Inject pre-compiled built-in tools (CSP bypass via files:[])
-      // Filter tools by URL match patterns AND enabled state
-      const tabUrl = tab.url;
-      const configStorage = ConfigStorage.getInstance();
-
-      const urlMatchingTools = tabUrl
-        ? COMPILED_TOOLS.filter((tool) =>
-            matchesUrl(tabUrl, {
-              match: tool.match,
-              name: tool.id,
-              namespace: 'agentboard',
-              version: tool.version,
-            })
-          )
-        : [];
-
-      // Further filter by user-enabled state (default: enabled)
-      const enabledTools = [];
-      for (const tool of urlMatchingTools) {
-        const isEnabled = await configStorage.isBuiltinToolEnabled(tool.id);
-        if (isEnabled) {
-          enabledTools.push(tool);
-        } else {
-          log.debug(`[WebMCP Lifecycle] Skipping disabled built-in tool: ${tool.id}`);
-        }
-      }
-
-      log.debug(
-        `[WebMCP Lifecycle] Injecting ${enabledTools.length}/${COMPILED_TOOLS.length} compiled tools ` +
-          `(${urlMatchingTools.length} matched URL, ${enabledTools.length} enabled)`
-      );
-
-      for (const tool of enabledTools) {
-        await chrome.scripting.executeScript({
-          target: { tabId, frameIds: [0] },
-          world: 'MAIN',
-          injectImmediately: false, // After polyfill
-          files: [tool.file], // Bypasses CSP!
-        });
-      }
+      // 2. Inject URL-matched, enabled built-in tools via files:[] to bypass page CSP.
+      await this.injectBuiltInTools(tabId, tab.url);
 
       // 3. Inject page bridge LAST (after relay is ready)
       await chrome.scripting.executeScript({
@@ -527,9 +629,16 @@ export class TabManager {
   /**
    * Call a tool in a specific tab
    */
-  async callTool(tabId: number, name: string, args: unknown = {}): Promise<unknown> {
-    // Fail fast if no content script connection exists
-    if (!this.contentPorts.has(tabId)) {
+  async callTool(
+    tabId: number,
+    name: string,
+    args: unknown = {},
+    abortSignal?: AbortSignal
+  ): Promise<unknown> {
+    if (abortSignal?.aborted) throw abortSignal.reason;
+
+    // Fail fast if no content script connection exists or its document is navigating away.
+    if (!this.contentPorts.has(tabId) || this.navigatingTabs.has(tabId)) {
       log.error(
         `[WebMCP Lifecycle] No content port for tab ${tabId}. Available ports:`,
         Array.from(this.contentPorts.keys())
@@ -546,14 +655,33 @@ export class TabManager {
     };
 
     return new Promise((resolve, reject) => {
-      // Set timeout for actual network/execution delays
       const timeout = setTimeout(() => {
-        this.pendingPromises.delete(id);
-        reject(new Error('Tool call timeout'));
+        const pending = this.takePendingPromise(id);
+        if (!pending) return;
+        this.sendToolCancellation(tabId, id);
+        pending.reject(new Error('Tool call timeout'));
       }, 10000);
 
-      // Store promise handlers
-      this.pendingPromises.set(id, { resolve, reject, timeout, tabId });
+      const abortHandler = abortSignal
+        ? () => {
+            const pending = this.takePendingPromise(id);
+            if (!pending) return;
+            this.sendToolCancellation(tabId, id);
+            pending.reject(abortSignal.reason);
+          }
+        : undefined;
+
+      this.pendingPromises.set(id, {
+        resolve,
+        reject,
+        timeout,
+        tabId,
+        abortSignal,
+        abortHandler,
+      });
+      if (abortSignal && abortHandler) {
+        abortSignal.addEventListener('abort', abortHandler, { once: true });
+      }
 
       // Send via port
       this.sendToTab(tabId, { type: 'webmcp', payload: request });
@@ -574,34 +702,34 @@ export class TabManager {
     return new Map(this.toolRegistries);
   }
 
-  /**
-   * Re-inject user scripts into all active tabs (hot reload)
-   * Called when user scripts are modified in options page
-   */
-  async reinjectAllUserScripts(): Promise<void> {
-    log.debug('[WebMCP Lifecycle] Hot reload: Re-injecting user scripts');
+  /** Rebuild built-in and user-script registrations after an options change. */
+  async reinjectAllScripts(): Promise<void> {
+    log.debug('[WebMCP Lifecycle] Hot reload: Re-injecting WebMCP scripts');
 
     const tabs = await chrome.tabs.query({});
 
     for (const tab of tabs) {
-      if (!tab.id || !tab.url) continue;
+      const tabId = tab.id;
+      const tabUrl = tab.url;
+      if (!tabId || !tabUrl) continue;
 
       // Skip restricted URLs
       if (
-        tab.url.startsWith('chrome://') ||
-        tab.url.startsWith('chrome-extension://') ||
-        tab.url.startsWith('edge://') ||
-        tab.url.startsWith('about:')
+        tabUrl.startsWith('chrome://') ||
+        tabUrl.startsWith('chrome-extension://') ||
+        tabUrl.startsWith('edge://') ||
+        tabUrl.startsWith('about:')
       ) {
         continue;
       }
 
       try {
-        // Re-inject user scripts (clears markers first)
-        await reinjectScripts(tab.id);
-        log.debug(`[WebMCP Lifecycle] Re-injected scripts into tab ${tab.id}`);
+        await this.runScriptOperation(tabId, () =>
+          reinjectScripts(tabId, (currentUrl) => this.injectBuiltInTools(tabId, currentUrl))
+        );
+        log.debug(`[WebMCP Lifecycle] Re-injected scripts into tab ${tabId}`);
       } catch (error) {
-        log.error(`[WebMCP Lifecycle] Failed to re-inject into tab ${tab.id}:`, error);
+        log.error(`[WebMCP Lifecycle] Failed to re-inject into tab ${tabId}:`, error);
       }
     }
   }

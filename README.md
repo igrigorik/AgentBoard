@@ -41,16 +41,16 @@ Bring your own models—local, fine-tuned, custom—to power multiple agent prof
   │  │  - WebMCP + Remote + System  │  │ Port │  └────────┬───────────┘  │
   │  └──────────────────────────────┘  │      │           │              │
   │  ┌──────────────────────────────┐  │      │  ┌────────▼───────────┐  │
-  │  │ TabManager                   │  │      │  │ MAIN: window.agent │  │
+  │  │ TabManager                   │  │      │  │ MAIN: modelContext │  │
   │  │  - Script injection          │  │      │  │  - Tool execution  │  │
   │  │  - Lifecycle                 │  │      │  │  - Full DOM access │  │
   │  └──────────────────────────────┘  │      │  └────────────────────┘  │
   └────────────────────────────────────┘      └──────────────────────────┘
 ```
 
-The AI sidebar is tab-scoped—each sidebar instance binds to one browser tab and sees tools from that tab's page context plus global tools (remote MCP servers and system capabilities). When you open the sidebar, the background service worker injects WebMCP scripts into the page: a polyfill that provides `window.agent`, a relay in the ISOLATED world, and a bridge in the MAIN world. Pages register tools via `window.agent.registerTool()`, triggering `tools/listChanged` events that flow through a persistent port connection from the relay to the background service worker. The ToolRegistry aggregates all discovered tools—WebMCP from pages, remote MCP from external servers, system tools from the extension—and converts them to AI SDK format for the AI Client.
+The AI sidebar is tab-scoped—each sidebar instance binds to one browser tab and sees tools from that tab's page context plus global tools (remote MCP servers and system capabilities). At document start, AgentBoard preserves Chromium's native `document.modelContext` when available or installs a standards-shaped polyfill otherwise. Pages and injected AgentBoard scripts register tools through `document.modelContext.registerTool()`. A MAIN-world bridge publishes clone-safe tool descriptors through the ISOLATED-world relay and persistent port to the background service worker. The ToolRegistry combines tab-owned WebMCP tools with remote MCP and system capabilities, then converts them to AI SDK format for the AI Client.
 
-When you send a message, the AI Client streams responses from your chosen provider (OpenAI, Anthropic, Google, or custom endpoint). Tool calls route based on type: WebMCP tools execute in the browser tab's MAIN world via JSON-RPC `callTool` commands (full DOM access, zero serialization overhead), remote MCP tools execute on your external servers with streaming HTTP, and system tools run in the service worker with elevated privileges (CORS-free fetching, for example).
+When you send a message, the AI Client streams responses from your chosen provider (OpenAI, Anthropic, Google, or a custom endpoint). WebMCP calls route back to the owning browser tab, where the MAIN-world bridge invokes the exact browser descriptor through `document.modelContext.executeTool()`. Remote MCP tools execute on external servers with streaming HTTP, while system tools run in the service worker with elevated privileges such as CORS-free fetching.
 
 ---
 

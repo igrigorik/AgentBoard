@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { parseUserScript } from '../src/lib/webmcp/script-parser';
 
 describe('WebMCP Conditional Registration', () => {
@@ -69,87 +69,6 @@ export async function execute(args) {
       expect(() => parseUserScript(scriptCode)).toThrow(
         'shouldRegister must be synchronous (not async)'
       );
-    });
-  });
-
-  describe('Conditional Registration Logic', () => {
-    let mockWindow: any;
-    let mockDocument: any;
-
-    beforeEach(() => {
-      mockWindow = {
-        agent: {
-          registerTool: vi.fn(),
-        },
-        __webmcpInjected: {},
-        location: {
-          hostname: 'example.com',
-          protocol: 'https:',
-        },
-      };
-      mockDocument = {
-        querySelector: vi.fn(),
-        querySelectorAll: vi.fn(() => []),
-        scripts: [],
-      };
-      global.window = mockWindow as any;
-      global.document = mockDocument as any;
-    });
-
-    it('should create wrapped script with shouldRegister check', () => {
-      const scriptCode = `
-'use webmcp-tool v1';
-
-export const metadata = {
-  name: 'search_shop_catalog',
-  namespace: 'shopify',
-  version: '1.0.0',
-  match: ['<all_urls>']
-};
-
-export function shouldRegister() {
-  return typeof window.Shopify !== 'undefined';
-}
-
-export async function execute(args) {
-  return 'shopify response';
-}`;
-
-      // Test that the transformation includes shouldRegister
-      const transformedCode = scriptCode
-        .replace(/^\s*'use webmcp-tool v\d+';\s*/, '')
-        .replace(/export\s+const\s+metadata\s*=/g, 'const metadata =')
-        .replace(/export\s+(async\s+)?function\s+execute/g, '$1function execute')
-        .replace(/export\s+function\s+shouldRegister/g, 'function shouldRegister');
-
-      expect(transformedCode).toContain('function shouldRegister');
-      expect(transformedCode).not.toContain('export function shouldRegister');
-    });
-
-    it('should handle tools without shouldRegister', () => {
-      const scriptCode = `
-'use webmcp-tool v1';
-
-export const metadata = {
-  name: 'always_tool',
-  namespace: 'test',
-  version: '1.0.0',
-  match: ['<all_urls>']
-};
-
-export async function execute(args) {
-  return 'always works';
-}`;
-
-      // Test that transformation works without shouldRegister
-      const transformedCode = scriptCode
-        .replace(/^\s*'use webmcp-tool v\d+';\s*/, '')
-        .replace(/export\s+const\s+metadata\s*=/g, 'const metadata =')
-        .replace(/export\s+(async\s+)?function\s+execute/g, '$1function execute')
-        .replace(/export\s+function\s+shouldRegister/g, 'function shouldRegister');
-
-      expect(transformedCode).not.toContain('shouldRegister');
-      expect(transformedCode).toContain('async function execute');
     });
   });
 

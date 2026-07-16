@@ -27,8 +27,10 @@ export type AISDKTool = any; // The actual tool type from AI SDK
 export interface ToolWithMetadata {
   tool: AISDKTool;
   source: ToolSourceType;
-  origin?: string; // URL for site tools, script ID for user tools, server name for remote tools
+  origin?: string; // tab-{id} for site tools, script ID for user tools, server name for remote tools
   description?: string; // One-line tool description for LLM grounding in <site_tools>
+  /** Public tool name when the internal registry key is scoped by tab. */
+  publicName?: string;
 }
 
 /**
@@ -93,25 +95,33 @@ export class ToolRegistryManager {
   }
 
   /**
-   * Add or update a tool in the registry
+   * Add or update a tool in the registry.
+   *
+   * Page tools are keyed internally by tab as well as name. Their public names remain unchanged,
+   * but two tabs can no longer overwrite each other's execution closures in the global Map.
    */
-  addTool(name: string, toolWithMeta: ToolWithMetadata): void {
-    this.tools.set(name, toolWithMeta);
-    this.notifyListeners();
+  addTool(
+    name: string,
+    toolWithMeta: ToolWithMetadata,
+    { silent = false }: { silent?: boolean } = {}
+  ): void {
+    const isTabTool = toolWithMeta.source === 'site';
+    if (isTabTool && !/^tab-\d+$/.test(toolWithMeta.origin || '')) {
+      throw new Error(`Site tool "${name}" requires a tab-scoped origin`);
+    }
+    const storageKey = isTabTool ? `${toolWithMeta.origin}\0${name}` : name;
+    const existing = this.tools.get(storageKey);
+    if (existing?.source === 'system' && toolWithMeta.source !== 'system') {
+      log.warn(`[ToolRegistry] Refusing to replace protected system tool ${name}`);
+      return;
+    }
+
+    this.tools.set(storageKey, { ...toolWithMeta, publicName: name });
+    if (!silent) this.notifyListeners();
 
     log.warn(
       `[ToolRegistry] Added tool ${name} (${toolWithMeta.source}) from ${toolWithMeta.origin || 'unknown'}`
     );
-  }
-
-  /**
-   * Remove a tool from the registry
-   */
-  removeTool(name: string): void {
-    if (this.tools.delete(name)) {
-      this.notifyListeners();
-      log.warn(`[ToolRegistry] Removed tool ${name}`);
-    }
   }
 
   /**
@@ -130,12 +140,12 @@ export class ToolRegistryManager {
     }
 
     if (toRemove.length > 0) {
-      this.notifyListeners();
       log.warn(`[ToolRegistry] Removed ${toRemove.length} tools from origin ${origin}`);
 
-      // Skip tab-scoped notification when caller will send its own
-      // (e.g. updateWebMCPTools notifies after new tools are registered).
+      // Silent removal is one phase of an atomic replacement; both global and tab-scoped
+      // listeners are notified once after the complete replacement has been installed.
       if (!silent) {
+        this.notifyListeners();
         const tabMatch = origin.match(/^tab-(\d+)$/);
         if (tabMatch) {
           this.notifyTabChange(Number(tabMatch[1]));
@@ -152,19 +162,55 @@ export class ToolRegistryManager {
     tools: Record<string, AISDKTool>;
     debug: string[];
   } {
-    const scored: Array<[string, AISDKTool, number]> = [];
+    type Candidate = {
+      name: string;
+      tool: AISDKTool;
+      score: number;
+      meta: ToolWithMetadata;
+    };
 
-    for (const [name, meta] of this.tools.entries()) {
-      if (!filter || filter(name, meta)) {
-        scored.push([name, meta.tool, calculateSpecificityScore(name, meta.source)]);
+    const grouped = new Map<string, Candidate[]>();
+    for (const [storageKey, meta] of this.tools.entries()) {
+      const name = meta.publicName || storageKey;
+      if (filter && !filter(name, meta)) continue;
+
+      const candidates = grouped.get(name) || [];
+      candidates.push({
+        name,
+        tool: meta.tool,
+        score: calculateSpecificityScore(name, meta.source),
+        meta,
+      });
+      grouped.set(name, candidates);
+    }
+
+    const scored: Candidate[] = [];
+    for (const [name, candidates] of grouped) {
+      if (candidates.length === 1) {
+        scored.push(candidates[0]);
+        continue;
+      }
+
+      // A page must never replace an extension-owned global capability with the same public name.
+      // Multiple page candidates without a tab scope are ambiguous and therefore fail closed.
+      const protectedCandidates = candidates.filter(
+        ({ meta }) => meta.source === 'system' || meta.source === 'remote'
+      );
+      if (protectedCandidates.length === 1) {
+        scored.push(protectedCandidates[0]);
+      } else {
+        log.warn(
+          `[ToolRegistry] Omitting ambiguous tool ${name} from:`,
+          candidates.map(({ meta }) => meta.origin || meta.source)
+        );
       }
     }
 
-    scored.sort((a, b) => b[2] - a[2]);
+    scored.sort((a, b) => b.score - a.score);
 
     return {
-      tools: Object.fromEntries(scored.map(([name, tool]) => [name, tool])),
-      debug: scored.map(([name, , score]) => `${name}:${score}`),
+      tools: Object.fromEntries(scored.map(({ name, tool }) => [name, tool])),
+      debug: scored.map(({ name, score }) => `${name}:${score}`),
     };
   }
 
@@ -202,6 +248,14 @@ export class ToolRegistryManager {
     return tools;
   }
 
+  /** Whether a global system or configured remote capability owns this public name. */
+  isProtectedToolName(name: string): boolean {
+    const global = this.tools.get(name);
+    return (
+      global?.source === 'system' || global?.source === 'remote' || this.tabBoundFactories.has(name)
+    );
+  }
+
   /**
    * Domain-specific tools for a tab, for LLM steering in <site_tools>.
    *
@@ -215,8 +269,11 @@ export class ToolRegistryManager {
   getSiteToolHints(tabId: number): Array<{ name: string; description: string }> {
     const hints: Array<{ name: string; description: string; score: number }> = [];
 
-    for (const [name, meta] of this.tools.entries()) {
+    for (const [storageKey, meta] of this.tools.entries()) {
       if (meta.origin !== `tab-${tabId}`) continue;
+
+      const name = meta.publicName || storageKey;
+      if (this.isProtectedToolName(name)) continue;
 
       const score = calculateSpecificityScore(name, meta.source);
       if (score <= 30) continue; // Skip generic <all_urls> tools
@@ -394,18 +451,25 @@ export class ToolRegistryManager {
     for (const webmcpTool of tools) {
       const aiTool = convertWebMCPToAISDKTool(webmcpTool, tabId);
 
-      this.addTool(webmcpTool.name, {
-        tool: aiTool,
-        source: 'site', // Both site and user tools come through as 'site' for now
-        origin: `tab-${tabId}`,
-        description: webmcpTool.description,
-      });
+      this.addTool(
+        webmcpTool.name,
+        {
+          tool: aiTool,
+          source: 'site', // Both site and user tools come through as 'site' for now
+          origin: `tab-${tabId}`,
+          description: webmcpTool.description,
+        },
+        { silent: true }
+      );
     }
 
     log.warn(
       `[ToolRegistry] Added ${tools.length} WebMCP tools from tab ${tabId} (${origin}):`,
       tools.map((t) => t.name)
     );
+
+    // Publish the replacement atomically instead of exposing partially rebuilt tool sets.
+    this.notifyListeners();
 
     // Fire tab-scoped change notification after new tools are fully registered
     this.notifyTabChange(tabId);

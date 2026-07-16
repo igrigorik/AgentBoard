@@ -10,7 +10,7 @@ Copy `shopify_storefront.js` into your AgentBoard user scripts (Options → User
 
 1. **Detection**: Checks for `window.Shopify.shop` to identify Shopify stores
 2. **Discovery**: Queries `/api/mcp` with `tools/list` to enumerate available tools
-3. **Registration**: Registers each tool with `shopify_` prefix via `window.agent.registerTool()`
+3. **Registration**: Registers each tool with a `shopify_` prefix via `document.modelContext.registerTool()`
 
 The bootstrap tool itself never registers (`shouldRegister()` returns false) — it only discovers and registers the merchant's available tools.
 

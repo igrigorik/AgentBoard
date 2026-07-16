@@ -16,6 +16,10 @@ declare global {
     __agentboardTTPolicy?: {
       createScriptURL: (url: string) => string | TrustedScriptURL;
     };
+    __agentboardUserScriptLifetimes?: Map<string, AbortController>;
+    __agentboardBuiltinToolLifetimes?: Map<string, AbortController>;
+    __agentboardUserScriptGeneration?: string;
+    __webmcpInjected?: Record<string, boolean>;
   }
 }
 
@@ -25,16 +29,17 @@ export interface InjectionOptions {
   tabId: number;
   url: string;
   frameId?: number;
+  generation?: string;
 }
 
 /**
  * Wraps a user script module for execution in MAIN world
- * Converts ES module exports to window.agent.registerTool() calls
+ * Converts ES module exports to document.modelContext.registerTool() calls
  * All transformations happen here in the background worker,
  * not at runtime in the page.
  */
 function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): string {
-  // Generate a unique script name for debugging (namespace is now required)
+  // Combine namespace and name for a stable debugging identifier.
   const scriptName = `${metadata.namespace}:${metadata.name}`;
   const toolName = `${metadata.namespace}_${metadata.name}`;
 
@@ -55,9 +60,16 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
     return;
   }
 
-  // Mark as injected
+  // Mark as injected and bind every registration or async discovery to this script lifetime.
   window.__webmcpInjected = window.__webmcpInjected || {};
   window.__webmcpInjected[scriptId] = true;
+  const registrations = window.__agentboardUserScriptLifetimes instanceof Map
+    ? window.__agentboardUserScriptLifetimes
+    : new Map();
+  window.__agentboardUserScriptLifetimes = registrations;
+  registrations.get(scriptId)?.abort?.();
+  const registrationController = new AbortController();
+  registrations.set(scriptId, registrationController);
 
   console.log('[WebMCP] Executing user script: ${scriptName}');
 
@@ -72,7 +84,7 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
 
     if (typeof shouldRegister === 'function') {
       try {
-        if (!shouldRegister()) {
+        if (!shouldRegister({ signal: registrationController.signal })) {
           console.log('[WebMCP] Tool ${scriptName} skipped registration (shouldRegister returned false)');
           return;
         }
@@ -82,25 +94,46 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
       }
     }
 
-    if (window.agent && typeof metadata !== 'undefined' && typeof execute !== 'undefined') {
+    const modelContext = document.modelContext;
+    if (modelContext && typeof modelContext.registerTool === 'function' && typeof metadata !== 'undefined' && typeof execute !== 'undefined') {
       const tool = {
         name: '${toolName}',
-        description: metadata.description || '${metadata.description || ''}',
+        description: metadata.description || 'Tool: ${toolName}',
         inputSchema: metadata.inputSchema || { type: 'object', properties: {} },
         execute: execute
       };
 
-      window.agent.registerTool(tool);
-      console.log('[WebMCP] Registered tool ${toolName} v${metadata.version}');
+      try {
+        const registration = modelContext.registerTool(tool, {
+          signal: registrationController.signal
+        });
+        Promise.resolve(registration).then(
+          () => console.log('[WebMCP] Registered tool ${toolName} v${metadata.version}'),
+          (error) => {
+            if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
+            if (registrationController.signal.aborted) {
+              console.log('[WebMCP] Superseded registration for ${scriptName}');
+              return;
+            }
+            registrationController.abort(error);
+            console.error('[WebMCP] Failed to register ${scriptName}:', error);
+          }
+        );
+      } catch (error) {
+        if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
+        throw error;
+      }
     } else {
       console.error('[WebMCP] Failed to register ${scriptName}:', {
-        hasAgent: !!window.agent,
+        hasModelContext: !!modelContext,
         hasMetadata: typeof metadata !== 'undefined',
         hasExecute: typeof execute !== 'undefined'
       });
     }
 
   } catch (error) {
+    if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
+    registrationController.abort(error);
     console.error('[WebMCP] Error executing script ${scriptName}:', error);
   }
 })();
@@ -109,7 +142,7 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
 
 /**
  * Get all user scripts for injection
- * Built-in tools are now handled by lifecycle.ts via pre-compiled files
+ * Built-in tools are handled separately by lifecycle.ts via pre-compiled files.
  */
 export async function getAllScriptsForInjection(): Promise<UserScript[]> {
   // Only return user-provided scripts
@@ -121,10 +154,9 @@ export async function getAllScriptsForInjection(): Promise<UserScript[]> {
  * Inject user scripts into a tab that match the URL
  */
 export async function injectUserScripts(options: InjectionOptions): Promise<void> {
-  const { tabId, url, frameId = 0 } = options;
+  const { tabId, url, frameId = 0, generation = globalThis.crypto.randomUUID() } = options;
 
   try {
-    // Get all scripts (defaults + user scripts)
     const allScripts = await getAllScriptsForInjection();
     const enabledScripts = allScripts.filter((s) => s.enabled);
 
@@ -132,7 +164,7 @@ export async function injectUserScripts(options: InjectionOptions): Promise<void
 
     for (const script of enabledScripts) {
       try {
-        await injectSingleScript(script, tabId, url, frameId);
+        await injectSingleScript(script, tabId, url, frameId, generation);
       } catch (error) {
         log.error(`[WebMCP Injector] Failed to inject script ${script.id}:`, error);
       }
@@ -149,7 +181,8 @@ async function injectSingleScript(
   script: UserScript,
   tabId: number,
   url: string,
-  frameId: number
+  frameId: number,
+  generation: string
 ): Promise<void> {
   try {
     // Parse and validate the script (all scripts here are user scripts)
@@ -171,54 +204,89 @@ async function injectSingleScript(
     // Always inject at document_idle for consistent behavior
     const injectImmediately = false;
 
-    const injectionFunc = (codeToInject: string) => {
-      console.warn('[WebMCP] Creating blob URL for user script injection');
-
-      try {
-        // Create a Blob with the script code
-        const blob = new Blob([codeToInject], { type: 'application/javascript' });
-        const blobUrl = URL.createObjectURL(blob);
-
-        console.warn('[WebMCP] Blob URL created:', blobUrl);
-
-        // Load script from blob: URL (external source, not inline)
-        const script = document.createElement('script');
-
-        // Try to set src - may need Trusted Types policy on strict sites
-        try {
-          // Use TT policy if available (created by webmcp-polyfill.js)
-          if (window.__agentboardTTPolicy) {
-            console.warn('[WebMCP] Using Trusted Types policy for user script');
-            script.src = window.__agentboardTTPolicy.createScriptURL(blobUrl);
-          } else {
-            script.src = blobUrl;
+    const injectionFunc = (codeToInject: string, expectedGeneration: string) =>
+      new Promise<void>((resolve, reject) => {
+        console.warn('[WebMCP] Creating blob URL for user script injection');
+        let blobUrl: string | undefined;
+        let script: HTMLScriptElement | undefined;
+        const cleanup = () => {
+          const urlToRevoke = blobUrl;
+          blobUrl = undefined;
+          try {
+            if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
+          } catch (error) {
+            console.warn('[WebMCP] Failed to revoke user script blob URL:', error);
           }
-        } catch (trustedTypesError) {
-          console.error('[WebMCP] ❌ Trusted Types blocked user script injection');
-          console.error('[WebMCP] This site requires TrustedScriptURL but policy creation failed');
-          console.error('[WebMCP] Possible reasons:');
-          console.error('[WebMCP]   1. CSP restricts policy names (trusted-types directive)');
-          console.error('[WebMCP]   2. Site blocks all dynamic policy creation');
-          console.error('[WebMCP] Technical details:', trustedTypesError);
+          try {
+            script?.remove();
+          } catch (error) {
+            console.warn('[WebMCP] Failed to remove user script element:', error);
+          }
+        };
 
-          URL.revokeObjectURL(blobUrl);
-          return;
+        try {
+          if (window.__agentboardUserScriptGeneration === undefined) {
+            window.__agentboardUserScriptGeneration = expectedGeneration;
+          }
+          if (window.__agentboardUserScriptGeneration !== expectedGeneration) {
+            console.warn('[WebMCP] Skipping stale user script generation');
+            resolve();
+            return;
+          }
+          const guardedCode = `(() => {
+            if (window.__agentboardUserScriptGeneration !== ${JSON.stringify(expectedGeneration)}) return;
+            ${codeToInject}
+          })();`;
+          const blob = new Blob([guardedCode], { type: 'application/javascript' });
+          blobUrl = URL.createObjectURL(blob);
+
+          console.warn('[WebMCP] Blob URL created:', blobUrl);
+
+          // Load script from blob: URL (external source, not inline)
+          script = document.createElement('script');
+
+          // Try to set src - may need Trusted Types policy on strict sites
+          try {
+            // Use TT policy if available (created by webmcp-polyfill.js)
+            if (window.__agentboardTTPolicy) {
+              console.warn('[WebMCP] Using Trusted Types policy for user script');
+              script.src = window.__agentboardTTPolicy.createScriptURL(blobUrl);
+            } else {
+              script.src = blobUrl;
+            }
+          } catch (trustedTypesError) {
+            console.error('[WebMCP] ❌ Trusted Types blocked user script injection');
+            console.error(
+              '[WebMCP] This site requires TrustedScriptURL but policy creation failed'
+            );
+            console.error('[WebMCP] Possible reasons:');
+            console.error('[WebMCP]   1. CSP restricts policy names (trusted-types directive)');
+            console.error('[WebMCP]   2. Site blocks all dynamic policy creation');
+            console.error('[WebMCP] Technical details:', trustedTypesError);
+
+            cleanup();
+            reject(trustedTypesError);
+            return;
+          }
+
+          script.onload = () => {
+            console.warn('[WebMCP] ✅ User script loaded successfully via blob URL');
+            cleanup();
+            resolve();
+          };
+          script.onerror = (event) => {
+            console.error('[WebMCP] ❌ Failed to load script from blob URL:', event);
+            cleanup();
+            reject(new Error('Failed to load WebMCP user script from blob URL'));
+          };
+
+          (document.head || document.documentElement).appendChild(script);
+        } catch (error) {
+          console.error('[WebMCP] ❌ Unexpected error during blob injection:', error);
+          cleanup();
+          reject(error);
         }
-
-        script.onload = () => {
-          console.warn('[WebMCP] ✅ User script loaded successfully via blob URL');
-          URL.revokeObjectURL(blobUrl);
-        };
-        script.onerror = (e) => {
-          console.error('[WebMCP] ❌ Failed to load script from blob URL:', e);
-          URL.revokeObjectURL(blobUrl);
-        };
-
-        (document.head || document.documentElement).appendChild(script);
-      } catch (error) {
-        console.error('[WebMCP] ❌ Unexpected error during blob injection:', error);
-      }
-    };
+      });
 
     // Inject the script
     await chrome.scripting.executeScript({
@@ -226,7 +294,7 @@ async function injectSingleScript(
       world: 'MAIN',
       injectImmediately,
       func: injectionFunc,
-      args: [wrappedCode],
+      args: [wrappedCode, generation],
     });
 
     log.info(`[WebMCP Injector] Successfully injected ${metadata.name}`);
@@ -303,7 +371,10 @@ export async function validateAllScripts(): Promise<
 /**
  * Re-inject scripts into a tab (useful after script updates)
  */
-export async function reinjectScripts(tabId: number): Promise<void> {
+export async function reinjectScripts(
+  tabId: number,
+  injectBuiltInTools?: (url: string) => Promise<void>
+): Promise<void> {
   try {
     const tab = await chrome.tabs.get(tabId);
     if (!tab.url) {
@@ -311,27 +382,42 @@ export async function reinjectScripts(tabId: number): Promise<void> {
       return;
     }
 
+    const generation = globalThis.crypto.randomUUID();
+
     // First, clear the injection markers IMMEDIATELY to avoid race conditions
     await chrome.scripting.executeScript({
       target: { tabId, frameIds: [0] },
       world: 'MAIN',
       injectImmediately: true, // MUST run immediately before re-injection!
-      func: () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((window as any).__webmcpInjected) {
+      func: (nextGeneration: string) => {
+        window.__agentboardUserScriptGeneration = nextGeneration;
+        const registrations = window.__agentboardUserScriptLifetimes;
+        if (registrations instanceof Map) {
+          for (const controller of registrations.values()) controller.abort?.();
+          registrations.clear();
+        }
+        const builtInRegistrations = window.__agentboardBuiltinToolLifetimes;
+        if (builtInRegistrations instanceof Map) {
+          for (const controller of builtInRegistrations.values()) controller.abort?.();
+          builtInRegistrations.clear();
+        }
+
+        if (window.__webmcpInjected) {
           // eslint-disable-next-line no-console
           console.log('[WebMCP] Clearing injected scripts for re-injection');
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (window as any).__webmcpInjected = {};
+          window.__webmcpInjected = {};
         }
       },
+      args: [generation],
     });
 
-    // Re-inject matching scripts
+    // Rebuild extension-owned tools before user tools so collision behavior is deterministic.
+    await injectBuiltInTools?.(tab.url);
     await injectUserScripts({
       tabId,
       url: tab.url,
       frameId: 0,
+      generation,
     });
   } catch (error) {
     log.error(`[WebMCP Injector] Failed to re-inject scripts:`, error);

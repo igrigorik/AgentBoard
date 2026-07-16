@@ -34,6 +34,9 @@ const mockChrome = {
     onDOMContentLoaded: {
       addListener: vi.fn(),
     },
+    onErrorOccurred: {
+      addListener: vi.fn(),
+    },
   },
   tabs: {
     onRemoved: {
@@ -87,6 +90,10 @@ describe('TabManager', () => {
 
     mockChrome.webNavigation.onDOMContentLoaded.addListener = vi.fn((handler) => {
       navHandlers.onDOMContentLoaded = handler;
+    });
+
+    mockChrome.webNavigation.onErrorOccurred.addListener = vi.fn((handler) => {
+      navHandlers.onErrorOccurred = handler;
     });
 
     mockChrome.tabs.onRemoved.addListener = vi.fn((handler) => {
@@ -161,6 +168,42 @@ describe('TabManager', () => {
 
       // Verify port was rejected (no listeners attached)
       expect(mockPort.onMessage.addListener).not.toHaveBeenCalled();
+    });
+
+    it('should ignore queued messages from a replaced document port', () => {
+      const makePort = () => ({
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      });
+      const oldPort = makePort();
+      const newPort = makePort();
+
+      portHandlers.onConnect(oldPort);
+      const oldHandler = oldPort.onMessage.addListener.mock.calls[0][0];
+      portHandlers.onConnect(newPort);
+      const newHandler = newPort.onMessage.addListener.mock.calls[0][0];
+      const notification = (name: string) => ({
+        type: 'webmcp',
+        payload: {
+          method: 'tools/listChanged',
+          params: {
+            tools: [{ name, description: name }],
+            origin: 'https://example.com',
+          },
+        },
+      });
+
+      oldHandler(notification('stale_tool'));
+      expect(lifecycle.getToolRegistry(123)).toBeUndefined();
+
+      newHandler(notification('current_tool'));
+      expect(lifecycle.getToolRegistry(123)?.tools.map(({ name }) => name)).toEqual([
+        'current_tool',
+      ]);
     });
 
     it('should flush pending messages when port connects', () => {
@@ -238,6 +281,103 @@ describe('TabManager', () => {
       await expect(promise).rejects.toThrow('Tool call cancelled');
     });
 
+    it('should restore the surviving document when a provisional navigation fails', async () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'surviving-document' },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+      const messageHandler = mockPort.onMessage.addListener.mock.calls[0][0];
+      const catalog = {
+        type: 'webmcp',
+        payload: {
+          method: 'tools/listChanged',
+          params: {
+            tools: [{ name: 'surviving_tool', description: 'Surviving tool' }],
+            origin: 'https://example.com',
+          },
+        },
+      };
+      messageHandler(catalog);
+
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
+      messageHandler(catalog);
+      expect(lifecycle.getToolRegistry(123)).toBeUndefined();
+      await expect(lifecycle.callTool(123, 'surviving_tool', {})).rejects.toThrow(
+        'No connection to tab 123'
+      );
+
+      mockPort.postMessage.mockClear();
+      navHandlers.onErrorOccurred({
+        tabId: 123,
+        frameId: 0,
+        error: 'net::ERR_ABORTED',
+      });
+      expect(mockPort.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload: expect.objectContaining({ method: 'tools/list' }),
+        })
+      );
+
+      messageHandler(catalog);
+      expect(lifecycle.getToolRegistry(123)?.tools.map(({ name }) => name)).toEqual([
+        'surviving_tool',
+      ]);
+    });
+
+    it('should reject relay reconnections from the retiring document', async () => {
+      const makePort = (documentId: string) => ({
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      });
+      const oldPort = makePort('old-document');
+      portHandlers.onConnect(oldPort);
+
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
+
+      const staleReconnect = makePort('old-document');
+      portHandlers.onConnect(staleReconnect);
+      expect(staleReconnect.disconnect).toHaveBeenCalledOnce();
+      expect(staleReconnect.onMessage.addListener).not.toHaveBeenCalled();
+
+      await navHandlers.onDOMContentLoaded({
+        tabId: 123,
+        frameId: 0,
+        documentId: 'new-document',
+      });
+      await expect(lifecycle.callTool(123, 'stale_tool', {})).rejects.toThrow(
+        'No connection to tab 123'
+      );
+      const delayedStaleReconnect = makePort('old-document');
+      portHandlers.onConnect(delayedStaleReconnect);
+      expect(delayedStaleReconnect.disconnect).toHaveBeenCalledOnce();
+      expect(delayedStaleReconnect.onMessage.addListener).not.toHaveBeenCalled();
+
+      const newPort = makePort('new-document');
+      portHandlers.onConnect(newPort);
+      expect(newPort.disconnect).not.toHaveBeenCalled();
+      expect(newPort.onMessage.addListener).toHaveBeenCalledOnce();
+
+      const unexpectedPort = makePort('unexpected-document');
+      portHandlers.onConnect(unexpectedPort);
+      expect(unexpectedPort.disconnect).toHaveBeenCalledOnce();
+      expect(unexpectedPort.onMessage.addListener).not.toHaveBeenCalled();
+
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
+      const restoredPort = makePort('old-document');
+      portHandlers.onConnect(restoredPort);
+      expect(restoredPort.disconnect).not.toHaveBeenCalled();
+      expect(restoredPort.onMessage.addListener).toHaveBeenCalledOnce();
+    });
+
     it('should inject scripts on DOM ready after navigation', async () => {
       mockChrome.tabs.get.mockResolvedValue({
         id: 123,
@@ -263,7 +403,7 @@ describe('TabManager', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Should inject: relay + 1 matching tool + bridge = 3 scripts
-      // (polyfill now injected via manifest content_scripts, not programmatically)
+      // The manifest injects the polyfill; lifecycle injects relay, tools, and bridge.
       // (youtube_transcript only matches youtube.com, not example.com)
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(3);
 
@@ -481,16 +621,99 @@ describe('TabManager', () => {
       await expect(promise).rejects.toThrow('Tool execution failed');
     });
 
-    it('should timeout tool calls after 10 seconds', async () => {
-      vi.useFakeTimers();
+    it('should forward an AI cancellation signal to the page', async () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+
+      const controller = new AbortController();
+      const reason = new Error('stream cancelled');
+      const promise = lifecycle.callTool(123, 'slow-tool', {}, controller.signal);
+      const requestId = mockPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
+
+      controller.abort(reason);
+
+      await expect(promise).rejects.toBe(reason);
+      expect(mockPort.postMessage).toHaveBeenCalledWith({
+        type: 'webmcp',
+        payload: {
+          jsonrpc: '2.0',
+          method: 'tools/cancel',
+          params: { id: requestId },
+        },
+      });
+    });
+
+    it('should cancel pending calls on their owning port before a new document takes over', async () => {
+      const makePort = (documentId: string) => ({
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      });
+      const oldPort = makePort('old-document');
+      const newPort = makePort('new-document');
+      portHandlers.onConnect(oldPort);
 
       const promise = lifecycle.callTool(123, 'slow-tool', {});
+      const requestId = oldPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
+      portHandlers.onConnect(newPort);
 
-      // Advance time past timeout
+      await expect(promise).rejects.toThrow('Tool call cancelled');
+      expect(oldPort.postMessage).toHaveBeenCalledWith({
+        type: 'webmcp',
+        payload: {
+          jsonrpc: '2.0',
+          method: 'tools/cancel',
+          params: { id: requestId },
+        },
+      });
+      expect(
+        newPort.postMessage.mock.calls.some((call) => call[0]?.payload?.method === 'tools/cancel')
+      ).toBe(false);
+    });
+
+    it('should cancel page execution when a tool call times out', async () => {
+      vi.useFakeTimers();
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+
+      const promise = lifecycle.callTool(123, 'slow-tool', {});
+      const requestId = mockPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
+
       vi.advanceTimersByTime(10001);
 
-      await expect(promise).rejects.toThrow('No connection to tab 123');
-
+      await expect(promise).rejects.toThrow('Tool call timeout');
+      expect(mockPort.postMessage).toHaveBeenCalledWith({
+        type: 'webmcp',
+        payload: {
+          jsonrpc: '2.0',
+          method: 'tools/cancel',
+          params: { id: requestId },
+        },
+      });
       vi.useRealTimers();
     });
   });
@@ -973,6 +1196,19 @@ describe('TabManager', () => {
       navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
 
       expect(lifecycle.getToolRegistry(123)).toBeUndefined();
+
+      // Messages already queued by the old document must not restore its catalog after navigation.
+      (messageHandler as unknown as Function)({
+        type: 'webmcp',
+        payload: {
+          method: 'tools/listChanged',
+          params: {
+            tools: [{ name: 'stale_tool', description: 'Stale tool' }],
+            origin: 'https://old-page.com',
+          },
+        },
+      });
+      expect(lifecycle.getToolRegistry(123)).toBeUndefined();
     });
   });
 
@@ -987,7 +1223,7 @@ describe('TabManager', () => {
 
       const calls = mockChrome.scripting.executeScript.mock.calls;
 
-      // Verify injection order (polyfill now via manifest content_scripts)
+      // Verify injection order after the manifest-owned polyfill.
       // 1. Relay FIRST (must be listening when bridge sends initial snapshot)
       expect(calls[0][0]).toEqual({
         target: { tabId: 123, frameIds: [0] },
@@ -1006,6 +1242,29 @@ describe('TabManager', () => {
         injectImmediately: false,
         files: ['content-scripts/page-bridge.js'],
       });
+    });
+
+    it('should serialize overlapping script operations for the same tab', async () => {
+      mockChrome.tabs.get.mockResolvedValue({
+        id: 123,
+        url: 'https://example.com',
+      });
+      let releaseFirst!: () => void;
+      mockChrome.scripting.executeScript
+        .mockImplementationOnce(() => new Promise<void>((resolve) => (releaseFirst = resolve)))
+        .mockResolvedValue(undefined);
+
+      const first = lifecycle.injectScripts(123);
+      await Promise.resolve();
+      await Promise.resolve();
+      const second = lifecycle.injectScripts(123);
+      await Promise.resolve();
+
+      expect(mockChrome.tabs.get).toHaveBeenCalledTimes(1);
+      releaseFirst();
+      await first;
+      await second;
+      expect(mockChrome.tabs.get).toHaveBeenCalledTimes(2);
     });
 
     it('should handle injection errors gracefully', async () => {

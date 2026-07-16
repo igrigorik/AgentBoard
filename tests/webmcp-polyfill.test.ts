@@ -1,1263 +1,452 @@
-/**
- * Tests for WebMCP Polyfill
- *
- * Per WebMCP spec: https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md
- * - Primary API: navigator.modelContext
- * - Backward compat: window.agent (alias)
- */
-
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-// @ts-ignore - jsdom types not installed
-import { JSDOM } from 'jsdom';
-import fs from 'fs';
+import { readFileSync } from 'fs';
+import { JSDOM, VirtualConsole } from 'jsdom';
 import path from 'path';
+import { describe, expect, it, vi } from 'vitest';
 
-describe('WebMCP Polyfill - API Location', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
+const polyfillSource = readFileSync(
+  path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+  'utf8'
+);
 
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
+function createDom() {
+  return new JSDOM('<!doctype html><html><head></head><body></body></html>', {
+    url: 'https://example.com/path',
+    runScripts: 'dangerously',
+    virtualConsole: new VirtualConsole(),
+  });
+}
 
-    window = dom.window as any;
-    global.window = window as any;
+function loadPolyfill(dom: JSDOM) {
+  dom.window.eval(polyfillSource);
+}
 
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
+function createNativeModelContext(dom: JSDOM, tools: any[] = []) {
+  const api = new dom.window.EventTarget() as any;
+  api.registerTool = vi.fn(function (this: any) {
+    if (this !== api) throw new TypeError('Illegal invocation');
+    return Promise.resolve(undefined);
+  });
+  api.getTools = vi.fn(function (this: any) {
+    if (this !== api) throw new TypeError('Illegal invocation');
+    return Promise.resolve(tools);
+  });
+  api.executeTool = vi.fn(function (this: any, _tool: any, args: string) {
+    if (this !== api) throw new TypeError('Illegal invocation');
+    return Promise.resolve(args);
+  });
+  return api;
+}
+
+function exposeNativeOnPrototype(dom: JSDOM, native: any) {
+  Object.defineProperty(Object.getPrototypeOf(dom.window.document), 'modelContext', {
+    get: () => native,
+    configurable: true,
+  });
+}
+
+async function registerTool(
+  modelContext: any,
+  overrides: Record<string, unknown> = {},
+  options?: any
+) {
+  const execute = vi.fn(async (input) => input);
+  const tool = {
+    name: 'example_tool',
+    description: 'Example tool',
+    inputSchema: { type: 'object', properties: {} },
+    execute,
+    ...overrides,
+  };
+  await modelContext.registerTool(tool, options);
+  return { tool, execute };
+}
+
+describe('WebMCP bootstrap backend selection', () => {
+  it('leaves a complete native implementation untouched', async () => {
+    const dom = createDom();
+    const native = createNativeModelContext(dom);
+    exposeNativeOnPrototype(dom, native);
+
+    loadPolyfill(dom);
+
+    expect((dom.window.document as any).modelContext).toBe(native);
+    expect(Object.prototype.hasOwnProperty.call(dom.window.document, 'modelContext')).toBe(false);
+    await (dom.window.document as any).modelContext.getTools();
+    expect(native.getTools).toHaveBeenCalledOnce();
+  });
+
+  it('creates the Trusted Types policy even when native WebMCP exists', () => {
+    const dom = createDom();
+    const native = createNativeModelContext(dom);
+    exposeNativeOnPrototype(dom, native);
+    const policy = { createScriptURL: vi.fn() };
+    const createPolicy = vi.fn(() => policy);
+    Object.defineProperty(dom.window, 'trustedTypes', { value: { createPolicy } });
+
+    loadPolyfill(dom);
+
+    expect(createPolicy).toHaveBeenCalledWith(
+      'agentboard-user-scripts',
+      expect.objectContaining({ createScriptURL: expect.any(Function) })
     );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
+    expect((dom.window as any).__agentboardTTPolicy).toBe(policy);
   });
 
-  it('should expose navigator.modelContext (page-side API per WebMCP spec)', () => {
-    expect((window as any).navigator.modelContext).toBeDefined();
-    // Page-side methods only
-    expect(typeof (window as any).navigator.modelContext.provideContext).toBe('function');
-    expect(typeof (window as any).navigator.modelContext.registerTool).toBe('function');
-    expect(typeof (window as any).navigator.modelContext.unregisterTool).toBe('function');
-    expect(typeof (window as any).navigator.modelContext.clearContext).toBe('function');
-    // Agent-side methods should NOT be on modelContext
-    expect((window as any).navigator.modelContext.callTool).toBeUndefined();
-    expect((window as any).navigator.modelContext.listTools).toBeUndefined();
+  it('adopts native when it appears before the facade is first used', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const facade = (dom.window.document as any).modelContext;
+    const native = createNativeModelContext(dom);
+    exposeNativeOnPrototype(dom, native);
+
+    const tool = {
+      name: 'native_tool',
+      description: 'Native tool',
+      execute: async () => 'ok',
+    };
+    await facade.registerTool(tool);
+
+    expect((dom.window.document as any).modelContext).toBe(facade);
+    expect(facade).not.toBe(native);
+    expect(native.registerTool).toHaveBeenCalledWith(tool);
   });
 
-  it('should expose navigator.modelContextTesting (agent-side API)', () => {
-    expect((window as any).navigator.modelContextTesting).toBeDefined();
-    expect(typeof (window as any).navigator.modelContextTesting.listTools).toBe('function');
-    expect(typeof (window as any).navigator.modelContextTesting.executeTool).toBe('function');
-    expect(typeof (window as any).navigator.modelContextTesting.registerToolsChangedCallback).toBe(
-      'function'
-    );
-    // Chrome M147+ ontoolchange property
-    expect('ontoolchange' in (window as any).navigator.modelContextTesting).toBe(true);
+  it('forwards native toolchange events through the stable facade', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const facade = (dom.window.document as any).modelContext;
+    const native = createNativeModelContext(dom);
+    exposeNativeOnPrototype(dom, native);
+    const listener = vi.fn();
+    facade.addEventListener('toolchange', listener);
+
+    await facade.getTools();
+    native.dispatchEvent(new dom.window.Event('toolchange'));
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].target).toBe(facade);
   });
 
-  it('should expose window.agent as backward-compat combined API', () => {
-    expect((window as any).agent).toBeDefined();
-    // Should have both page-side and agent-side methods for legacy compat
-    expect(typeof (window as any).agent.registerTool).toBe('function');
-    expect(typeof (window as any).agent.listTools).toBe('function');
-    expect(typeof (window as any).agent.callTool).toBe('function');
-  });
-});
+  it('latches the local backend when first use occurs before native exposure', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const facade = (dom.window.document as any).modelContext;
+    await registerTool(facade);
 
-describe('WebMCP Polyfill - unregisterTool', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let modelContext: any;
-  let modelContextTesting: any;
+    const native = createNativeModelContext(dom);
+    exposeNativeOnPrototype(dom, native);
+    const tools = await facade.getTools();
 
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    modelContext = (window as any).navigator.modelContext;
-    modelContextTesting = (window as any).navigator.modelContextTesting;
+    expect(tools.map((tool: any) => tool.name)).toEqual(['example_tool']);
+    expect(native.getTools).not.toHaveBeenCalled();
+    expect((dom.window.document as any).modelContext).toBe(facade);
   });
 
-  it('should unregister a tool by name', () => {
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
+  it('makes repeated injection idempotent', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const facade = (dom.window.document as any).modelContext;
+    await registerTool(facade);
 
-    expect(modelContextTesting.listTools().length).toBe(1);
+    loadPolyfill(dom);
 
-    const removed = modelContext.unregisterTool('test_tool');
-    expect(removed).toBe(true);
-    expect(modelContextTesting.listTools().length).toBe(0);
+    expect((dom.window.document as any).modelContext).toBe(facade);
+    expect((await facade.getTools()).map((tool: any) => tool.name)).toEqual(['example_tool']);
   });
 
-  it('should return false when unregistering non-existent tool', () => {
-    const removed = modelContext.unregisterTool('non_existent');
-    expect(removed).toBe(false);
-  });
-});
+  it('does not expose legacy AgentBoard or Navigator APIs', () => {
+    const dom = createDom();
+    loadPolyfill(dom);
 
-describe('WebMCP Polyfill - clearContext', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let modelContext: any;
-  let modelContextTesting: any;
-
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    modelContext = (window as any).navigator.modelContext;
-    modelContextTesting = (window as any).navigator.modelContextTesting;
+    expect((dom.window as any).agent).toBeUndefined();
+    expect((dom.window as any).__agentboardWebMCP).toBeUndefined();
+    expect((dom.window.navigator as any).modelContext).toBeUndefined();
+    expect((dom.window.navigator as any).modelContextTesting).toBeUndefined();
   });
 
-  it('should clear all tools', () => {
-    modelContext.registerTool({
-      name: 'tool1',
-      description: 'Tool 1',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-    modelContext.registerTool({
-      name: 'tool2',
-      description: 'Tool 2',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    expect(modelContextTesting.listTools().length).toBe(2);
-
-    modelContext.clearContext();
-
-    expect(modelContextTesting.listTools().length).toBe(0);
-  });
-
-  it('should trigger toolsChangedCallback', async () => {
-    const callback = vi.fn();
-    modelContextTesting.registerToolsChangedCallback(callback);
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    // Wait for microtask
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    callback.mockClear();
-
-    modelContext.clearContext();
-
-    // Wait for microtask
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(callback).toHaveBeenCalled();
-  });
-});
-
-describe('WebMCP Polyfill - modelContextTesting (agent-side API)', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let modelContext: any;
-  let modelContextTesting: any;
-
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    modelContext = (window as any).navigator.modelContext;
-    modelContextTesting = (window as any).navigator.modelContextTesting;
-  });
-
-  it('should expose navigator.modelContextTesting', () => {
-    expect(modelContextTesting).toBeDefined();
-    expect(typeof modelContextTesting.listTools).toBe('function');
-    expect(typeof modelContextTesting.executeTool).toBe('function');
-    expect(typeof modelContextTesting.registerToolsChangedCallback).toBe('function');
-  });
-
-  it('should have ModelContextTesting as Symbol.toStringTag', () => {
-    expect(modelContextTesting[Symbol.toStringTag]).toBe('ModelContextTesting');
-  });
-
-  it('listTools() should return tools registered via modelContext', () => {
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    const tools = modelContextTesting.listTools();
-    expect(tools.length).toBe(1);
-    expect(tools[0].name).toBe('test_tool');
-  });
-
-  it('executeTool() should call tools with JSON string args (Chrome native format)', async () => {
-    const executeFn = vi.fn().mockResolvedValue('result');
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: { input: { type: 'string' } } },
-      execute: executeFn,
-    });
-
-    // Chrome's native API passes args as JSON string
-    const result = await modelContextTesting.executeTool('test_tool', '{"input":"hello"}');
-    expect(result).toBe('result');
-    expect(executeFn).toHaveBeenCalledWith({ input: 'hello' }, expect.any(Object));
-  });
-
-  it('executeTool() should also accept object args for convenience', async () => {
-    const executeFn = vi.fn().mockResolvedValue('result');
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: { input: { type: 'string' } } },
-      execute: executeFn,
-    });
-
-    // Also support object for backward compat
-    const result = await modelContextTesting.executeTool('test_tool', { input: 'hello' });
-    expect(result).toBe('result');
-    expect(executeFn).toHaveBeenCalledWith({ input: 'hello' }, expect.any(Object));
-  });
-
-  it('registerToolsChangedCallback() should be called when tools change', async () => {
-    const callback = vi.fn();
-    modelContextTesting.registerToolsChangedCallback(callback);
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    // Wait for microtask
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(callback).toHaveBeenCalled();
-  });
-
-  it('registerToolsChangedCallback() should be called on unregisterTool', async () => {
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    // Wait for initial registration callback
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const callback = vi.fn();
-    modelContextTesting.registerToolsChangedCallback(callback);
-
-    modelContext.unregisterTool('test_tool');
-
-    // Wait for microtask
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(callback).toHaveBeenCalled();
-  });
-
-  it('registerToolsChangedCallback() should be called on clearContext', async () => {
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    // Wait for initial registration callback
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const callback = vi.fn();
-    modelContextTesting.registerToolsChangedCallback(callback);
-
-    modelContext.clearContext();
-
-    // Wait for microtask
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(callback).toHaveBeenCalled();
-  });
-
-  it('ontoolchange should be called when tools change', async () => {
-    const callback = vi.fn();
-    modelContextTesting.ontoolchange = callback;
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(callback).toHaveBeenCalled();
-  });
-
-  it('ontoolchange should replace previous handler', async () => {
-    const callback1 = vi.fn();
-    const callback2 = vi.fn();
-    modelContextTesting.ontoolchange = callback1;
-    modelContextTesting.ontoolchange = callback2;
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(callback1).not.toHaveBeenCalled();
-    expect(callback2).toHaveBeenCalled();
-  });
-
-  it('ontoolchange getter should return the current handler', () => {
-    expect(modelContextTesting.ontoolchange).toBeNull();
-    const callback = vi.fn();
-    modelContextTesting.ontoolchange = callback;
-    expect(modelContextTesting.ontoolchange).toBe(callback);
-  });
-
-  it('setting ontoolchange to null should remove the handler', async () => {
-    const callback = vi.fn();
-    modelContextTesting.ontoolchange = callback;
-    modelContextTesting.ontoolchange = null;
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(callback).not.toHaveBeenCalled();
-  });
-
-  it('ontoolchange and registerToolsChangedCallback should both fire', async () => {
-    const callbackViaRegister = vi.fn();
-    const callbackViaOnchange = vi.fn();
-    modelContextTesting.registerToolsChangedCallback(callbackViaRegister);
-    modelContextTesting.ontoolchange = callbackViaOnchange;
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(callbackViaRegister).toHaveBeenCalled();
-    expect(callbackViaOnchange).toHaveBeenCalled();
-  });
-
-  it('ontoolchange should throw for non-function values', () => {
-    expect(() => {
-      modelContextTesting.ontoolchange = 'not a function';
-    }).toThrow('ontoolchange must be a function or null');
-    expect(() => {
-      modelContextTesting.ontoolchange = 42;
-    }).toThrow('ontoolchange must be a function or null');
-    expect(() => {
-      modelContextTesting.ontoolchange = {};
-    }).toThrow('ontoolchange must be a function or null');
-  });
-});
-
-describe('WebMCP Polyfill - agent context in execute', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let modelContext: any;
-  let modelContextTesting: any;
-
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    modelContext = (window as any).navigator.modelContext;
-    modelContextTesting = (window as any).navigator.modelContextTesting;
-  });
-
-  it('should pass agent context with requestUserInteraction to execute', async () => {
-    let receivedAgent: any = null;
-
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: (_args: any, agent: any) => {
-        receivedAgent = agent;
-        return { success: true };
+  it('does not crash on an existing ModelContext-shaped object with throwing getters', () => {
+    const dom = createDom();
+    const hostileContext = {};
+    Object.defineProperty(hostileContext, 'registerTool', {
+      get() {
+        throw new Error('hostile registerTool getter');
       },
     });
+    Object.defineProperty(dom.window.document, 'modelContext', {
+      configurable: true,
+      value: hostileContext,
+    });
 
-    await modelContextTesting.executeTool('test_tool', '{}');
-
-    expect(receivedAgent).toBeDefined();
-    expect(typeof receivedAgent.requestUserInteraction).toBe('function');
+    expect(() => loadPolyfill(dom)).not.toThrow();
+    expect((dom.window.document as any).modelContext).toBe(hostileContext);
   });
 
-  it('should execute requestUserInteraction callback', async () => {
-    let interactionCalled = false;
+  it('rejects detached facade method calls', () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const { getTools } = (dom.window.document as any).modelContext;
 
-    modelContext.registerTool({
-      name: 'test_tool',
-      description: 'Test tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async (_args: any, agent: any) => {
-        const result = await agent.requestUserInteraction(async () => {
-          interactionCalled = true;
-          return 'user_confirmed';
+    expect(() => getTools()).toThrow('Illegal invocation');
+  });
+});
+
+describe('WebMCP local backend contract', () => {
+  it('is available to parser scripts and registers synchronously before parsing continues', async () => {
+    const dom = new JSDOM(
+      `<!doctype html><html><head><script>
+        window.parserSawModelContext = typeof document.modelContext?.registerTool === 'function';
+        document.modelContext.registerTool({
+          name: 'parser_tool',
+          description: 'Parser tool',
+          execute: async () => 'ok'
         });
-        return { result };
+      </script></head><body></body></html>`,
+      {
+        url: 'https://example.com',
+        runScripts: 'dangerously',
+        virtualConsole: new VirtualConsole(),
+        beforeParse(window) {
+          window.eval(polyfillSource);
+        },
+      }
+    );
+
+    expect((dom.window as any).parserSawModelContext).toBe(true);
+    const tools = await (dom.window.document as any).modelContext.getTools();
+    expect(tools.map((tool: any) => tool.name)).toEqual(['parser_tool']);
+  });
+
+  it('fires toolchange before resolving registration', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const order: string[] = [];
+    modelContext.addEventListener('toolchange', () => order.push('toolchange'));
+
+    const registration = modelContext
+      .registerTool({
+        name: 'ordered_tool',
+        description: 'Ordered tool',
+        execute: async () => 'ok',
+      })
+      .then(() => order.push('resolved'));
+    expect(registration).toBeInstanceOf(dom.window.Promise);
+    await registration;
+
+    expect(order).toEqual(['toolchange', 'resolved']);
+  });
+
+  it('returns sorted, fresh Chromium-shaped descriptors', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    await registerTool(modelContext, {
+      name: 'z_tool',
+      title: 'Zed',
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+    });
+    await registerTool(modelContext, {
+      name: 'a_tool',
+      inputSchema: undefined,
+    });
+
+    const first = await modelContext.getTools();
+    const second = await modelContext.getTools();
+
+    expect(first.map((tool: any) => tool.name)).toEqual(['a_tool', 'z_tool']);
+    expect(first[0]).toMatchObject({
+      name: 'a_tool',
+      title: '',
+      description: 'Example tool',
+      origin: 'https://example.com',
+      window: dom.window,
+    });
+    expect(first[0]).not.toHaveProperty('inputSchema');
+    expect(first[1]).toMatchObject({
+      title: 'Zed',
+      inputSchema: JSON.stringify({ type: 'object', properties: {} }),
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+    });
+    expect(first[0]).not.toBe(second[0]);
+  });
+
+  it('rejects duplicates and invalid registration metadata', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    await registerTool(modelContext);
+
+    await expect(registerTool(modelContext)).rejects.toMatchObject({ name: 'InvalidStateError' });
+    await expect(registerTool(modelContext, { name: 'not valid' })).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    await expect(registerTool(modelContext, { name: 'x'.repeat(129) })).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    await expect(
+      registerTool(modelContext, { name: 'empty_description', description: '' })
+    ).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    expect(() =>
+      modelContext.registerTool({ name: 'missing_execute', description: 'Missing execute' })
+    ).toThrow("Required member 'execute'");
+  });
+
+  it('rejects an unserializable input schema synchronously', () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const schema: any = { type: 'object' };
+    schema.self = schema;
+
+    expect(() =>
+      modelContext.registerTool({
+        name: 'bad_schema',
+        description: 'Bad schema',
+        inputSchema: schema,
+        execute: async () => 'ok',
+      })
+    ).toThrow();
+  });
+
+  it('uses AbortSignal to remove the exact registration', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const controller = new dom.window.AbortController();
+    const listener = vi.fn();
+    modelContext.addEventListener('toolchange', listener);
+    await registerTool(modelContext, {}, { signal: controller.signal });
+
+    controller.abort('removed');
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+
+    expect(await modelContext.getTools()).toEqual([]);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects pre-aborted registration with the exact reason', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const controller = new dom.window.AbortController();
+    const reason = { reason: 'stop' };
+    controller.abort(reason);
+
+    await expect(registerTool(modelContext, {}, { signal: controller.signal })).rejects.toBe(
+      reason
+    );
+    expect(await modelContext.getTools()).toEqual([]);
+  });
+
+  it('executes a discovered tool and serializes object results like Chromium', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    let receiver: unknown = 'not-called';
+    const execute = vi.fn(function (this: unknown, input: unknown) {
+      receiver = this;
+      return Promise.resolve({ echoed: input });
+    });
+    await modelContext.registerTool({
+      name: 'execute_tool',
+      description: 'Execute tool',
+      execute,
+    });
+    const [descriptor] = await modelContext.getTools();
+
+    const result = await modelContext.executeTool(descriptor, JSON.stringify({ value: 7 }));
+
+    expect(execute).toHaveBeenCalledWith({ value: 7 });
+    expect(receiver).toBeUndefined();
+    expect(result).toBe(JSON.stringify({ echoed: { value: 7 } }));
+  });
+
+  it('rejects instead of hanging when result serialization throws', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const serializationError = new Error('cannot serialize result');
+    await modelContext.registerTool({
+      name: 'unserializable_tool',
+      description: 'Returns a hostile result',
+      execute: () => ({
+        toJSON() {
+          throw serializationError;
+        },
+        toString() {
+          throw serializationError;
+        },
+      }),
+    });
+    const [descriptor] = await modelContext.getTools();
+
+    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toBe(serializationError);
+  });
+
+  it('rejects malformed arguments and descriptors from another document', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    await registerTool(modelContext);
+    const [descriptor] = await modelContext.getTools();
+
+    await expect(modelContext.executeTool(descriptor, 'not-json')).rejects.toThrow(
+      'Failed to parse input arguments'
+    );
+    await expect(
+      modelContext.executeTool({ ...descriptor, window: {} }, '{}')
+    ).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+  });
+
+  it('supports pre-aborted and in-flight execution cancellation', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    let finishExecution!: (value: unknown) => void;
+    const execute = vi.fn(() => new Promise((resolve) => (finishExecution = resolve)));
+    await modelContext.registerTool({
+      name: 'slow_tool',
+      description: 'Slow tool',
+      execute,
+    });
+    const [descriptor] = await modelContext.getTools();
+
+    const preAborted = new dom.window.AbortController();
+    preAborted.abort('ignored-by-chromium-contract');
+    await expect(
+      modelContext.executeTool(descriptor, '{}', { signal: preAborted.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    const immediateController = new dom.window.AbortController();
+    const immediateReason = { reason: 'cancel-before-callback' };
+    const skippedExecution = modelContext.executeTool(descriptor, '{}', {
+      signal: immediateController.signal,
+    });
+    immediateController.abort(immediateReason);
+    await expect(skippedExecution).rejects.toBe(immediateReason);
+    expect(execute).not.toHaveBeenCalled();
+
+    const controller = new dom.window.AbortController();
+    const reason = { reason: 'cancelled' };
+    const execution = modelContext.executeTool(descriptor, '{}', { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(reason);
+    await expect(execution).rejects.toBe(reason);
+    expect(execute).toHaveBeenCalledOnce();
+
+    let serializationAttempted = false;
+    finishExecution({
+      toJSON() {
+        serializationAttempted = true;
+        return 'too late';
       },
     });
-
-    const result = await modelContextTesting.executeTool('test_tool', '{}');
-
-    expect(interactionCalled).toBe(true);
-    expect(result.result).toBe('user_confirmed');
-  });
-});
-
-describe('WebMCP Polyfill - provideContext tolerance', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let modelContext: any;
-  let modelContextTesting: any;
-
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    modelContext = (window as any).navigator.modelContext;
-    modelContextTesting = (window as any).navigator.modelContextTesting;
-  });
-
-  it('should accept provideContext({}) — empty object clears tools', () => {
-    // Pre-register a tool
-    modelContext.registerTool({
-      name: 'existing',
-      description: 'Existing tool',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-    expect(modelContextTesting.listTools().length).toBe(1);
-
-    // Empty context should clear tools, not throw
-    modelContext.provideContext({});
-    expect(modelContextTesting.listTools().length).toBe(0);
-  });
-
-  it('should accept provideContext({context: [...]}) — Shopify compat, ignores unknown fields', () => {
-    // Shopify adapter passes {context: [...]} instead of {tools: [...]}
-    expect(() => {
-      modelContext.provideContext({ context: [{ type: 'text', text: 'some context' }] });
-    }).not.toThrow();
-    expect(modelContextTesting.listTools().length).toBe(0);
-  });
-
-  it('should still throw on provideContext(null)', () => {
-    expect(() => {
-      modelContext.provideContext(null);
-    }).toThrow(/provideContext requires an object argument/);
-  });
-
-  it('should still throw on provideContext() — no argument', () => {
-    expect(() => {
-      modelContext.provideContext();
-    }).toThrow(/provideContext requires an object argument/);
-  });
-
-  it('should still throw on provideContext("string")', () => {
-    expect(() => {
-      modelContext.provideContext('tools');
-    }).toThrow(/provideContext requires an object argument/);
-  });
-
-  it('should work normally with provideContext({tools: [...]}) — standard path', () => {
-    modelContext.provideContext({
-      tools: [
-        {
-          name: 'tool_a',
-          description: 'Tool A',
-          inputSchema: { type: 'object', properties: {} },
-          execute: vi.fn(),
-        },
-      ],
-    });
-    const tools = modelContextTesting.listTools();
-    expect(tools.length).toBe(1);
-    expect(tools[0].name).toBe('tool_a');
-  });
-});
-
-describe('WebMCP Polyfill - annotations', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let modelContext: any;
-  let modelContextTesting: any;
-
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    modelContext = (window as any).navigator.modelContext;
-    modelContextTesting = (window as any).navigator.modelContextTesting;
-  });
-
-  it('registerTool with annotations — survives round-trip via listTools', () => {
-    modelContext.registerTool({
-      name: 'annotated_tool',
-      description: 'Tool with annotations',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-      annotations: { readOnlyHint: true, destructiveHint: false },
-    });
-
-    const tools = modelContextTesting.listTools();
-    expect(tools.length).toBe(1);
-    expect(tools[0].annotations).toEqual({ readOnlyHint: true, destructiveHint: false });
-  });
-
-  it('provideContext with annotated tools — listTools includes annotations', () => {
-    modelContext.provideContext({
-      tools: [
-        {
-          name: 'safe_tool',
-          description: 'A safe tool',
-          inputSchema: { type: 'object', properties: {} },
-          execute: vi.fn(),
-          annotations: { readOnlyHint: true },
-        },
-        {
-          name: 'dangerous_tool',
-          description: 'A dangerous tool',
-          inputSchema: { type: 'object', properties: {} },
-          execute: vi.fn(),
-          annotations: { destructiveHint: true, idempotentHint: false },
-        },
-      ],
-    });
-
-    const tools = modelContextTesting.listTools();
-    expect(tools.length).toBe(2);
-    expect(tools[0].annotations).toEqual({ readOnlyHint: true });
-    expect(tools[1].annotations).toEqual({ destructiveHint: true, idempotentHint: false });
-  });
-
-  it('tool without annotations — listTools omits the field entirely', () => {
-    modelContext.registerTool({
-      name: 'plain_tool',
-      description: 'No annotations',
-      inputSchema: { type: 'object', properties: {} },
-      execute: vi.fn(),
-    });
-
-    const tools = modelContextTesting.listTools();
-    expect(tools.length).toBe(1);
-    expect(tools[0]).not.toHaveProperty('annotations');
-  });
-});
-
-describe('WebMCP Polyfill - JSON Schema Validation', () => {
-  let dom: JSDOM;
-  let window: Window & typeof globalThis;
-  let agent: any;
-
-  beforeEach(() => {
-    dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-      url: 'https://example.com',
-      runScripts: 'dangerously',
-    });
-
-    window = dom.window as any;
-    global.window = window as any;
-
-    // Load the polyfill
-    const polyfillCode = fs.readFileSync(
-      path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
-      'utf8'
-    );
-
-    const script = dom.window.document.createElement('script');
-    script.textContent = polyfillCode;
-    dom.window.document.body.appendChild(script);
-
-    // Use window.agent (backward compat API with both page-side and agent-side methods)
-    agent = (window as any).agent;
-  });
-
-  // Helper to check validation errors
-  async function expectValidationError(fn: () => Promise<any>, expectedErrors: string[]) {
-    try {
-      await fn();
-      expect.fail('Should have thrown ValidationError');
-    } catch (error: any) {
-      expect(error.name).toBe('ValidationError');
-      expect(error.errors).toBeDefined();
-      for (const expectedError of expectedErrors) {
-        const found = error.errors.some((e: string) => e.includes(expectedError));
-        if (!found) {
-          console.log('Actual errors:', error.errors);
-          expect.fail(`Expected error containing "${expectedError}" but not found in errors`);
-        }
-      }
-    }
-  }
-
-  describe('Basic Types', () => {
-    it('should validate primitive types correctly', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string' },
-            age: { type: 'number' },
-            active: { type: 'boolean' },
-          },
-          required: ['name'],
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid params - should pass
-      await agent.callTool('test', {
-        name: 'John Doe',
-        age: 30,
-        active: true,
-      });
-
-      // Missing required field - should fail
-      await expectValidationError(
-        () => agent.callTool('test', { age: 30, active: true }),
-        ['name: required field missing']
-      );
-
-      // Wrong type - should fail
-      await expectValidationError(
-        () => agent.callTool('test', { name: 123, age: 30 }),
-        ['name: expected string, got number']
-      );
-    });
-
-    it('should validate integer vs number correctly', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            count: { type: 'integer' },
-            price: { type: 'number' },
-          },
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid integers and numbers
-      await agent.callTool('test', {
-        count: 5,
-        price: 19.99,
-      });
-
-      // Float for integer field - should fail
-      await expectValidationError(
-        () => agent.callTool('test', { count: 5.5, price: 19.99 }),
-        ['count: expected integer']
-      );
-    });
-  });
-
-  describe('Nested Objects', () => {
-    it('should validate nested objects recursively', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            user: {
-              type: 'object',
-              properties: {
-                name: { type: 'string' },
-                email: { type: 'string' },
-                profile: {
-                  type: 'object',
-                  properties: {
-                    bio: { type: 'string' },
-                    avatar: { type: 'string' },
-                  },
-                  required: ['bio'],
-                },
-              },
-              required: ['name', 'email'],
-            },
-          },
-          required: ['user'],
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid nested object - should pass
-      await agent.callTool('test', {
-        user: {
-          name: 'Jane Smith',
-          email: 'jane@example.com',
-          profile: {
-            bio: 'Software Engineer',
-            avatar: 'avatar.jpg',
-          },
-        },
-      });
-
-      // Missing nested required field - should fail with path
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            user: {
-              name: 'Jane Smith',
-              // Missing email
-              profile: {
-                bio: 'Software Engineer',
-              },
-            },
-          }),
-        ['user.email: required field missing']
-      );
-
-      // Missing deeply nested required field - should fail with full path
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            user: {
-              name: 'Jane Smith',
-              email: 'jane@example.com',
-              profile: {
-                // Missing bio
-                avatar: 'avatar.jpg',
-              },
-            },
-          }),
-        ['user.profile.bio: required field missing']
-      );
-    });
-  });
-
-  describe('Arrays', () => {
-    it('should validate arrays of primitives', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            tags: {
-              type: 'array',
-              items: { type: 'string' },
-            },
-            scores: {
-              type: 'array',
-              items: { type: 'number' },
-            },
-          },
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid arrays - should pass
-      await agent.callTool('test', {
-        tags: ['javascript', 'typescript', 'react'],
-        scores: [95, 87, 92],
-      });
-
-      // Wrong item type - should fail with index
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            tags: ['javascript', 123, 'react'],
-            scores: [95, 87, 92],
-          }),
-        ['tags[1]: expected string, got number']
-      );
-    });
-
-    it('should validate arrays of objects (Shopify-style)', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            add_items: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  product_id: { type: 'string' },
-                  quantity: { type: 'integer' },
-                },
-                required: ['product_id', 'quantity'],
-              },
-            },
-          },
-          required: ['add_items'],
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid array of objects - should pass
-      await agent.callTool('test', {
-        add_items: [
-          {
-            product_id: 'gid://shopify/ProductVariant/123',
-            quantity: 2,
-          },
-          {
-            product_id: 'gid://shopify/ProductVariant/456',
-            quantity: 1,
-          },
-        ],
-      });
-
-      // Wrong type in array item - should fail with path
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            add_items: [
-              {
-                product_id: 'gid://shopify/ProductVariant/123',
-                quantity: '2', // String instead of integer
-              },
-            ],
-          }),
-        ['add_items[0].quantity: expected integer, got string']
-      );
-
-      // Missing required field in array item - should fail with path
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            add_items: [
-              {
-                product_id: 'gid://shopify/ProductVariant/123',
-                // Missing quantity
-              },
-            ],
-          }),
-        ['add_items[0].quantity: required field missing']
-      );
-    });
-
-    it('should handle deeply nested arrays and objects', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            company: {
-              type: 'object',
-              properties: {
-                name: { type: 'string' },
-                departments: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string' },
-                      employees: {
-                        type: 'array',
-                        items: {
-                          type: 'object',
-                          properties: {
-                            id: { type: 'string' },
-                            name: { type: 'string' },
-                            skills: {
-                              type: 'array',
-                              items: { type: 'string' },
-                            },
-                          },
-                          required: ['id', 'name'],
-                        },
-                      },
-                    },
-                    required: ['name', 'employees'],
-                  },
-                },
-              },
-              required: ['name', 'departments'],
-            },
-          },
-          required: ['company'],
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid deeply nested structure - should pass
-      await agent.callTool('test', {
-        company: {
-          name: 'TechCorp',
-          departments: [
-            {
-              name: 'Engineering',
-              employees: [
-                {
-                  id: 'emp001',
-                  name: 'Alice',
-                  skills: ['Python', 'JavaScript'],
-                },
-                {
-                  id: 'emp002',
-                  name: 'Bob',
-                  skills: [], // Empty array is valid
-                },
-              ],
-            },
-            {
-              name: 'Marketing',
-              employees: [], // Empty array is valid
-            },
-          ],
-        },
-      });
-
-      // Missing deeply nested field - should fail with full path
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            company: {
-              name: 'TechCorp',
-              departments: [
-                {
-                  name: 'Engineering',
-                  employees: [
-                    {
-                      id: 'emp001',
-                      // Missing name
-                      skills: ['Python'],
-                    },
-                  ],
-                },
-              ],
-            },
-          }),
-        ['company.departments[0].employees[0].name: required field missing']
-      );
-    });
-  });
-
-  describe('Additional Properties', () => {
-    it('should allow additional properties by default', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string' },
-          },
-          // No additionalProperties specified - should allow extras
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Extra properties should be allowed
-      await agent.callTool('test', {
-        name: 'John',
-        extra: 'field',
-        another: 123,
-      });
-    });
-
-    it('should reject additional properties when set to false', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string' },
-          },
-          additionalProperties: false,
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Extra properties should be rejected
-      await expectValidationError(
-        () =>
-          agent.callTool('test', {
-            name: 'John',
-            extra: 'field',
-          }),
-        ['extra: additional property not allowed']
-      );
-    });
-  });
-
-  describe('Real-world Schemas', () => {
-    it('should validate Shopify update_cart schema', async () => {
-      const tool = {
-        name: 'shopify_update_cart',
-        description: 'Update cart',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            cart_id: { type: 'string' },
-            add_items: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  product_id: { type: 'string' },
-                  quantity: { type: 'integer' },
-                  attributes: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        key: { type: 'string' },
-                        value: { type: 'string' },
-                      },
-                      required: ['key', 'value'],
-                    },
-                  },
-                },
-                required: ['product_id', 'quantity'],
-              },
-            },
-            buyer_identity: {
-              type: 'object',
-              properties: {
-                email: { type: 'string' },
-                phone: { type: 'string' },
-                delivery_address: {
-                  type: 'object',
-                  properties: {
-                    address1: { type: 'string' },
-                    city: { type: 'string' },
-                    country_code: { type: 'string' },
-                  },
-                  required: ['address1', 'city', 'country_code'],
-                },
-              },
-            },
-          },
-          // No top-level required fields for update operations
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      // Valid Shopify params - should pass
-      await agent.callTool('shopify_update_cart', {
-        add_items: [
-          {
-            product_id: 'gid://shopify/ProductVariant/30674260033616',
-            quantity: 1,
-          },
-        ],
-      });
-
-      // Complex valid params - should pass
-      await agent.callTool('shopify_update_cart', {
-        cart_id: 'cart123',
-        add_items: [
-          {
-            product_id: 'gid://shopify/ProductVariant/123',
-            quantity: 2,
-            attributes: [
-              { key: 'gift_wrap', value: 'yes' },
-              { key: 'note', value: 'Happy Birthday!' },
-            ],
-          },
-        ],
-        buyer_identity: {
-          email: 'customer@example.com',
-          delivery_address: {
-            address1: '123 Main St',
-            city: 'New York',
-            country_code: 'US',
-          },
-        },
-      });
-
-      // Missing required nested field - should fail with path
-      await expectValidationError(
-        () =>
-          agent.callTool('shopify_update_cart', {
-            buyer_identity: {
-              delivery_address: {
-                address1: '123 Main St',
-                // Missing city
-                country_code: 'US',
-              },
-            },
-          }),
-        ['buyer_identity.delivery_address.city: required field missing']
-      );
-    });
-  });
-
-  describe('Error Messages', () => {
-    it('should provide clear error paths for all validation failures', async () => {
-      const tool = {
-        name: 'test',
-        description: 'Test tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            users: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string' },
-                  age: { type: 'integer' },
-                },
-                required: ['name'],
-              },
-            },
-          },
-          required: ['users'],
-        },
-        execute: vi.fn(),
-      };
-
-      agent.registerTool(tool);
-
-      try {
-        await agent.callTool('test', {
-          users: [
-            { name: 'Alice', age: 30 },
-            { age: 'twenty-five' }, // Missing name, wrong type
-            { name: 123, age: 40 }, // Wrong name type
-          ],
-        });
-        expect.fail('Should have thrown validation error');
-      } catch (error: any) {
-        expect(error.name).toBe('ValidationError');
-        expect(error.errors).toContain('users[1].name: required field missing');
-        expect(error.errors).toContain('users[1].age: expected integer, got string');
-        expect(error.errors).toContain('users[2].name: expected string, got number');
-      }
-    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(serializationAttempted).toBe(false);
   });
 });

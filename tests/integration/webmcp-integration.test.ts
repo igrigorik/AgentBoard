@@ -81,7 +81,7 @@ describe('WebMCP Integration - Sidebar ↔ Tab Communication', () => {
 
   describe('Tool Discovery Flow', () => {
     it('should discover tools from page through to sidebar', async () => {
-      // Setup: Page registers a tool with window.agent
+      // Setup: Page registers a tool with document.modelContext
       const pageToolRegistration = {
         name: 'page-tool',
         description: 'A tool from the page',

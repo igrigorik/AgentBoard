@@ -2,6 +2,9 @@
  * Unit tests for WebMCP script injector
  */
 
+import { readFileSync } from 'fs';
+import { JSDOM, VirtualConsole } from 'jsdom';
+import path from 'path';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   injectUserScripts,
@@ -9,6 +12,11 @@ import {
   validateAllScripts,
   reinjectScripts,
 } from '../src/lib/webmcp/script-injector';
+
+const polyfillSource = readFileSync(
+  path.join(__dirname, '../src/content-scripts/webmcp-polyfill.js'),
+  'utf8'
+);
 
 // Mock chrome.scripting API
 const mockExecuteScript = vi.fn();
@@ -37,6 +45,11 @@ export const metadata = {
   description: "Test tool",
   match: "https://example.com/*"
 };
+
+export function shouldRegister({ signal } = {}) {
+  window.__testRegistrationSignal = signal;
+  return true;
+}
 
 export async function execute(args) {
   return "test result";
@@ -129,15 +142,6 @@ export function execute(args) {
   };
 });
 
-// Helper to filter out agentboard tool injections from mock calls
-const getNonDefaultScriptCalls = (mockFn: any) => {
-  return mockFn.mock.calls.filter((call: any) => {
-    const scriptCode = call[0].args?.[0] || '';
-    // Agentboard tools are marked with a special comment
-    return !scriptCode.includes('// webmcp:agentboard_tool');
-  });
-};
-
 // Helper to check if a specific script was injected
 const wasScriptInjected = (mockFn: any, scriptName: string) => {
   return mockFn.mock.calls.some((call: any) => {
@@ -168,8 +172,7 @@ describe('WebMCP Script Injector', () => {
         frameId: 0,
       });
 
-      // Built-in tools are now injected by lifecycle, not script-injector
-      // So script-injector only injects user scripts
+      // Lifecycle owns built-in tools, so these are the four matching user scripts.
       expect(mockExecuteScript.mock.calls.length).toBe(4); // test_tool, all_urls_tool, early_tool, multi_match
 
       // Check that scripts are injected with correct world and frame
@@ -179,6 +182,20 @@ describe('WebMCP Script Injector', () => {
           world: 'MAIN',
         })
       );
+    });
+
+    it('should register generated tools through document.modelContext', async () => {
+      await injectUserScripts({
+        tabId: 123,
+        url: 'https://example.com/page',
+        frameId: 0,
+      });
+
+      const wrappedCode = mockExecuteScript.mock.calls[0][0].args[0];
+      expect(wrappedCode).toContain('document.modelContext');
+      expect(wrappedCode).toContain('modelContext.registerTool(tool, {');
+      expect(wrappedCode).toContain('signal: registrationController.signal');
+      expect(wrappedCode).not.toContain('window.agent');
     });
 
     it('should use document_idle timing for all scripts', async () => {
@@ -202,8 +219,7 @@ describe('WebMCP Script Injector', () => {
       });
 
       // disabled_tool should not be injected even though it matches <all_urls>
-      const nonDefaultCalls = getNonDefaultScriptCalls(mockExecuteScript);
-      expect(nonDefaultCalls).toHaveLength(4); // Only enabled user scripts
+      expect(mockExecuteScript.mock.calls).toHaveLength(4); // Only enabled user scripts
       expect(wasScriptInjected(mockExecuteScript, 'disabled_tool')).toBe(false);
     });
 
@@ -215,11 +231,8 @@ describe('WebMCP Script Injector', () => {
       });
 
       // Only all_urls_tool should be injected from user scripts
-      const nonDefaultCalls = getNonDefaultScriptCalls(mockExecuteScript);
-      expect(nonDefaultCalls).toHaveLength(1);
-      // The tool is registered as namespace_name format now
-      // Since namespace is "test" and name is "all_urls_tool", it should be registered as "test_all_urls_tool"
-      // But the helper should still find it by the original name
+      expect(mockExecuteScript.mock.calls).toHaveLength(1);
+      // Public names combine the script namespace and local tool name.
       expect(wasScriptInjected(mockExecuteScript, 'all_urls_tool')).toBe(true);
     });
 
@@ -230,10 +243,8 @@ describe('WebMCP Script Injector', () => {
         frameId: 0,
       });
 
-      // all_urls_tool excludes localhost
-      // Default tools still inject (they use <all_urls>)
-      const nonDefaultCalls = getNonDefaultScriptCalls(mockExecuteScript);
-      expect(nonDefaultCalls).toHaveLength(0); // No user scripts should inject
+      // all_urls_tool excludes localhost.
+      expect(mockExecuteScript.mock.calls).toHaveLength(0); // No user scripts should inject
       expect(wasScriptInjected(mockExecuteScript, 'all_urls_tool')).toBe(false);
     });
 
@@ -244,8 +255,7 @@ describe('WebMCP Script Injector', () => {
         frameId: 0,
       });
 
-      // Built-in tools are now injected by lifecycle, not script-injector
-      // So script-injector only injects user scripts
+      // Lifecycle owns built-in tools, so only matching user scripts appear here.
       expect(mockExecuteScript.mock.calls.length).toBe(2); // multi_match and all_urls_tool
     });
   });
@@ -254,42 +264,26 @@ describe('WebMCP Script Injector', () => {
     it('should return all matching enabled scripts for a URL', async () => {
       const matching = await getMatchingScripts('https://example.com/page');
 
-      // Filter out defaults for the test (core and Shopify tools)
-      const nonDefaultMatching = matching.filter(
-        (s) => !s.id.startsWith('agentboard:') && !s.id.startsWith('shopify:')
-      );
-
-      // Should match test_tool, all_urls_tool, early_tool, and multi_match
-      expect(nonDefaultMatching).toHaveLength(4);
-      expect(nonDefaultMatching.map((s) => s.id)).toContain('script1');
-      expect(nonDefaultMatching.map((s) => s.id)).toContain('script2'); // all_urls_tool
-      expect(nonDefaultMatching.map((s) => s.id)).toContain('script4');
-      expect(nonDefaultMatching.map((s) => s.id)).toContain('script5');
+      expect(matching).toHaveLength(4);
+      expect(matching.map((s) => s.id)).toContain('script1');
+      expect(matching.map((s) => s.id)).toContain('script2'); // all_urls_tool
+      expect(matching.map((s) => s.id)).toContain('script4');
+      expect(matching.map((s) => s.id)).toContain('script5');
     });
 
     it('should not include disabled scripts', async () => {
       const matching = await getMatchingScripts('https://any.com/page');
 
-      // Filter out defaults for the test (core and Shopify tools)
-      const nonDefaultMatching = matching.filter(
-        (s) => !s.id.startsWith('agentboard:') && !s.id.startsWith('shopify:')
-      );
-
-      // Should only include all_urls_tool, not disabled_tool
-      expect(nonDefaultMatching).toHaveLength(1);
-      expect(nonDefaultMatching[0].id).toBe('script2');
+      // Should only include all_urls_tool, not disabled_tool.
+      expect(matching).toHaveLength(1);
+      expect(matching[0].id).toBe('script2');
     });
 
     it('should respect exclude patterns', async () => {
       const matching = await getMatchingScripts('http://localhost/test');
 
-      // Filter out defaults (which use <all_urls> and will match)
-      const nonDefaultMatching = matching.filter(
-        (s) => !s.id.startsWith('agentboard:') && !s.id.startsWith('shopify:')
-      );
-
-      // all_urls_tool excludes localhost
-      expect(nonDefaultMatching).toHaveLength(0);
+      // all_urls_tool excludes localhost.
+      expect(matching).toHaveLength(0);
     });
   });
 
@@ -297,15 +291,10 @@ describe('WebMCP Script Injector', () => {
     it('should validate all user scripts', async () => {
       const results = await validateAllScripts();
 
-      // Filter out defaults for counting  (core and Shopify tools)
-      const nonDefaultResults = Array.from(results.entries()).filter(
-        ([id]) => !id.startsWith('agentboard:') && !id.startsWith('shopify:')
-      );
+      expect(results.size).toBe(5);
 
-      expect(nonDefaultResults.length).toBe(5); // Only count user scripts
-
-      // All test scripts should be valid
-      for (const [, result] of nonDefaultResults) {
+      // All test scripts should be valid.
+      for (const [, result] of results) {
         expect(result.valid).toBe(true);
         expect(result.metadata).toBeDefined();
         expect(result.error).toBeUndefined();
@@ -321,19 +310,82 @@ describe('WebMCP Script Injector', () => {
       } as any);
     });
 
-    it('should clear existing scripts and reinject', async () => {
-      await reinjectScripts(123);
+    it('should clear existing registrations, then rebuild built-in and user tools', async () => {
+      const injectBuiltInTools = vi.fn(async () => {
+        await mockExecuteScript({ files: ['tools/builtin.js'] });
+      });
+      await reinjectScripts(123, injectBuiltInTools);
 
       // Should clear existing scripts first (immediately to avoid race conditions)
       expect(mockExecuteScript).toHaveBeenCalledWith({
         target: { tabId: 123, frameIds: [0] },
         world: 'MAIN',
-        injectImmediately: true, // Changed to true to avoid race conditions
+        injectImmediately: true, // Cleanup must complete before replacement injection.
         func: expect.any(Function),
+        args: [expect.any(String)],
       });
 
-      // Then inject matching scripts (first call is clear, rest are injections)
-      expect(mockExecuteScript.mock.calls.length).toBeGreaterThan(1);
+      expect(injectBuiltInTools).toHaveBeenCalledWith('https://example.com/page');
+      expect(mockExecuteScript.mock.calls[1][0]).toEqual({ files: ['tools/builtin.js'] });
+      expect(mockExecuteScript.mock.calls[2][0].args[0]).toContain('test_test_tool');
+    });
+
+    it('should remove old registrations before reinjection', async () => {
+      await injectUserScripts({
+        tabId: 123,
+        url: 'https://example.com/page',
+        frameId: 0,
+      });
+      const initialCode = mockExecuteScript.mock.calls[0][0].args[0];
+
+      const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+        url: 'https://example.com/page',
+        runScripts: 'dangerously',
+        virtualConsole: new VirtualConsole(),
+      });
+      dom.window.eval(polyfillSource);
+      dom.window.eval(initialCode);
+      await Promise.resolve();
+
+      const modelContext = (dom.window.document as any).modelContext;
+      const initialSignal = (dom.window as any).__testRegistrationSignal;
+      expect(initialSignal).toBeInstanceOf(dom.window.AbortSignal);
+      expect(initialSignal.aborted).toBe(false);
+      let tools = await modelContext.getTools();
+      const initialTool = tools.find((tool: any) => tool.name === 'test_test_tool');
+      expect(await modelContext.executeTool(initialTool, '{}')).toBe('test result');
+
+      mockExecuteScript.mockClear();
+      vi.mocked(chrome.tabs.get).mockResolvedValue({
+        id: 123,
+        url: 'https://example.com/page',
+      } as any);
+      await reinjectScripts(123);
+
+      const builtInController = new dom.window.AbortController();
+      (dom.window as any).__agentboardBuiltinToolLifetimes = new (dom.window as any).Map([
+        ['builtin_tool', builtInController],
+      ]);
+      const cleanup = mockExecuteScript.mock.calls[0][0].func;
+      const cleanupGeneration = mockExecuteScript.mock.calls[0][0].args[0];
+      dom.window.eval(`(${cleanup.toString()})(${JSON.stringify(cleanupGeneration)})`);
+      expect((dom.window as any).__agentboardUserScriptGeneration).toBe(cleanupGeneration);
+      expect(initialSignal.aborted).toBe(true);
+      expect(builtInController.signal.aborted).toBe(true);
+      expect(await modelContext.getTools()).toEqual([]);
+
+      const updatedCode = mockExecuteScript.mock.calls[1][0].args[0].replace(
+        'return "test result";',
+        'return "updated result";'
+      );
+      dom.window.eval(updatedCode);
+      await Promise.resolve();
+
+      tools = await modelContext.getTools();
+      const updatedTool = tools.find((tool: any) => tool.name === 'test_test_tool');
+      expect(tools).toHaveLength(1);
+      expect(await modelContext.executeTool(updatedTool, '{}')).toBe('updated result');
+      dom.window.close();
     });
 
     it('should handle tabs without URLs', async () => {
@@ -368,9 +420,105 @@ describe('WebMCP Script Injector', () => {
       const injectedFunc = mockExecuteScript.mock.calls[0][0].func;
       const funcStr = injectedFunc.toString();
 
-      // Should create a script element
+      // The injector waits for the blob load and stale generations self-suppress.
+      expect(funcStr).toContain('new Promise');
+      expect(funcStr).toContain('__agentboardUserScriptGeneration');
       expect(funcStr).toContain('document.createElement');
       expect(funcStr).toContain('script');
+    });
+
+    it('should suppress an older blob that loads after a newer script generation', async () => {
+      await injectUserScripts({
+        tabId: 123,
+        url: 'https://example.com/page',
+        frameId: 0,
+      });
+      const injectionFunc = mockExecuteScript.mock.calls[0][0].func;
+      const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
+        url: 'https://example.com/page',
+        runScripts: 'dangerously',
+        virtualConsole: new VirtualConsole(),
+      });
+      const sources = new Map<string, string>();
+      const queuedScripts: HTMLScriptElement[] = [];
+      let nextBlobId = 0;
+      class TestBlob {
+        source: string;
+        constructor(parts: unknown[]) {
+          this.source = parts.join('');
+        }
+      }
+      Object.defineProperty(dom.window, 'Blob', { value: TestBlob });
+      Object.defineProperty(dom.window.URL, 'createObjectURL', {
+        value(blob: TestBlob) {
+          const url = `blob:test-${nextBlobId++}`;
+          sources.set(url, blob.source);
+          return url;
+        },
+      });
+      Object.defineProperty(dom.window.URL, 'revokeObjectURL', { value: vi.fn() });
+      vi.spyOn(dom.window.document.head, 'appendChild').mockImplementation((node: Node) => {
+        queuedScripts.push(node as HTMLScriptElement);
+        return node;
+      });
+      const injectInPage = dom.window.eval(`(${injectionFunc.toString()})`) as (
+        code: string,
+        generation: string
+      ) => Promise<void>;
+
+      const oldLoad = injectInPage(`window.__raceWinner = 'old';`, 'old-generation');
+      (dom.window as any).__agentboardUserScriptGeneration = 'new-generation';
+      const newLoad = injectInPage(`window.__raceWinner = 'new';`, 'new-generation');
+      expect(queuedScripts).toHaveLength(2);
+
+      for (const script of queuedScripts) {
+        dom.window.eval(sources.get(script.src)!);
+        script.dispatchEvent(new dom.window.Event('load'));
+      }
+      await Promise.all([oldLoad, newLoad]);
+
+      expect((dom.window as any).__raceWinner).toBe('new');
+      (dom.window as any).__agentboardUserScriptGeneration = 'latest-generation';
+      await injectInPage(`window.__raceWinner = 'stale';`, 'stale-generation');
+      expect(queuedScripts).toHaveLength(2);
+      expect((dom.window as any).__raceWinner).toBe('new');
+      dom.window.close();
+    });
+
+    it('should revoke the blob URL when DOM insertion fails', async () => {
+      await injectUserScripts({
+        tabId: 123,
+        url: 'https://example.com/page',
+        frameId: 0,
+      });
+      const injectionFunc = mockExecuteScript.mock.calls[0][0].func;
+      const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
+        url: 'https://example.com/page',
+        runScripts: 'dangerously',
+        virtualConsole: new VirtualConsole(),
+      });
+      const blobUrl = 'blob:append-failure';
+      Object.defineProperty(dom.window.URL, 'createObjectURL', {
+        value: vi.fn(() => blobUrl),
+      });
+      const revokeObjectURL = vi.fn(() => {
+        throw new Error('hostile revokeObjectURL');
+      });
+      Object.defineProperty(dom.window.URL, 'revokeObjectURL', { value: revokeObjectURL });
+      vi.spyOn(dom.window.document.head, 'appendChild').mockImplementation(() => {
+        throw new Error('append failed');
+      });
+      const injectInPage = dom.window.eval(`(${injectionFunc.toString()})`) as (
+        code: string,
+        generation: string
+      ) => Promise<void>;
+
+      await expect(injectInPage('window.__neverRuns = true;', 'generation')).rejects.toThrow(
+        'append failed'
+      );
+      expect(revokeObjectURL).toHaveBeenCalledWith(blobUrl);
+      expect(dom.window.document.querySelector('script')).toBeNull();
+      dom.window.close();
     });
 
     it('should include guard against double injection', async () => {
@@ -380,15 +528,9 @@ describe('WebMCP Script Injector', () => {
         frameId: 0,
       });
 
-      // The wrapped code should check for __webmcpInjected
-      const injectedFunc = mockExecuteScript.mock.calls[0][0].func;
-      const funcStr = injectedFunc.toString();
-
-      // Note: We can't easily test the actual wrapped code content
-      // because it's embedded as a string, but we can verify
-      // the structure is correct
-      expect(funcStr).toBeDefined();
-      expect(typeof injectedFunc).toBe('function');
+      const wrappedCode = mockExecuteScript.mock.calls[0][0].args[0];
+      expect(wrappedCode).toContain('window.__webmcpInjected[scriptId]');
+      expect(wrappedCode).toContain('window.__webmcpInjected[scriptId] = true');
     });
   });
 
@@ -412,10 +554,8 @@ describe('WebMCP Script Injector', () => {
         frameId: 0,
       });
 
-      // Should attempt to inject all matching scripts despite one failing
-      // Count non-default scripts that were attempted
-      const nonDefaultCalls = getNonDefaultScriptCalls(mockExecuteScript);
-      expect(nonDefaultCalls).toHaveLength(4); // test_tool, all_urls_tool, early_tool, multi_match
+      // Every matching user script is attempted despite the first failure.
+      expect(mockExecuteScript.mock.calls).toHaveLength(4);
 
       // Verify that first call failed but others succeeded
       const results = await Promise.allSettled(

@@ -8,7 +8,7 @@
  * Key transformations:
  * - Removes ES module syntax (export const, export function)
  * - Wraps tool code in self-registering IIFE
- * - Adds retry logic for window.agent availability
+ * - Registers through the standard document.modelContext API
  * - Generates static registry with metadata for lifecycle injection
  *
  * Why: Files injected via files:[] bypass CSP script-src restrictions,
@@ -246,8 +246,7 @@ function transformToolCode(code: string): string {
 }
 
 /**
- * Wrap transformed code in self-registering IIFE
- * This IIFE registers the tool with window.agent when available
+ * Wrap transformed code in a self-registering IIFE using the standard WebMCP API.
  */
 function wrapInIIFE(code: string, metadata: ToolMetadata): string {
   const fullToolName = `${metadata.namespace}_${metadata.name}`;
@@ -264,38 +263,58 @@ function wrapInIIFE(code: string, metadata: ToolMetadata): string {
   // Tool implementation
 ${code}
   
-  // Self-registration with retry logic
-  (function registerTool() {
-    if (!window.agent || typeof window.agent.registerTool !== 'function') {
-      // window.agent not ready, retry after 10ms
-      setTimeout(registerTool, 10);
-      return;
-    }
-    
-    // Check if tool should be registered (optional export)
-    if (typeof shouldRegister === 'function') {
-      try {
-        const shouldReg = shouldRegister();
-        if (!shouldReg) {
-          console.log('[WebMCP] Tool ${fullToolName} skipped registration (shouldRegister returned false)');
-          return;
-        }
-      } catch (error) {
-        console.error('[WebMCP] Error in shouldRegister for ${fullToolName}:', error);
-        // Continue with registration if shouldRegister throws (fail-open)
+  const modelContext = document.modelContext;
+  if (!modelContext || typeof modelContext.registerTool !== 'function') {
+    console.error('[WebMCP] document.modelContext is unavailable for ${fullToolName}');
+    return;
+  }
+
+  // Check if tool should be registered (optional export)
+  if (typeof shouldRegister === 'function') {
+    try {
+      const shouldReg = shouldRegister();
+      if (!shouldReg) {
+        console.log('[WebMCP] Tool ${fullToolName} skipped registration (shouldRegister returned false)');
+        return;
       }
+    } catch (error) {
+      console.error('[WebMCP] Error in shouldRegister for ${fullToolName}:', error);
+      // Continue with registration if shouldRegister throws (fail-open)
     }
-    
-    // Register the tool
-    window.agent.registerTool({
-      name: '${fullToolName}',
+  }
+
+  const registrations = window.__agentboardBuiltinToolLifetimes instanceof Map
+    ? window.__agentboardBuiltinToolLifetimes
+    : new Map();
+  window.__agentboardBuiltinToolLifetimes = registrations;
+
+  const registrationKey = '${fullToolName}';
+  registrations.get(registrationKey)?.abort?.();
+  const registrationController = new AbortController();
+  registrations.set(registrationKey, registrationController);
+
+  try {
+    const registration = modelContext.registerTool({
+      name: registrationKey,
       description: metadata.description || '',
       inputSchema: metadata.inputSchema,
       execute: execute
-    });
-    
-    console.log('[WebMCP] Registered tool ${fullToolName} v${metadata.version}');
-  })();
+    }, { signal: registrationController.signal });
+    Promise.resolve(registration).then(
+      () => console.log('[WebMCP] Registered tool ${fullToolName} v${metadata.version}'),
+      (error) => {
+        if (registrations.get(registrationKey) === registrationController) registrations.delete(registrationKey);
+        if (registrationController.signal.aborted) {
+          console.log('[WebMCP] Superseded registration for ${fullToolName}');
+          return;
+        }
+        console.error('[WebMCP] Failed to register ${fullToolName}:', error);
+      }
+    );
+  } catch (error) {
+    if (registrations.get(registrationKey) === registrationController) registrations.delete(registrationKey);
+    console.error('[WebMCP] Failed to register ${fullToolName}:', error);
+  }
 })();
 //# sourceURL=webmcp-tool:${fullToolName}.js
 `;

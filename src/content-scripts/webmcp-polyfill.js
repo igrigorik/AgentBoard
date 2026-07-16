@@ -1,508 +1,376 @@
 /**
- * WebMCP Polyfill - Complete implementation of WebMCP API
- * Provides tool registration and invocation capabilities for web agents
+ * AgentBoard WebMCP bootstrap (MAIN world).
  *
- * Aligns with WebMCP proposed spec:
- * https://github.com/webmachinelearning/webmcp/blob/main/docs/proposal.md
- *
- * API: window.navigator.modelContext
- * Backward compat: window.agent (alias)
- *
- * Chrome Canary native support:
- * - navigator.modelContextTesting (agent-side: listTools, executeTool, registerToolsChangedCallback)
- * - navigator.modelContext (page-side: provideContext, registerTool) - when available
+ * If Chromium already exposes its complete document.modelContext implementation, this script
+ * leaves it untouched. Otherwise it installs a stable facade that selects exactly one backend on
+ * first use: a native implementation exposed in the meantime, or AgentBoard's local polyfill.
+ * Once selected, ownership never changes for the lifetime of the document.
  */
 (function () {
   'use strict';
 
-  // Guard: already initialized (either by us or native browser support)
-  if ('modelContext' in navigator || 'modelContext' in document) {
-    console.log('[WebMCP] Native navigator.modelContext detected, skipping polyfill');
-    // Still set up window.agent alias for backward compat if not present
-    if (!('agent' in window)) {
-      Object.defineProperty(window, 'agent', {
-        value: document.modelContext || navigator.modelContext,
-        writable: false,
-        configurable: false,
-        enumerable: true
-      });
-    }
-    return;
-  }
+  function ensureTrustedTypesPolicy() {
+    if (typeof trustedTypes === 'undefined' || window.__agentboardTTPolicy) return;
 
-  class WebMCPError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = 'WebMCPError';
-    }
-  }
-
-  class ToolNotFoundError extends WebMCPError {
-    constructor(toolName) {
-      super(`Tool '${toolName}' not found`);
-      this.name = 'ToolNotFoundError';
-      this.toolName = toolName;
-    }
-  }
-
-  class ValidationError extends WebMCPError {
-    constructor(message, errors = []) {
-      super(message);
-      this.name = 'ValidationError';
-      this.errors = errors;
-    }
-  }
-
-  class ExecutionError extends WebMCPError {
-    constructor(message, originalError) {
-      super(message);
-      this.name = 'ExecutionError';
-      this.originalError = originalError;
-    }
-  }
-
-  function validateParams(params, schema, path = '') {
-    const errors = [];
-    if (!schema) return errors;
-
-    // Helper to get type of value
-    function getType(value) {
-      if (value === null) return 'null';
-      if (Array.isArray(value)) return 'array';
-      return typeof value;
-    }
-
-    // Helper to create path string
-    function makePath(base, key) {
-      if (!base) return key;
-      if (typeof key === 'number') return `${base}[${key}]`;
-      return `${base}.${key}`;
-    }
-
-    const valueType = getType(params);
-
-    // Log validation context for debugging
-    if (!path) {
-      console.log('[WebMCP Validation] Starting validation with params:', params);
-      console.log('[WebMCP Validation] Schema:', schema);
-    }
-
-    // Type validation
-    if (schema.type) {
-      // Handle integer special case
-      if (schema.type === 'integer') {
-        if (typeof params !== 'number' || !Number.isInteger(params)) {
-          errors.push(`${path || 'value'}: expected integer, got ${valueType}`);
-          return errors; // Stop validating if basic type is wrong
-        }
-      }
-      // Handle other types
-      else if (schema.type !== valueType) {
-        errors.push(`${path || 'value'}: expected ${schema.type}, got ${valueType}`);
-        return errors; // Stop validating if basic type is wrong
-      }
-    }
-
-    // Object validation
-    if (schema.type === 'object' && valueType === 'object') {
-      // Check required fields
-      if (schema.required && Array.isArray(schema.required)) {
-        for (const field of schema.required) {
-          if (!(field in params)) {
-            const fieldPath = makePath(path, field);
-            errors.push(`${fieldPath}: required field missing`);
-          }
-        }
-      }
-
-      // Validate properties
-      if (schema.properties) {
-        for (const [key, value] of Object.entries(params)) {
-          const propSchema = schema.properties[key];
-          const propPath = makePath(path, key);
-
-          if (propSchema) {
-            // Recursively validate nested properties
-            const propErrors = validateParams(value, propSchema, propPath);
-            errors.push(...propErrors);
-          } else if (schema.additionalProperties === false) {
-            // Only reject additional properties if explicitly set to false
-            errors.push(`${propPath}: additional property not allowed`);
-          }
-        }
-      }
-    }
-
-    // Array validation
-    else if (schema.type === 'array' && valueType === 'array') {
-      // Validate minItems/maxItems if specified
-      if (schema.minItems !== undefined && params.length < schema.minItems) {
-        errors.push(`${path || 'array'}: requires at least ${schema.minItems} items, got ${params.length}`);
-      }
-      if (schema.maxItems !== undefined && params.length > schema.maxItems) {
-        errors.push(`${path || 'array'}: requires at most ${schema.maxItems} items, got ${params.length}`);
-      }
-
-      // Validate each item if items schema is provided
-      if (schema.items) {
-        if (!path) {
-          console.log('[WebMCP Validation] Validating array items with schema:', schema.items);
-        }
-        params.forEach((item, index) => {
-          const itemPath = makePath(path, index);
-          const itemErrors = validateParams(item, schema.items, itemPath);
-          errors.push(...itemErrors);
-        });
-      }
-    }
-
-    // Enum validation
-    else if (schema.enum && !schema.enum.includes(params)) {
-      errors.push(`${path || 'value'}: must be one of: ${schema.enum.join(', ')}`);
-    }
-
-    // Format validation for strings (basic support)
-    else if (schema.type === 'string' && schema.format) {
-      if (schema.format === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(params)) {
-        errors.push(`${path || 'value'}: invalid email format`);
-      }
-      // Add more format validators as needed
-    }
-
-    // Return errors for recursive calls
-    if (path) {
-      return errors;
-    }
-
-    // For root call, throw if there are errors
-    if (errors.length) {
-      console.error('[WebMCP Validation] Validation failed with errors:', errors);
-      console.error('[WebMCP Validation] Failed params:', params);
-      console.error('[WebMCP Validation] Failed schema:', schema);
-      throw new ValidationError('Parameter validation failed', errors);
-    }
-
-    return errors;
-  }
-
-  // Lightweight EventTarget-like impl
-  function createEventTarget() {
-    const listeners = new Map();
-    return {
-      addEventListener(type, listener) {
-        if (typeof listener !== 'function') return;
-        if (!listeners.has(type)) listeners.set(type, new Set());
-        listeners.get(type).add(listener);
-      },
-      removeEventListener(type, listener) {
-        if (!listeners.has(type)) return;
-        listeners.get(type).delete(listener);
-      },
-      dispatchEvent(event) {
-        const cbs = listeners.get(event.type);
-        if (!cbs) return;
-        cbs.forEach(cb => {
-          try { cb.call(this, event); } catch { /* swallow to not break others */ }
-        });
-      }
-    };
-  }
-
-  /**
-   * Create an agent context object to pass to tool execute functions
-   * Per WebMCP spec, this provides requestUserInteraction() API
-   */
-  function createAgentContext() {
-    return {
-      /**
-       * Request user interaction during tool execution
-       * Allows tools to prompt for confirmation, input, etc.
-       *
-       * @param {Function} interactionFn - Async function that performs UI interaction
-       * @returns {Promise<any>} - Result of the interaction function
-       *
-       * Example:
-       *   const confirmed = await agent.requestUserInteraction(async () => {
-       *     return confirm('Proceed with purchase?');
-       *   });
-       */
-      async requestUserInteraction(interactionFn) {
-        if (typeof interactionFn !== 'function') {
-          throw new ValidationError('requestUserInteraction requires a function');
-        }
-        // Execute the interaction function - it handles its own UI
-        return await interactionFn();
-      }
-    };
-  }
-
-  // Shared state between page-side (modelContext) and agent-side (modelContextTesting) APIs
-  const tools = new Map();
-  const events = createEventTarget();
-  const toolsChangedCallbacks = [];
-  let ontoolchangeHandler = null;
-
-  // Forward internal events to toolsChangedCallbacks
-  events.addEventListener('tools/listChanged', () => {
-    for (const callback of toolsChangedCallbacks) {
-      try {
-        callback();
-      } catch (err) {
-        console.error('[WebMCP] Error in toolsChangedCallback:', err);
-      }
-    }
-  });
-
-  function validateAndNormalizeTool(tool) {
-    if (!tool || typeof tool !== 'object') {
-      throw new ValidationError('Tool must be an object');
-    }
-    const { name, description, inputSchema, execute, annotations } = tool;
-    if (!name || typeof name !== 'string') throw new ValidationError('Tool must have a string name');
-    if (!description || typeof description !== 'string') throw new ValidationError('Tool must have a string description');
-    if (typeof execute !== 'function') throw new ValidationError('Tool must have an execute function');
-    const normalized = {
-      name,
-      description,
-      inputSchema: inputSchema || { type: 'object', properties: {} },
-      execute
-    };
-    // Preserve optional annotations metadata (readOnlyHint, destructiveHint, etc.)
-    if (annotations != null) normalized.annotations = annotations;
-    return normalized;
-  }
-
-  /**
-   * Internal function to execute a tool
-   * Used by both modelContext.callTool (legacy) and modelContextTesting.executeTool
-   */
-  async function executeToolInternal(toolName, params = {}) {
-    if (!tools.has(toolName)) {
-      throw new ToolNotFoundError(toolName);
-    }
-    const tool = tools.get(toolName);
-    try {
-      validateParams(params, tool.inputSchema);
-      // Create agent context for this tool execution
-      const agentContext = createAgentContext();
-      // Per WebMCP spec: execute(params, agent)
-      return await Promise.resolve(tool.execute(params, agentContext));
-    } catch (err) {
-      if (err instanceof ValidationError || err instanceof ExecutionError) throw err;
-      // err.message can be "" (falsy but valid string) — check typeof, not truthiness
-      const detail = (err instanceof Error && typeof err.message === 'string' && err.message !== '')
-        ? err.message
-        : String(err);
-      const stack = err instanceof Error ? err.stack : undefined;
-      throw new ExecutionError(`Tool '${toolName}' execution failed: ${detail}${stack ? '\n' + stack : ''}`, err);
-    }
-  }
-
-  /**
-   * Internal function to list tools
-   * Used by both APIs
-   */
-  function listToolsInternal() {
-    return Array.from(tools.values()).map(({ name, description, inputSchema, annotations }) => {
-      const entry = { name, description, inputSchema };
-      if (annotations != null) entry.annotations = annotations;
-      return entry;
-    });
-  }
-
-  /**
-   * PAGE-SIDE API: navigator.modelContext
-   * For pages to register tools with the agent
-   */
-  const modelContext = {
-    /**
-     * Replace entire tool set (per WebMCP spec)
-     * Clears any pre-existing tools before registering new ones
-     */
-    provideContext(context) {
-      if (!context || typeof context !== 'object') {
-        throw new ValidationError('provideContext requires an object argument');
-      }
-      const toolList = Array.isArray(context.tools) ? context.tools : [];
-      tools.clear();
-      for (const raw of toolList) {
-        const tool = validateAndNormalizeTool(raw);
-        if (tools.has(tool.name)) {
-          throw new ValidationError(`Duplicate tool name: ${tool.name}`);
-        }
-        tools.set(tool.name, tool);
-      }
-      // Notify listeners
-      queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-    },
-
-    /**
-     * Register a single tool (per WebMCP spec)
-     * Adds to existing tools without clearing
-     */
-    registerTool(rawTool) {
-      const tool = validateAndNormalizeTool(rawTool);
-      if (tools.has(tool.name)) {
-        // Allow replacement for hot reload
-        console.warn(`[WebMCP] Replacing existing tool: ${tool.name}`);
-      }
-      tools.set(tool.name, tool);
-      queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-    },
-
-    /**
-     * Unregister a tool by name (per WebMCP spec)
-     */
-    unregisterTool(toolName) {
-      if (typeof toolName !== 'string') {
-        throw new ValidationError('Tool name must be a string');
-      }
-      const existed = tools.delete(toolName);
-      if (existed) {
-        queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-      }
-      return existed;
-    },
-
-    /**
-     * Clear all tools (per Chrome's WebMCP implementation)
-     */
-    clearContext() {
-      const hadTools = tools.size > 0;
-      tools.clear();
-      if (hadTools) {
-        queueMicrotask(() => events.dispatchEvent({ type: 'tools/listChanged' }));
-      }
-    }
-  };
-
-  /**
-   * AGENT-SIDE API: navigator.modelContextTesting
-   * For agents to discover and call tools registered by pages
-   */
-  const modelContextTesting = {
-    /**
-     * List all registered tools (agent-side)
-     * Returns tool descriptors without execute functions
-     */
-    listTools() {
-      return listToolsInternal();
-    },
-
-    /**
-     * Execute a tool by name (agent-side)
-     * Chrome's native API expects args as JSON string
-     */
-    async executeTool(name, args = '{}') {
-      // Parse args if it's a JSON string (Chrome's native format)
-      const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args;
-      return executeToolInternal(name, parsedArgs);
-    },
-
-    /**
-     * Register a callback for when tools change (agent-side)
-     * Chrome's native API uses this pattern instead of addEventListener
-     */
-    // TODO: Remove registerToolsChangedCallback once Chrome stable ships ontoolchange (M147+)
-    registerToolsChangedCallback(callback) {
-      if (typeof callback !== 'function') {
-        throw new TypeError('Callback must be a function');
-      }
-      toolsChangedCallbacks.push(callback);
-    },
-    set ontoolchange(callback) {
-      if (callback !== null && typeof callback !== 'function') {
-        throw new TypeError('ontoolchange must be a function or null');
-      }
-      if (ontoolchangeHandler) {
-        const idx = toolsChangedCallbacks.indexOf(ontoolchangeHandler);
-        if (idx !== -1) toolsChangedCallbacks.splice(idx, 1);
-      }
-      ontoolchangeHandler = callback;
-      if (callback) {
-        toolsChangedCallbacks.push(callback);
-      }
-    },
-    get ontoolchange() {
-      return ontoolchangeHandler;
-    }
-  };
-
-  // Make modelContextTesting look like Chrome's native implementation
-  Object.defineProperty(modelContextTesting, Symbol.toStringTag, {
-    value: 'ModelContextTesting',
-    configurable: true
-  });
-
-  // Define navigator.modelContext (page-side API)
-  Object.defineProperty(navigator, 'modelContext', {
-    value: modelContext,
-    writable: false,
-    configurable: false,
-    enumerable: true
-  });
-
-  // Define navigator.modelContextTesting (agent-side API)
-  Object.defineProperty(navigator, 'modelContextTesting', {
-    value: modelContextTesting,
-    writable: false,
-    configurable: false,
-    enumerable: true
-  });
-
-  // Backward compatibility: window.agent combines both APIs for legacy scripts
-  const agentCompat = {
-    // Page-side methods
-    provideContext: modelContext.provideContext.bind(modelContext),
-    registerTool: modelContext.registerTool.bind(modelContext),
-    unregisterTool: modelContext.unregisterTool.bind(modelContext),
-    clearContext: modelContext.clearContext.bind(modelContext),
-    // Agent-side methods (legacy support)
-    listTools: modelContextTesting.listTools.bind(modelContextTesting),
-    callTool: (name, args) => executeToolInternal(name, args), // Direct call, not JSON string
-    // Legacy event API
-    addEventListener: events.addEventListener.bind(events),
-    removeEventListener: events.removeEventListener.bind(events)
-  };
-
-  Object.defineProperty(window, 'agent', {
-    value: agentCompat,
-    writable: false,
-    configurable: false,
-    enumerable: true
-  });
-
-  // Expose error classes on all APIs for consumers
-  const errorClasses = {
-    WebMCPError,
-    ToolNotFoundError,
-    ValidationError,
-    ExecutionError
-  };
-  modelContext.errors = errorClasses;
-  modelContextTesting.errors = errorClasses;
-  window.agent.errors = errorClasses;
-
-  // Create Trusted Types policy for user script injection
-  if (typeof trustedTypes !== 'undefined') {
     try {
       window.__agentboardTTPolicy = trustedTypes.createPolicy('agentboard-user-scripts', {
-        createScriptURL: (url) => {
-          // Only allow same-origin blob: URLs (defense-in-depth)
-          // Blob URLs are origin-bound by construction: blob:https://site.com/uuid
+        createScriptURL(url) {
           const expectedPrefix = `blob:${window.location.origin}/`;
-          if (url.startsWith(expectedPrefix)) {
-            return url;
-          }
-          throw new TypeError(`AgentBoard policy only allows same-origin blob: URLs (expected ${expectedPrefix})`);
+          if (url.startsWith(expectedPrefix)) return url;
+          throw new TypeError(
+            `AgentBoard policy only allows same-origin blob: URLs (expected ${expectedPrefix})`
+          );
         }
       });
       console.log('[WebMCP] Created Trusted Types policy for user scripts');
     } catch (error) {
-      console.warn('[WebMCP] Could not create Trusted Types policy:', error.message);
+      console.warn('[WebMCP] Could not create Trusted Types policy:', error?.message || error);
       console.warn('[WebMCP] User scripts may not work on this site due to Trusted Types');
     }
   }
 
-  console.log('[WebMCP] Polyfill ready: navigator.modelContext, navigator.modelContextTesting (also: window.agent)');
+  function isCompleteModelContext(value) {
+    try {
+      return Boolean(
+        value &&
+          typeof value === 'object' &&
+          typeof value.registerTool === 'function' &&
+          typeof value.getTools === 'function' &&
+          typeof value.executeTool === 'function' &&
+          typeof value.addEventListener === 'function'
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Runtime-gated Web IDL attributes live on a prototype. Reading the descriptor directly avoids
+   * recursing through AgentBoard's own document-level facade.
+   */
+  function readNativeModelContext() {
+    let prototype = Object.getPrototypeOf(document);
+    while (prototype) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'modelContext');
+      if (descriptor?.get) {
+        try {
+          const candidate = descriptor.get.call(document);
+          return isCompleteModelContext(candidate) ? candidate : null;
+        } catch {
+          return null;
+        }
+      }
+      prototype = Object.getPrototypeOf(prototype);
+    }
+    return null;
+  }
+
+  function invalidState(message) {
+    return new DOMException(message, 'InvalidStateError');
+  }
+
+  function abortError(message = 'Execution cancelled.') {
+    return new DOMException(message, 'AbortError');
+  }
+
+  function serializeExecutionResult(value) {
+    if (value !== null && typeof value === 'object') {
+      try {
+        const serialized = JSON.stringify(value);
+        if (serialized) return serialized;
+      } catch {
+        // Match Chromium's fallback to string conversion when JSON serialization fails.
+      }
+    }
+
+    const serialized = String(value);
+    return serialized || 'Operation succeeded';
+  }
+
+  class LocalModelContext extends EventTarget {
+    #tools = new Map();
+    #ontoolchange = null;
+
+    registerTool(rawTool, rawOptions = {}) {
+      if (this === null || !(this instanceof LocalModelContext)) {
+        throw new TypeError('Illegal invocation');
+      }
+      if (!rawTool || typeof rawTool !== 'object') {
+        throw new TypeError('Tool must be an object');
+      }
+      if (!Object.prototype.hasOwnProperty.call(rawTool, 'name')) {
+        throw new TypeError("Required member 'name' is undefined");
+      }
+      if (!Object.prototype.hasOwnProperty.call(rawTool, 'description')) {
+        throw new TypeError("Required member 'description' is undefined");
+      }
+      if (!Object.prototype.hasOwnProperty.call(rawTool, 'execute')) {
+        throw new TypeError("Required member 'execute' is undefined");
+      }
+
+      const name = String(rawTool.name);
+      const description = String(rawTool.description);
+      const execute = rawTool.execute;
+      const options = rawOptions ?? {};
+
+      if (!/^[A-Za-z0-9_.-]{1,128}$/.test(name)) {
+        return Promise.reject(invalidState('Invalid tool name'));
+      }
+      if (!description) {
+        return Promise.reject(invalidState('Description is required'));
+      }
+      if (typeof execute !== 'function') {
+        throw new TypeError("The 'execute' member must be a function");
+      }
+      if (this.#tools.has(name)) {
+        return Promise.reject(invalidState('Duplicate tool name'));
+      }
+
+      let inputSchema;
+      if (
+        Object.prototype.hasOwnProperty.call(rawTool, 'inputSchema') &&
+        rawTool.inputSchema !== undefined
+      ) {
+        inputSchema = JSON.stringify(rawTool.inputSchema);
+        if (inputSchema === undefined) {
+          throw new TypeError('Invalid input schema: JSON.stringify() returned undefined');
+        }
+      }
+
+      const signal = options.signal;
+      if (signal !== undefined && !(signal instanceof AbortSignal)) {
+        throw new TypeError("The 'signal' member must be an AbortSignal");
+      }
+      if (signal?.aborted) return Promise.reject(signal.reason);
+
+      const annotations = rawTool.annotations
+        ? {
+            readOnlyHint: Boolean(rawTool.annotations.readOnlyHint),
+            untrustedContentHint: Boolean(rawTool.annotations.untrustedContentHint)
+          }
+        : undefined;
+      const entry = {
+        name,
+        title: Object.prototype.hasOwnProperty.call(rawTool, 'title')
+          ? String(rawTool.title)
+          : '',
+        description,
+        inputSchema,
+        annotations,
+        execute
+      };
+
+      let resolveRegistration;
+      let rejectRegistration;
+      const registration = new Promise((resolve, reject) => {
+        resolveRegistration = resolve;
+        rejectRegistration = reject;
+      });
+
+      if (signal) {
+        signal.addEventListener(
+          'abort',
+          () => {
+            if (this.#tools.get(name) !== entry) return;
+            this.#tools.delete(name);
+            this.#queueToolChange();
+            rejectRegistration(signal.reason);
+          },
+          { once: true }
+        );
+      }
+
+      this.#tools.set(name, entry);
+      this.#queueToolChange(resolveRegistration);
+      return registration;
+    }
+
+    getTools(_options = {}) {
+      if (this === null || !(this instanceof LocalModelContext)) {
+        throw new TypeError('Illegal invocation');
+      }
+
+      const tools = Array.from(this.#tools.values())
+        .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+        .map((entry) => {
+          const descriptor = {
+            name: entry.name,
+            title: entry.title,
+            description: entry.description,
+            window,
+            origin: window.location.origin
+          };
+          if (entry.inputSchema !== undefined) descriptor.inputSchema = entry.inputSchema;
+          if (entry.annotations !== undefined) descriptor.annotations = { ...entry.annotations };
+          return descriptor;
+        });
+
+      return Promise.resolve(tools);
+    }
+
+    executeTool(tool, inputArguments, rawOptions = {}) {
+      if (this === null || !(this instanceof LocalModelContext)) {
+        throw new TypeError('Illegal invocation');
+      }
+      if (!tool || typeof tool !== 'object') {
+        throw new TypeError('RegisteredTool must be an object');
+      }
+
+      const options = rawOptions ?? {};
+      const signal = options.signal;
+      if (signal !== undefined && !(signal instanceof AbortSignal)) {
+        throw new TypeError("The 'signal' member must be an AbortSignal");
+      }
+      if (signal?.aborted) return Promise.reject(abortError());
+
+      const entry =
+        tool.window === window && String(tool.origin) === window.location.origin
+          ? this.#tools.get(String(tool.name))
+          : null;
+      if (!entry) return Promise.reject(invalidState('Tool is not registered in this document'));
+
+      let input;
+      try {
+        input = JSON.parse(String(inputArguments));
+      } catch {
+        return Promise.reject(new TypeError('Failed to parse input arguments'));
+      }
+      if (input === null || typeof input !== 'object') {
+        return Promise.reject(new TypeError('Input arguments must contain a JSON object'));
+      }
+
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          callback(value);
+        };
+        const onAbort = () => finish(reject, signal.reason);
+        signal?.addEventListener('abort', onAbort, { once: true });
+
+        Promise.resolve()
+          .then(() => (settled ? undefined : Reflect.apply(entry.execute, undefined, [input])))
+          .then((result) => (settled ? undefined : serializeExecutionResult(result)))
+          .then(
+            (result) => finish(resolve, result),
+            (error) => finish(reject, error)
+          );
+      });
+    }
+
+    set ontoolchange(callback) {
+      if (callback !== null && typeof callback !== 'function') {
+        throw new TypeError('ontoolchange must be a function or null');
+      }
+      if (this.#ontoolchange) this.removeEventListener('toolchange', this.#ontoolchange);
+      this.#ontoolchange = callback;
+      if (callback) this.addEventListener('toolchange', callback);
+    }
+
+    get ontoolchange() {
+      return this.#ontoolchange;
+    }
+
+    #queueToolChange(afterDispatch) {
+      setTimeout(() => {
+        this.dispatchEvent(new Event('toolchange'));
+        afterDispatch?.();
+      }, 0);
+    }
+  }
+
+  Object.defineProperty(LocalModelContext.prototype, Symbol.toStringTag, {
+    value: 'ModelContext'
+  });
+
+  ensureTrustedTypesPolicy();
+
+  let existingModelContext;
+  try {
+    existingModelContext = document.modelContext;
+  } catch {
+    existingModelContext = null;
+  }
+
+  if (isCompleteModelContext(existingModelContext)) {
+    console.log('[WebMCP] Native document.modelContext available');
+    return;
+  }
+  if (existingModelContext != null) {
+    console.warn('[WebMCP] Existing document.modelContext is incomplete; leaving it untouched');
+    return;
+  }
+
+  let facade;
+  let selectedBackend = null;
+
+  function selectBackend() {
+    if (selectedBackend) return selectedBackend;
+
+    const native = readNativeModelContext();
+    const api = native || new LocalModelContext();
+    const forwardToolChange = () => facade.dispatchEvent(new Event('toolchange'));
+    api.addEventListener('toolchange', forwardToolChange);
+
+    selectedBackend = {
+      api,
+      registerTool: api.registerTool,
+      getTools: api.getTools,
+      executeTool: api.executeTool,
+      kind: native ? 'native' : 'polyfill'
+    };
+    console.log(`[WebMCP] document.modelContext selected ${selectedBackend.kind} backend`);
+    return selectedBackend;
+  }
+
+  class ModelContextFacade extends EventTarget {
+    #ontoolchange = null;
+
+    registerTool(...args) {
+      if (this !== facade) throw new TypeError('Illegal invocation');
+      const backend = selectBackend();
+      return Reflect.apply(backend.registerTool, backend.api, args);
+    }
+
+    getTools(...args) {
+      if (this !== facade) throw new TypeError('Illegal invocation');
+      const backend = selectBackend();
+      return Reflect.apply(backend.getTools, backend.api, args);
+    }
+
+    executeTool(...args) {
+      if (this !== facade) throw new TypeError('Illegal invocation');
+      const backend = selectBackend();
+      return Reflect.apply(backend.executeTool, backend.api, args);
+    }
+
+    set ontoolchange(callback) {
+      if (callback !== null && typeof callback !== 'function') {
+        throw new TypeError('ontoolchange must be a function or null');
+      }
+      if (this.#ontoolchange) this.removeEventListener('toolchange', this.#ontoolchange);
+      this.#ontoolchange = callback;
+      if (callback) this.addEventListener('toolchange', callback);
+    }
+
+    get ontoolchange() {
+      return this.#ontoolchange;
+    }
+  }
+
+  Object.defineProperty(ModelContextFacade.prototype, Symbol.toStringTag, {
+    value: 'ModelContext'
+  });
+
+  facade = new ModelContextFacade();
+  Object.defineProperty(document, 'modelContext', {
+    value: facade,
+    writable: false,
+    configurable: false,
+    enumerable: true
+  });
+
+  console.log('[WebMCP] document.modelContext facade ready');
 })();

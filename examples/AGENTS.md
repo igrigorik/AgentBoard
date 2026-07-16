@@ -26,11 +26,10 @@ export const metadata = {
   },
 };
 
-// Per WebMCP spec: execute receives (args, agent) where agent provides requestUserInteraction()
-export async function execute(args = {}, agent) {
+// The current ModelContext callback receives the parsed tool arguments.
+export async function execute(args = {}) {
   // Tool implementation - has full DOM/window access
-  // Use agent.requestUserInteraction() for user confirmation flows
-  // Return result object
+  // Return a string or JSON-serializable result
 }
 ```
 
@@ -133,13 +132,12 @@ inputSchema: {
 
 ## The `execute` Function
 
-Per the WebMCP spec, execute receives two arguments:
+The current ModelContext callback receives one argument:
 
-- `args` - The tool arguments from the LLM
-- `agent` - An agent context object with `requestUserInteraction()` for user confirmation flows
+- `args` - The parsed tool arguments from the LLM
 
 ```javascript
-export async function execute(args = {}, agent) {
+export async function execute(args = {}) {
   // Destructure with defaults
   const { limit = 100, format = 'full' } = args;
 
@@ -152,33 +150,18 @@ export async function execute(args = {}, agent) {
 
 ### Requesting User Interaction
 
-For tools that perform sensitive actions (purchases, deletions, etc.), use `agent.requestUserInteraction()`:
+AgentBoard does not add a private interaction helper to the WebMCP callback. Sensitive tools should use the site's existing confirmation UI or a browser-native prompt, and must not treat a model-provided boolean as user consent. Browser prompts can be suppressed when a call lacks user activation, so prefer a read-only tool that directs the user to the site's normal action flow.
 
 ```javascript
-export async function execute(args = {}, agent) {
+export async function execute(args = {}) {
   const { productId } = args;
+  const confirmed = window.confirm(`Purchase product ${productId}?`);
+  if (!confirmed) return { cancelled: true };
 
-  // Request user confirmation before sensitive action
-  const confirmed = await agent.requestUserInteraction(async () => {
-    return confirm(`Purchase product ${productId}?\nClick OK to confirm.`);
-  });
-
-  if (!confirmed) {
-    throw new Error('Purchase cancelled by user.');
-  }
-
-  // Proceed with action...
   await executePurchase(productId);
   return { success: true, productId };
 }
 ```
-
-The `requestUserInteraction` API:
-
-- Takes an async function that performs the UI interaction
-- Returns the result of that function
-- Allows tools to prompt for confirmation, input, or any other user interaction
-- The agent (browser) handles pausing execution while waiting for user input
 
 ### Available in `execute`:
 
@@ -474,47 +457,35 @@ Single-page apps may not update `window.location` when navigating. Your tool may
 
 ## Programmatic Tool Registration
 
-For advanced use cases (like dynamically discovering tools), you can register tools programmatically:
+For advanced use cases (like dynamically discovering tools), you can register tools programmatically. In an AgentBoard user script, `shouldRegister({ signal })` receives the script lifetime signal; pass that signal to every child registration and asynchronous discovery request so disabling, deleting, or reinjecting the script revokes all of its work.
 
 ```javascript
-// Per WebMCP spec: navigator.modelContext is the primary API
-// window.agent is also available as a backward-compatible alias
+if (document.modelContext) {
+  const controller = new AbortController();
 
-if ('modelContext' in navigator) {
-  // Register a single tool
-  navigator.modelContext.registerTool({
-    name: 'my_tool',
-    description: 'Does something useful',
-    inputSchema: { type: 'object', properties: {} },
-    execute: async (args, agent) => {
-      return { result: 'success' };
-    }
-  });
+  await document.modelContext.registerTool(
+    {
+      name: 'my_tool',
+      description: 'Does something useful',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (args) => {
+        return { result: 'success' };
+      },
+    },
+    { signal: controller.signal }
+  );
 
-  // Unregister a tool
-  navigator.modelContext.unregisterTool('my_tool');
-
-  // Clear all tools
-  navigator.modelContext.clearContext();
-
-  // Replace all tools at once
-  navigator.modelContext.provideContext({
-    tools: [
-      { name: 'tool1', description: '...', inputSchema: {...}, execute: async (args, agent) => {...} },
-      { name: 'tool2', description: '...', inputSchema: {...}, execute: async (args, agent) => {...} }
-    ]
-  });
+  // Abort the registration when this tool should no longer be available.
+  controller.abort();
 }
 ```
 
-**API methods:**
+**Current API methods:**
 
-- `provideContext({ tools })` - Replace entire tool set (clears existing)
-- `registerTool(tool)` - Add/replace a single tool
-- `unregisterTool(name)` - Remove a tool by name
-- `clearContext()` - Remove all tools
-- `listTools()` - Get current tool definitions (without execute functions)
-- `callTool(name, args)` - Invoke a tool (used by the agent, not typically by tools)
+- `registerTool(tool, options)` - Register one uniquely named tool; use `options.signal` to remove it
+- `getTools(options)` - Discover visible tool descriptors
+- `executeTool(tool, jsonArguments, options)` - Execute a discovered descriptor
+- `addEventListener('toolchange', handler)` - Observe registration changes
 
 ## Testing Your Tool
 
@@ -549,8 +520,7 @@ export const metadata = {
   },
 };
 
-// agent param is optional if not using requestUserInteraction
-export async function execute(args = {}, agent) {
+export async function execute(args = {}) {
   const docId = getDocId();
   if (!docId) {
     throw new Error('Could not extract document ID from URL.');
@@ -597,13 +567,11 @@ export const metadata = {
   },
 };
 
-export async function execute(args = {}, agent) {
+export async function execute(args = {}) {
   const { itemId } = args;
 
-  // Request user confirmation before destructive action
-  const confirmed = await agent.requestUserInteraction(async () => {
-    return confirm(`Are you sure you want to delete item ${itemId}?`);
-  });
+  // Prefer the site's own confirmation UI; this fallback may require user activation.
+  const confirmed = window.confirm(`Are you sure you want to delete item ${itemId}?`);
 
   if (!confirmed) {
     return { cancelled: true, message: 'Deletion cancelled by user.' };
@@ -642,7 +610,7 @@ export const metadata = {
   },
 };
 
-export async function execute(args = {}, agent) {
+export async function execute(args = {}) {
   const { limit = 50 } = args;
 
   const threadId = getThreadId();
