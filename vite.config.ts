@@ -21,10 +21,8 @@ export default defineConfig({
       { find: '@', replacement: path.resolve(__dirname, './src') },
       { find: '@lib', replacement: path.resolve(__dirname, './src/lib') },
       { find: '@types', replacement: path.resolve(__dirname, './src/types') },
-      // Use CSP-safe Ajv shim - real Ajv uses new Function() which violates extension CSP
-      // Also fixes ESM import issue (ajv doesn't have default export in ESM)
-      // Regex: only match bare 'ajv' import, not sub-paths like 'ajv/dist/...'
-      // (ajv-formats needs real ajv internals for compilation support)
+      // The MCP SDK statically imports its eval-based Ajv fallback even though
+      // MCPClientService supplies the CSP-safe CfWorker validator explicitly.
       { find: /^ajv$/, replacement: path.resolve(__dirname, 'src/lib/ajv-csp-safe.js') },
     ],
   },

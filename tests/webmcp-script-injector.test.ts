@@ -427,6 +427,28 @@ describe('WebMCP Script Injector', () => {
       expect(funcStr).toContain('script');
     });
 
+    it('should honor a false shouldRegister result in the generated wrapper', async () => {
+      await injectUserScripts({
+        tabId: 123,
+        url: 'https://example.com/page',
+        frameId: 0,
+      });
+      const wrappedCode = mockExecuteScript.mock.calls[0][0].args[0];
+      expect(wrappedCode).toContain('return true;');
+
+      const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+        url: 'https://example.com/page',
+        runScripts: 'dangerously',
+        virtualConsole: new VirtualConsole(),
+      });
+      dom.window.eval(polyfillSource);
+      dom.window.eval(wrappedCode.replace('return true;', 'return false;'));
+
+      expect((dom.window as any).__testRegistrationSignal).toBeInstanceOf(dom.window.AbortSignal);
+      expect(await (dom.window.document as any).modelContext.getTools()).toEqual([]);
+      dom.window.close();
+    });
+
     it('should suppress an older blob that loads after a newer script generation', async () => {
       await injectUserScripts({
         tabId: 123,

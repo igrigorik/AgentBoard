@@ -439,7 +439,7 @@ describe('WebMCP page bridge lifecycle', () => {
     expect(latestList(harness).params).not.toHaveProperty('initial');
   });
 
-  it('marks explicit list requests without duplicating routes', async () => {
+  it('publishes the current catalog for an explicit list notification', async () => {
     const harness = createHarness();
     await harness.window.document.modelContext.registerTool({
       name: 'listed_tool',
@@ -448,13 +448,13 @@ describe('WebMCP page bridge lifecycle', () => {
     });
     harness.loadBridge();
     await flush(harness.window);
-    harness.send({ id: 'list-request', method: 'tools/list', params: {} });
+    harness.send({ method: 'tools/list', params: {} });
     await flush(harness.window);
 
     expect(latestList(harness).params).toMatchObject({
-      requested: true,
       tools: [{ name: 'listed_tool', description: 'Listed tool' }],
     });
+    expect(latestList(harness).params).not.toHaveProperty('requested');
   });
 
   it('settles in-flight calls when bridge replacement disposes their owner', async () => {

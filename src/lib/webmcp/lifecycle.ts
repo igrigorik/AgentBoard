@@ -168,18 +168,17 @@ export class TabManager {
     const port = this.contentPorts.get(tabId);
     if (!port) return;
 
-    const request = {
+    const notification = {
       type: 'webmcp',
       payload: {
         jsonrpc: JSONRPC,
-        id: globalThis.crypto.randomUUID(),
         method: 'tools/list',
         params: {},
       },
     };
 
     try {
-      port.postMessage(request);
+      port.postMessage(notification);
       log.debug(`[WebMCP Lifecycle] Requested tools list from tab ${tabId}`);
     } catch (e) {
       log.error(`[WebMCP Lifecycle] Failed to request tools from tab ${tabId}:`, e);

@@ -17,9 +17,12 @@ importers:
       '@ai-sdk/openai':
         specifier: ^2.0.102
         version: 2.0.102(zod@3.25.76)
+      '@cfworker/json-schema':
+        specifier: ^4.1.1
+        version: 4.1.1
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
-        version: 1.29.0(zod@3.25.76)
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76)
       '@types/json-schema':
         specifier: ^7.0.15
         version: 7.0.15
@@ -144,6 +147,9 @@ packages:
 
   '@asamuzakjp/css-color@3.2.0':
     resolution: {integrity: sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==}
+
+  '@cfworker/json-schema@4.1.1':
+    resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
 
   '@crxjs/vite-plugin@2.4.0':
     resolution: {integrity: sha512-bDLdq0W2V1SkMQDJjrcYyjK9/uKtdl4joT7GRImcootCjZdKRiRYt+cv9z8tJoU/tK3o1lX48LTqN7JMsk5AQg==}
@@ -2464,6 +2470,8 @@ snapshots:
       '@csstools/css-tokenizer': 3.0.4
       lru-cache: 10.4.3
 
+  '@cfworker/json-schema@4.1.1': {}
+
   '@crxjs/vite-plugin@2.4.0(vite@6.4.2(@types/node@22.19.17)(terser@5.46.1)(yaml@2.8.3))':
     dependencies:
       '@rollup/pluginutils': 4.2.1
@@ -2742,7 +2750,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@modelcontextprotocol/sdk@1.29.0(zod@3.25.76)':
+  '@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.14)
       ajv: 8.18.0
@@ -2761,6 +2769,8 @@ snapshots:
       raw-body: 3.0.2
       zod: 3.25.76
       zod-to-json-schema: 3.25.2(zod@3.25.76)
+    optionalDependencies:
+      '@cfworker/json-schema': 4.1.1
     transitivePeerDependencies:
       - supports-color
 

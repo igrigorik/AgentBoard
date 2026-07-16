@@ -19,7 +19,7 @@ import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
 import { createNavigateTool, NAVIGATE_TOOL_NAME } from './tools/navigate';
 import { calculateSpecificityScore } from './tool-patterns';
 
-export type ToolSourceType = 'site' | 'user' | 'remote' | 'system';
+export type ToolSourceType = 'site' | 'remote' | 'system';
 // AI SDK tool type - both MCP and WebMCP converters return the same shape
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AISDKTool = any; // The actual tool type from AI SDK
@@ -27,7 +27,7 @@ export type AISDKTool = any; // The actual tool type from AI SDK
 export interface ToolWithMetadata {
   tool: AISDKTool;
   source: ToolSourceType;
-  origin?: string; // tab-{id} for site tools, script ID for user tools, server name for remote tools
+  origin?: string; // tab-{id} for site tools, server name for remote tools, or system
   description?: string; // One-line tool description for LLM grounding in <site_tools>
   /** Public tool name when the internal registry key is scoped by tab. */
   publicName?: string;
@@ -455,7 +455,7 @@ export class ToolRegistryManager {
         webmcpTool.name,
         {
           tool: aiTool,
-          source: 'site', // Both site and user tools come through as 'site' for now
+          source: 'site',
           origin: `tab-${tabId}`,
           description: webmcpTool.description,
         },

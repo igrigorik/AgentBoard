@@ -829,6 +829,7 @@ describe('TabManager', () => {
           params: {},
         },
       });
+      expect(toolsListCall![0].payload).not.toHaveProperty('id');
     });
 
     it('should recover tools after service worker hibernation', () => {
@@ -929,7 +930,6 @@ describe('TabManager', () => {
               ],
               origin: 'https://example.com',
               timestamp: Date.now(),
-              requested: true,
             },
           },
         });

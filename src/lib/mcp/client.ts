@@ -5,30 +5,10 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
 import type { Tool, CallToolResult, Resource } from '@modelcontextprotocol/sdk/types.js';
 import log from '../logger';
 import type { MCPServerConfig } from '../storage/config';
-
-/**
- * Suppress ajv schema compilation errors during an async operation.
- * The MCP SDK uses ajv which calls `new Function()` for schema validation,
- * blocked by extension CSP. The SDK catches these errors gracefully but
- * ajv still logs to console.error - this wrapper silences that noise.
- */
-async function withSuppressedAjvErrors<T>(fn: () => Promise<T>): Promise<T> {
-  const originalError = console.error;
-  console.error = (...args: unknown[]) => {
-    if (typeof args[0] === 'string' && args[0].includes('Error compiling schema')) {
-      return; // Swallow ajv's CSP-induced error
-    }
-    originalError.apply(console, args);
-  };
-  try {
-    return await fn();
-  } finally {
-    console.error = originalError;
-  }
-}
 
 export interface MCPClientStatus {
   connected: boolean;
@@ -75,6 +55,8 @@ export class MCPClientService {
         },
         {
           capabilities: {}, // Add capabilities as needed
+          // The SDK's Ajv default uses new Function(), which extension CSP forbids.
+          jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
         }
       );
 
@@ -136,10 +118,7 @@ export class MCPClientService {
     };
 
     try {
-      // Wrap in ajv error suppressor - the SDK validates output schemas using ajv
-      // which fails under extension CSP but catches errors gracefully
-      const client = this.client;
-      const result = await withSuppressedAjvErrors(() => client.callTool(toolCallPayload));
+      const result = await this.client.callTool(toolCallPayload);
       return result as CallToolResult;
     } catch (error) {
       log.error(`Failed to call tool ${name}:`, error);

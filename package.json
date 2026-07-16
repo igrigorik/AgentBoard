@@ -29,6 +29,7 @@
     "@ai-sdk/anthropic": "^2.0.74",
     "@ai-sdk/google": "^2.0.68",
     "@ai-sdk/openai": "^2.0.102",
+    "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/json-schema": "^7.0.15",
     "@types/prismjs": "^1.26.6",

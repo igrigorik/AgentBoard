@@ -174,7 +174,7 @@ async function compileTool(scriptPath: string): Promise<{ info: CompiledToolInfo
   }
 
   // Validate required fields
-  if (!metadata.name || !metadata.namespace || !metadata.version) {
+  if (!metadata.name || !metadata.namespace || !metadata.version || !metadata.description) {
     throw new Error(`Missing required metadata fields in ${scriptPath}`);
   }
 
@@ -199,7 +199,7 @@ async function compileTool(scriptPath: string): Promise<{ info: CompiledToolInfo
       file: `tools/${outputFilename}`,
       match: metadata.match,
       version: metadata.version,
-      description: metadata.description || '',
+      description: metadata.description,
     },
     code: wrappedCode,
   };
@@ -296,7 +296,7 @@ ${code}
   try {
     const registration = modelContext.registerTool({
       name: registrationKey,
-      description: metadata.description || '',
+      description: metadata.description,
       inputSchema: metadata.inputSchema,
       execute: execute
     }, { signal: registrationController.signal });

@@ -163,33 +163,32 @@
     });
   }
 
-  async function publishCatalog(extra = {}, retryOnFailure = true) {
+  async function publishCatalog(retryOnFailure = true) {
     const generation = ++publishGeneration;
     let catalog;
     try {
       catalog = await collectCatalog();
     } catch (error) {
-      if (disposed || generation !== publishGeneration) return null;
+      if (disposed || generation !== publishGeneration) return;
 
       console.error('[WebMCP Bridge] Failed to read document.modelContext tools:', error);
       if (retryOnFailure) {
         setTimeout(() => {
           if (disposed || generation !== publishGeneration) return;
-          publishCatalog(extra, false).catch((retryError) =>
+          publishCatalog(false).catch((retryError) =>
             console.error('[WebMCP Bridge] Failed to publish unavailable catalog:', retryError)
           );
         }, 0);
       } else {
         // Native policy/security failures must not leave an old catalog active indefinitely.
         // Selection remains native; this is an explicit unavailable state, not backend fallback.
-        postCatalog([], { ...extra, unavailable: true });
+        postCatalog([], { unavailable: true });
       }
-      return null;
+      return;
     }
 
-    if (disposed || generation !== publishGeneration) return catalog;
-    postCatalog(catalog.tools, extra);
-    return catalog;
+    if (disposed || generation !== publishGeneration) return;
+    postCatalog(catalog.tools);
   }
 
   function scheduleRefresh() {
@@ -239,24 +238,16 @@
       return;
     }
 
-    if (message.id === undefined || message.id === null) return;
-
     if (message.method === 'tools/list') {
       try {
-        await publishCatalog({ requested: true });
+        await publishCatalog();
       } catch (error) {
-        postToExtension({
-          jsonrpc: JSONRPC,
-          id: message.id,
-          error: {
-            code: -32603,
-            message: error?.message || 'Failed to list tools'
-          }
-        });
+        console.error('[WebMCP Bridge] Failed explicit tools snapshot:', error);
       }
       return;
     }
 
+    if (message.id === undefined || message.id === null) return;
     if (message.method !== 'tools/call') return;
 
     const { name, arguments: args } = message.params || {};
@@ -286,7 +277,6 @@
   function dispose() {
     if (disposed) return;
     disposed = true;
-    publishGeneration++;
     for (const controller of pendingExecutions.values()) {
       controller.abort(new DOMException('Document bridge disposed', 'AbortError'));
     }

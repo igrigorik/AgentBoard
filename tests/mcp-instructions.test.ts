@@ -25,6 +25,8 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 }));
 
 // --- Import after mocks ---
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
 import { MCPClientService } from '../src/lib/mcp/client';
 import { RemoteMCPManager } from '../src/lib/mcp/manager';
 
@@ -34,6 +36,25 @@ describe('MCP Server Instructions', () => {
   });
 
   describe('MCPClientService', () => {
+    it('configures the SDK with a CSP-safe JSON Schema validator', async () => {
+      const client = new MCPClientService();
+      await client.connect(
+        { url: 'http://localhost:3000/mcp', transport: 'http' as const },
+        'test-server'
+      );
+
+      expect(Client).toHaveBeenCalledWith(
+        {
+          name: 'chrome-extension-client',
+          version: '1.0.0',
+        },
+        {
+          capabilities: {},
+          jsonSchemaValidator: expect.any(CfWorkerJsonSchemaValidator),
+        }
+      );
+    });
+
     it('should capture instructions from server when present', async () => {
       mockGetInstructions.mockReturnValue('Always call search before get.');
       mockListTools.mockResolvedValue({
