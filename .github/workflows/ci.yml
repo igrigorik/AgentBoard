@@ -43,6 +43,10 @@ jobs:
       - name: Build extension
         run: pnpm run build
 
+      - name: Run headless browser tests
+        if: matrix.node-version == '22.x'
+        run: pnpm run test:browser:built
+
       # Optional: Upload build artifacts for debugging
       - name: Upload build artifacts
         if: always()

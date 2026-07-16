@@ -4,107 +4,47 @@ Third-party libraries shared across WebMCP tools.
 
 ## Readability.js
 
-**Current Version:** Mozilla Readability v0.5.0  
-**License:** Apache License 2.0  
+**Vendored version:** Mozilla Readability v0.5.0
+
+**License:** Apache License 2.0
+
 **Source:** https://github.com/mozilla/readability
 
-### What It Does
+### Consumers
 
-Extracts article content from web pages, stripping ads, navigation, and other non-content elements. Used by:
-
-- `tools/dom_readability/script.js` - Inlined copy (for CSP-safe injection in page context)
-- `tools/fetch/content-extractor.ts` - Direct import (service worker context)
+- `tools/read_page/script.js` contains an inlined copy for CSP-safe MAIN-world injection.
+- `tools/fetch/content-extractor.ts` imports the vendored ES module in the service worker.
 
 ### Files
 
-- `readability.js` - Source of truth, ES module export added
-- `readability.d.ts` - TypeScript type declarations
+- `readability.js`: Canonical vendored source with an ES module export.
+- `readability.d.ts`: TypeScript declarations.
 
-### Updating to New Version
+### Updating Readability
 
-When Mozilla releases a new Readability version:
+Updating the package is not a blind copy operation. The inlined `read_page` copy has Trusted Types wrappers around Readability's `innerHTML` sinks; those local compatibility patches must survive an update.
 
-**1. Download new version:**
-
-```bash
-cd src/lib/webmcp/vendor
-curl -o readability-new.js \
-  https://unpkg.com/@mozilla/readability@NEW_VERSION/Readability.js
-```
-
-**2. Prepare for ES module usage:**
-
-```bash
-# Add header
-cat > readability.js << 'EOF'
-/* eslint-disable */
-/**
- * Mozilla Readability vNEW_VERSION (Apache License 2.0)
- *
- * SINGLE SOURCE OF TRUTH for Readability vendor code
- * Used by:
- * - fetch/content-extractor.ts (imports directly via ES module)
- * - dom_readability/script.js (inlined copy for CSP-safe injection)
- *
- * See vendor/README.md for update instructions
- */
-EOF
-
-# Append downloaded code
-cat readability-new.js >> readability.js
-
-# Add ES module export
-cat >> readability.js << 'EOF'
-
-// Export for ES module usage
-export { Readability };
-EOF
-
-# Clean up
-rm readability-new.js
-```
-
-**3. Update inlined copy in dom_readability/script.js:**
+1. Download the desired upstream `Readability.js` into a temporary file.
+2. Replace the upstream implementation in `vendor/readability.js`, retaining the license header and `export { Readability };` footer.
+3. Copy the implementation into `tools/read_page/script.js` between the vendored-library markers.
+4. Reapply `_safeHTML(...)` at every Readability `innerHTML` assignment in the inlined copy. At v0.5.0 these include the page-cache restoration and `<noscript>` image-recovery paths.
+5. Keep the `window.Readability = Readability` attachment after the inlined implementation.
+6. Update `readability.d.ts` if the upstream API changed.
+7. Update version references in `vendor/readability.js`, `tools/read_page/script.js`, and `tools/read_page/README.md`.
+8. Run both consumers' tests and the extension build:
 
 ```bash
-cd ../tools/dom_readability
-
-# Open script.js and replace lines containing Readability function
-# Keep the window attachment and execute function at the bottom
-# Look for section starting with "function Readability(doc, options)"
-# Replace until the end of "Readability.prototype = { ... };"
+pnpm exec vitest --run tests/webmcp-readability.test.ts tests/webmcp-fetch-url.test.ts
+pnpm run test:browser
 ```
 
-**4. Update TypeScript declarations if API changed:**
-Edit `vendor/readability.d.ts` to match any new properties/methods.
+Review the final diff rather than assuming the copies match byte-for-byte: the Trusted Types wrappers are intentional differences required by extension execution on enforcing sites such as Gmail.
 
-**5. Test both consumers:**
+### Why vendor it?
 
-```bash
-npm run build
-npm test -- webmcp-readability  # Page context (dom_readability)
-npm test -- webmcp-fetch-url     # Service worker (fetch)
-```
+The two consumers have different execution constraints:
 
-**6. Update version references:**
+1. Service-worker code can use an ES module import.
+2. A built-in WebMCP tool must be self-contained so `chrome.scripting.executeScript({ files: [...] })` can inject it without violating the page's Content Security Policy.
 
-- Header comment in `vendor/readability.js`
-- Header comment in `tools/dom_readability/script.js`
-
-### Why Vendor Directory?
-
-**Single source of truth:** One canonical copy prevents version drift between tools.
-
-**Two consumption models:**
-
-1. **ES module import:** Service worker code (`fetch/`) imports directly
-2. **Inlined copy:** WebMCP tools (`dom_readability/`) inline for CSP-safe injection
-
-WebMCP tools must be self-contained (no imports) to work via `chrome.scripting.executeScript({ files: [...] })` which bypasses Content Security Policy restrictions on strict sites (GitHub, ChatGPT, etc).
-
-### Architecture Decision
-
-Controlled duplication accepted:
-
-- **Readability (2300+ LOC):** ✅ Single source in vendor/, copied to script.js when needed
-- **htmlToMarkdown (~100 LOC):** Duplicated between tools due to context requirements (page vs service worker)
+The controlled duplication is limited to the vendored Readability implementation and the small context-specific HTML-to-Markdown converters.

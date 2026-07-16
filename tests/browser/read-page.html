@@ -1,0 +1,146 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>AgentBoard read_page browser test</title>
+<body>
+  <script>
+    const scenarios = [
+      {
+        name: 'dashboard',
+        title: 'Search Console',
+        html: `
+      <style>.concealed { display: none }</style>
+      <nav>Overview Insights Performance</nav>
+      <main role="main">
+        <h1>Excluded by ‘noindex’ tag</h1>
+        <div>These pages aren't indexed or served on Google</div>
+        <h2>Affected pages</h2>
+        <div>12</div>
+        <table>
+          <tr><th>URL</th><th>Last crawled</th></tr>
+          <tr><td>https://example.com/a</td><td>Jun 26, 2026</td></tr>
+          <tr class="concealed"><td>CSS_HIDDEN_SECRET</td><td>Never</td></tr>
+        </table>
+        <script type="application/json">{"secret":"SCRIPT_SECRET"}<\/script>
+        <label>Query <input value="PRIVATE_INPUT_VALUE"></label>
+      </main>
+      <footer>Privacy Terms</footer>
+    `,
+      },
+      {
+        name: 'article',
+        title: 'Rendered Article',
+        html: '<main><h1>Rendered Article</h1><p id="article"></p></main>',
+        setup() {
+          document.querySelector('#article').textContent =
+            'Substantive article prose with enough context for extraction. '.repeat(20);
+        },
+      },
+      {
+        name: 'hiddenText',
+        title: 'Hidden Text',
+        html: `
+      <style>.concealed { display: none }</style>
+      <main>
+        <h1>Hidden Text</h1>
+        <p id="article"></p>
+        <p class="concealed">CSS_HIDDEN_TEXT_SECRET</p>
+      </main>
+    `,
+        setup() {
+          document.querySelector('#article').textContent =
+            'Visible article prose with enough context for extraction. '.repeat(20);
+        },
+      },
+      {
+        name: 'hiddenImage',
+        title: 'Hidden Image',
+        html: `
+      <style>.concealed { display: none }</style>
+      <main>
+        <h1>Hidden Image</h1>
+        <p id="article"></p>
+        <p><img class="concealed" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" width="800" height="600" alt="CSS_HIDDEN_ALT_SECRET"></p>
+      </main>
+    `,
+        setup() {
+          document.querySelector('#article').textContent =
+            'Visible article prose with enough context for extraction. '.repeat(20);
+        },
+      },
+      {
+        name: 'hiddenByline',
+        title: 'Hidden Byline',
+        html: `
+      <style>.byline { display: none }</style>
+      <main>
+        <h1>Hidden Byline</h1>
+        <div class="byline">HIDDEN_BYLINE_SECRET</div>
+        <p id="article"></p>
+      </main>
+    `,
+        setup() {
+          document.querySelector('#article').textContent =
+            'Visible article prose with enough context for extraction. '.repeat(20);
+        },
+      },
+      {
+        name: 'ambiguousModal',
+        title: 'Ambiguous Modal',
+        html: `
+      <main>BACKGROUND_MODAL_SECRET</main>
+      <div role="dialog" aria-modal="true">First foreground</div>
+      <div role="alertdialog" aria-modal="true">Second foreground</div>
+    `,
+      },
+      {
+        name: 'modal',
+        title: 'Modal Foreground',
+        html: `
+      <main><h1>Background article</h1><p id="article"></p></main>
+      <dialog id="modal"><h2>Session expired</h2><button>Sign in again</button></dialog>
+    `,
+        setup() {
+          document.querySelector('#article').textContent =
+            'Long background article prose that must remain obscured. '.repeat(20);
+          document.querySelector('#modal').showModal();
+        },
+      },
+    ];
+
+    document.modelContext = {
+      registerTool(tool) {
+        window.registeredReadPage = tool;
+      },
+    };
+  </script>
+  <script src="../../dist/tools/agentboard_read_page.js"></script>
+  <script>
+    function emitResult(payload) {
+      const bytes = new TextEncoder().encode(JSON.stringify(payload));
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+
+      const output = document.createElement('pre');
+      output.id = 'agentboard-browser-result';
+      output.textContent = `AGENTBOARD_BROWSER_RESULT:${btoa(binary)}:END`;
+      document.body.append(output);
+    }
+
+    (async () => {
+      try {
+        if (!window.registeredReadPage) throw new Error('Compiled read_page tool did not register');
+
+        const results = {};
+        for (const scenario of scenarios) {
+          document.title = scenario.title;
+          document.body.innerHTML = scenario.html;
+          scenario.setup?.();
+          results[scenario.name] = await window.registeredReadPage.execute({ maxLength: 10000 });
+        }
+        emitResult({ results });
+      } catch (error) {
+        emitResult({ error: String(error?.stack || error) });
+      }
+    })();
+  </script>
+</body>

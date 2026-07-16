@@ -2,8 +2,8 @@
  * Convert HTML to Markdown optimized for LLM consumption
  * Context-agnostic: works with native DOM or linkedom in service worker
  *
- * Extracted from dom_readability tool and adapted for reuse.
- * Prioritizes structure and readability over formatting fidelity.
+ * Parallels the self-contained converter in read_page, which cannot import this
+ * module in the page's MAIN world. Prioritizes structure over formatting fidelity.
  */
 
 export interface HtmlToMarkdownOptions {

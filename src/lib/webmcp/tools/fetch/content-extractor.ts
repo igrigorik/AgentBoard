@@ -33,7 +33,7 @@ export interface ConvertToMarkdownOptions {
 
 /**
  * Convert HTML content to markdown using existing pipeline
- * Reuses dom_readability's proven extraction logic
+ * Reuses the article-extraction pipeline shared with read_page
  *
  * @param content - Raw HTML content
  * @param options - Conversion options

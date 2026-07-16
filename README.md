@@ -146,7 +146,7 @@ Save in Settings → My Tools. The AI can now call it when you ask about prices 
 
 **Built-in WebMCP tools:**
 
-- `agentboard_read_page` - Read page content as clean markdown with metadata (title, author, date)
+- `agentboard_read_page` - Read the rendered page as article markdown, visible application text, or metadata context
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
 - `agentboard_fetch_url` - Fetch external URLs with optional markdown conversion
 

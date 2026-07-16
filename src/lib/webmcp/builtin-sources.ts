@@ -11,6 +11,7 @@
 export const BUILTIN_SOURCES: Record<string, string> = {
   agentboard_read_page: `'use webmcp-tool v1';
 
+// BEGIN VENDORED READABILITY
 // Vendor Mozilla Readability v0.5.0 (Apache License 2.0)
 // Inlined directly for CSP compatibility - no eval/Function needed
 //
@@ -2333,6 +2334,7 @@ if (typeof module === "object") {
   /* global module */
   module.exports = Readability;
 }
+// END VENDORED READABILITY
 
 // Attach Readability to window for CSP-safe global access
 if (typeof window !== 'undefined') {
@@ -2341,32 +2343,42 @@ if (typeof window !== 'undefined') {
 }
 /* eslint-enable */
 
+const DEFAULT_MAX_LENGTH = 32000;
+const MIN_MAX_LENGTH = 1000;
+const MAX_MAX_LENGTH = 100000;
+const MAX_READABILITY_ELEMENTS = 50000;
+const MAX_READABILITY_NODES = 100000;
+const MAX_READABILITY_SOURCE_CHARACTERS = 2000000;
+const MAX_SEMANTIC_CANDIDATES = 100;
+const TRUNCATION_MARKER = '\\n\\n[Content truncated]';
+
 export const metadata = {
   name: 'read_page',
   namespace: 'agentboard',
-  version: '4.0.1',
-  description: "Read the current page as clean markdown with metadata (title, author, date, excerpt).",
+  version: '5.0.0',
+  description:
+    'Read the rendered page as article Markdown, visible page text, or metadata context.',
   match: ['<all_urls>'],
   inputSchema: {
     type: 'object',
     properties: {
       maxLength: {
         type: 'number',
-        description: 'Maximum characters to extract (0 = unlimited)',
-        minimum: 0,
-        default: 0
-      }
+        description: 'Maximum characters in markdownContent',
+        // The build-time metadata parser requires literals; the contract test guards these copies.
+        minimum: 1000,
+        maximum: 100000,
+        default: 32000,
+      },
     },
-    additionalProperties: false
-  }
+    additionalProperties: false,
+  },
 };
 
 /**
  * Trusted Types passthrough policy for HTML parsing on TT-enforcing sites.
- * DOMParser.parseFromString() and innerHTML are both TT sinks — raw strings are
- * rejected. This policy wraps strings as TrustedHTML so they pass the check.
- * The DOMParser-returned document is TT-free, so Readability's internal innerHTML
- * writes work without wrapping.
+ * DOMParser.parseFromString() and Readability's internal innerHTML assignments
+ * are TT sinks, so the inlined vendor copy wraps each affected value here.
  */
 const _safeHTML = (() => {
   if (typeof trustedTypes !== 'undefined') {
@@ -2375,7 +2387,7 @@ const _safeHTML = (() => {
         createHTML: (s) => s,
       });
       return (html) => p.createHTML(html);
-    } catch (e) { // eslint-disable-line no-unused-vars
+    } catch {
       // Site's trusted-types CSP restricts policy names — fall through to raw string
     }
   }
@@ -2390,7 +2402,7 @@ const _safeHTML = (() => {
  * This version uses native document (page context), that one accepts doc parameter (service worker)
  * Cannot be shared due to WebMCP CSP injection requirements (tools must be self-contained)
  */
-function htmlToMarkdown(html, options = {}) {
+function htmlToMarkdown(html) {
   const container = new DOMParser().parseFromString(_safeHTML(html), 'text/html').body;
 
   function processNode(node, depth = 0) {
@@ -2405,8 +2417,8 @@ function htmlToMarkdown(html, options = {}) {
 
     const tag = node.tagName.toLowerCase();
     const children = Array.from(node.childNodes)
-      .map(child => processNode(child, depth + 1))
-      .filter(text => text)
+      .map((child) => processNode(child, depth + 1))
+      .filter((text) => text)
       .join('');
 
     switch (tag) {
@@ -2453,33 +2465,37 @@ function htmlToMarkdown(html, options = {}) {
       // Quotes
       case 'blockquote':
         if (!children) return '';
-        return '\\n\\n' + children.split('\\n')
-          .filter(line => line.trim())
-          .map(line => \`> \${line}\`)
-          .join('\\n');
+        return (
+          '\\n\\n' +
+          children
+            .split('\\n')
+            .filter((line) => line.trim())
+            .map((line) => \`> \${line}\`)
+            .join('\\n')
+        );
 
-      // Links
+      // Keep link labels but omit destinations from untrusted page content.
       case 'a':
-        if (options.includeLinks) {
-          const href = node.getAttribute('href');
-          if (href && !href.startsWith('javascript:')) {
-            return \`[\${children}](\${href})\`;
-          }
-        }
         return children;
 
       // Lists
       case 'ul':
-        return '\\n\\n' + Array.from(node.children)
-          .filter(child => child.tagName.toLowerCase() === 'li')
-          .map(li => \`- \${processNode(li, depth + 1)}\`)
-          .join('\\n');
+        return (
+          '\\n\\n' +
+          Array.from(node.children)
+            .filter((child) => child.tagName.toLowerCase() === 'li')
+            .map((li) => \`- \${processNode(li, depth + 1)}\`)
+            .join('\\n')
+        );
 
       case 'ol':
-        return '\\n\\n' + Array.from(node.children)
-          .filter(child => child.tagName.toLowerCase() === 'li')
-          .map((li, index) => \`\${index + 1}. \${processNode(li, depth + 1)}\`)
-          .join('\\n');
+        return (
+          '\\n\\n' +
+          Array.from(node.children)
+            .filter((child) => child.tagName.toLowerCase() === 'li')
+            .map((li, index) => \`\${index + 1}. \${processNode(li, depth + 1)}\`)
+            .join('\\n')
+        );
 
       case 'li':
         // Content already handled by parent ul/ol
@@ -2492,33 +2508,26 @@ function htmlToMarkdown(html, options = {}) {
       case 'hr':
         return '\\n\\n---\\n';
 
-      // Images
-      case 'img': {
-        const alt = node.getAttribute('alt') || 'image';
-        const src = node.getAttribute('src');
-        if (options.includeLinks && src) {
-          return \`![\${alt}](\${src})\`;
-        }
-        return \`[\${alt}]\`;
-      }
+      // Image attributes are not browser-rendered text and can contain hidden data.
+      case 'img':
+        return '';
 
       // Tables
       case 'table': {
-        if (options.simpleTables) {
-          // Simplified table representation for LLMs
-          const rows = Array.from(node.querySelectorAll('tr'));
-          if (rows.length === 0) return '';
+        const rows = Array.from(node.querySelectorAll('tr'));
+        if (rows.length === 0) return '';
 
-          const tableText = rows.map(row => {
+        const tableText = rows
+          .map((row) => {
             const cells = Array.from(row.querySelectorAll('td, th'))
-              .map(cell => processNode(cell, depth + 1))
-              .filter(text => text);
+              .map((cell) => processNode(cell, depth + 1))
+              .filter((text) => text);
             return cells.join(' | ');
-          }).filter(row => row).join('\\n');
+          })
+          .filter((row) => row)
+          .join('\\n');
 
-          return tableText ? \`\\n\\n\${tableText}\\n\` : '';
-        }
-        return '\\n\\n[Table content]\\n';
+        return tableText ? \`\\n\\n\${tableText}\\n\` : '';
       }
 
       // Skip these but process children
@@ -2546,264 +2555,479 @@ function htmlToMarkdown(html, options = {}) {
 
   // Clean up excessive whitespace
   markdown = markdown
-    .replace(/\\n{4,}/g, '\\n\\n\\n')  // Max 3 newlines
-    .replace(/^\\n+|\\n+$/g, '')      // Trim start/end
-    .replace(/[ \\t]+$/gm, '')       // Remove trailing spaces
+    .replace(/\\n{4,}/g, '\\n\\n\\n') // Max 3 newlines
+    .replace(/^\\n+|\\n+$/g, '') // Trim start/end
+    .replace(/[ \\t]+$/gm, '') // Remove trailing spaces
     .trim();
 
   return markdown;
 }
 
+function safeQuerySelector(selector) {
+  try {
+    return document.querySelector(selector);
+  } catch {
+    return null;
+  }
+}
+
+function getMetaContent(selector) {
+  try {
+    return limitInlineText(safeQuerySelector(selector)?.getAttribute('content'), 2000) || null;
+  } catch {
+    return null;
+  }
+}
+
+function safely(read, fallback) {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
 /**
- * Extract all available metadata from the page
- * Consolidates metadata extraction to avoid repetition
+ * Extract page metadata independently from either content strategy. Every field
+ * is best-effort so hostile or transient DOM state cannot suppress page context.
  */
 function extractPageMetadata() {
-  // Collect Twitter Card tags
-  const twitterCard = {};
-  document.querySelectorAll('meta[name^="twitter:"]').forEach(meta => {
-    const name = meta.getAttribute('name');
-    twitterCard[name] = meta.content;
-  });
-
-  // Get canonical URL
-  const canonicalEl = document.querySelector('link[rel="canonical"]');
-  const canonical = canonicalEl ? canonicalEl.href : null;
-
-  // Get favicon
-  const faviconEl = document.querySelector('link[rel*="icon"]');
-  const favicon = faviconEl ? faviconEl.href : null;
-
   return {
-    // Basic page info
-    url: window.location.href,
-    title: document.title,
-    domain: window.location.hostname,
-    canonical,
-    favicon,
-
-    // Meta tags
-    description: document.querySelector('meta[name="description"]')?.content || null,
-    keywords: document.querySelector('meta[name="keywords"]')?.content || null,
-    author: document.querySelector('meta[name="author"]')?.content || null,
-
-    // Open Graph metadata (often more accurate)
-    ogTitle: document.querySelector('meta[property="og:title"]')?.content || null,
-    ogDescription: document.querySelector('meta[property="og:description"]')?.content || null,
-    ogImage: document.querySelector('meta[property="og:image"]')?.content || null,
-    ogType: document.querySelector('meta[property="og:type"]')?.content || null,
-    ogSiteName: document.querySelector('meta[property="og:site_name"]')?.content || null,
-
-    // Twitter Card metadata
-    twitterCard: Object.keys(twitterCard).length > 0 ? twitterCard : null,
-
-    // Article-specific metadata
-    publishedTime: document.querySelector('meta[property="article:published_time"]')?.content || null,
-    modifiedTime: document.querySelector('meta[property="article:modified_time"]')?.content || null,
-    section: document.querySelector('meta[property="article:section"]')?.content || null,
-    tags: document.querySelector('meta[property="article:tag"]')?.content || null,
-
-    // Technical metadata
-    language: document.documentElement.lang || 'en',
-    charset: document.characterSet,
-    direction: 'ltr',  // Will be overridden by Readability if available
-
-    // Extraction metadata
-    extractedAt: new Date().toISOString()
+    url: limitInlineText(
+      safely(() => window.location.href, ''),
+      1000
+    ),
+    domain: limitInlineText(
+      safely(() => window.location.hostname, ''),
+      255
+    ),
+    title: limitInlineText(
+      safely(() => document.title, ''),
+      500
+    ),
+    description: getMetaContent('meta[name="description"]'),
+    author: getMetaContent('meta[name="author"]'),
+    ogTitle: getMetaContent('meta[property="og:title"]'),
+    ogDescription: getMetaContent('meta[property="og:description"]'),
+    ogSiteName: getMetaContent('meta[property="og:site_name"]'),
+    publishedTime: getMetaContent('meta[property="article:published_time"]'),
+    modifiedTime: getMetaContent('meta[property="article:modified_time"]'),
+    language: limitInlineText(
+      safely(() => document.documentElement?.lang || 'en', 'en'),
+      50
+    ),
+    direction: limitInlineText(
+      safely(() => document.documentElement?.dir || 'ltr', 'ltr'),
+      10
+    ),
+    extractedAt: new Date().toISOString(),
   };
 }
 
 /**
- * Quick readability check
+ * Keep the paragraph heuristic as a routing optimization, not an eligibility
+ * gate. Only rendered paragraphs can opt a page into DOM-clone extraction.
  */
 function isProbablyReaderable(doc) {
-  // Fallback heuristic to check if page looks like an article
-  // (Readability vendor lib doesn't export this, so we provide our own)
-  const paragraphs = doc.querySelectorAll('p');
-  const textLength = Array.from(paragraphs)
-    .map(p => p.textContent.trim().length)
-    .reduce((sum, len) => sum + len, 0);
+  try {
+    let textLength = 0;
+    for (const paragraph of doc.querySelectorAll('p')) {
+      if (isRendered(paragraph) !== true) continue;
+      const result = readInnerText(paragraph);
+      if (!result.ok) return false;
+      textLength += result.text.trim().length;
+      if (textLength > 500) return true;
+    }
+  } catch {
+    // Any uncertainty routes to innerText instead of risking hidden DOM content.
+  }
+  return false;
+}
 
-  return textLength > 500; // At least 500 chars in paragraphs
+function readInnerText(element, maxLength = MAX_MAX_LENGTH) {
+  if (!element) return { ok: false, text: '' };
+  try {
+    const text = element.innerText;
+    if (typeof text !== 'string') return { ok: false, text: '' };
+    const cutoff = text.length > maxLength ? avoidSplitSurrogate(text, maxLength) : text.length;
+    return { ok: true, text: text.slice(0, cutoff) };
+  } catch {
+    return { ok: false, text: '' };
+  }
+}
+
+function isRendered(element) {
+  try {
+    const view = element.ownerDocument.defaultView;
+    const style = view.getComputedStyle(element);
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.visibility === 'collapse'
+    ) {
+      return false;
+    }
+
+    if (element.getClientRects().length > 0) return true;
+
+    // display: contents has no box, so use descendant text rectangles as evidence.
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    return range.getClientRects().length > 0;
+  } catch {
+    return null;
+  }
+}
+
+function renderedElements(doc, selector, predicate = () => true) {
+  try {
+    const elements = [];
+    let failed = false;
+    let inspected = 0;
+
+    for (const element of doc.querySelectorAll(selector)) {
+      inspected += 1;
+      if (inspected > MAX_SEMANTIC_CANDIDATES) return { elements, failed: true };
+
+      const rendered = isRendered(element);
+      if (rendered === null) {
+        failed = true;
+        continue;
+      }
+      if (rendered && predicate(element)) {
+        elements.push(element);
+        if (elements.length > 1) return { elements, failed };
+      }
+    }
+
+    return { elements, failed };
+  } catch {
+    return { elements: [], failed: true };
+  }
+}
+
+function combineElementResults(...results) {
+  const elements = new Set();
+  for (const result of results) {
+    for (const element of result.elements) elements.add(element);
+  }
+  return {
+    elements: Array.from(elements),
+    failed: results.some((result) => result.failed),
+  };
+}
+
+function broadRenderedText(doc, maxLength) {
+  const body = readInnerText(
+    safely(() => doc.body, null),
+    maxLength
+  );
+  if (body.ok && body.text.trim()) return body.text;
+
+  const documentElement = readInnerText(
+    safely(() => doc.documentElement, null),
+    maxLength
+  );
+  return documentElement.ok && documentElement.text.trim() ? documentElement.text : '';
+}
+
+/**
+ * Prefer one semantic region without guessing between competing regions. Main
+ * ambiguity broadens to body, but modal ambiguity fails closed so obscured
+ * background content is never mistaken for the current foreground state.
+ */
+function selectRenderedText(doc, maxLength) {
+  const ariaDialogs = renderedElements(
+    doc,
+    '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]'
+  );
+  const nativeDialogs = renderedElements(doc, 'dialog[open]', (element) =>
+    safely(() => element.matches(':modal'), false)
+  );
+  const dialogs = combineElementResults(ariaDialogs, nativeDialogs);
+  if (dialogs.failed || dialogs.elements.length > 1) {
+    return { text: '', blocksArticle: true };
+  }
+  if (dialogs.elements.length === 1) {
+    const dialog = readInnerText(dialogs.elements[0], maxLength);
+    return { text: dialog.ok ? dialog.text : '', blocksArticle: true };
+  }
+
+  const mains = renderedElements(doc, 'main, [role="main"]');
+  if (!mains.failed && mains.elements.length === 1) {
+    const main = readInnerText(mains.elements[0], maxLength);
+    if (main.ok && main.text.trim()) {
+      return { text: main.text, blocksArticle: false };
+    }
+  }
+
+  return {
+    text: broadRenderedText(doc, maxLength),
+    blocksArticle: mains.failed || mains.elements.length > 0,
+  };
+}
+
+/**
+ * Preserve the browser's ordering and spacing decisions. Only normalize values
+ * that are invisible after rendering; reconstructing headings, tables, controls,
+ * or repeated lines here would create a second brittle content parser.
+ */
+function normalizeRenderedText(text) {
+  return text
+    .replace(/\\r\\n?/g, '\\n')
+    .replace(/\\u00a0/g, ' ')
+    .split('\\u0000')
+    .join('')
+    .replace(/[ \\t]+$/gm, '')
+    .replace(/^\\n+/, '')
+    .replace(/\\n+$/, '');
+}
+
+function normalizeInlineText(value) {
+  return String(value || '')
+    .replace(/\\s+/g, ' ')
+    .trim();
+}
+
+function firstNonBlank(...values) {
+  for (const value of values) {
+    const normalized = normalizeInlineText(value);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function avoidSplitSurrogate(text, cutoff) {
+  const previous = text.charCodeAt(cutoff - 1);
+  const next = text.charCodeAt(cutoff);
+  return previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff
+    ? cutoff - 1
+    : cutoff;
+}
+
+function limitInlineText(value, maxLength) {
+  const normalized = normalizeInlineText(value);
+  if (normalized.length <= maxLength) return normalized;
+
+  const cutoff = avoidSplitSurrogate(normalized, maxLength - 1);
+  return \`\${normalized.slice(0, cutoff)}…\`;
+}
+
+function normalizeMaxLength(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return DEFAULT_MAX_LENGTH;
+  return Math.min(MAX_MAX_LENGTH, Math.max(MIN_MAX_LENGTH, Math.floor(numeric)));
+}
+
+function truncateDocument(content, maxLength) {
+  if (content.length <= maxLength) return { content, truncated: false };
+
+  const budget = Math.max(0, maxLength - TRUNCATION_MARKER.length);
+  let cutoff = content.lastIndexOf('\\n', budget);
+  if (cutoff < budget * 0.8) cutoff = budget;
+  cutoff = avoidSplitSurrogate(content, cutoff);
+
+  return {
+    content: content.slice(0, cutoff).trimEnd() + TRUNCATION_MARKER,
+    truncated: true,
+  };
+}
+
+function compactMetadata(metadata) {
+  return {
+    title: limitInlineText(firstNonBlank(metadata.title, metadata.ogTitle), 200) || 'Untitled page',
+    url: limitInlineText(metadata.url, 1000),
+    author: limitInlineText(metadata.author, 200) || null,
+    siteName:
+      limitInlineText(
+        firstNonBlank(metadata.siteName, metadata.ogSiteName, metadata.domain),
+        200
+      ) || null,
+    publishedTime: limitInlineText(metadata.publishedTime, 100) || null,
+    modifiedTime: limitInlineText(metadata.modifiedTime, 100) || null,
+    language: limitInlineText(metadata.language, 50) || 'en',
+    direction: limitInlineText(metadata.direction, 10) || 'ltr',
+    extractedAt: limitInlineText(metadata.extractedAt, 50),
+  };
+}
+
+function buildMarkdownDocument(metadata, body) {
+  const title = metadata.title || 'Untitled page';
+  const author = limitInlineText(metadata.author, 100);
+  const publishedTime = limitInlineText(metadata.publishedTime, 50);
+  const modifiedTime = limitInlineText(metadata.modifiedTime, 50);
+  const url = limitInlineText(metadata.url, 300);
+  const header = [
+    \`# \${title}\`,
+    author && \`*By \${author}*\`,
+    publishedTime && \`*Published: \${publishedTime}*\`,
+    modifiedTime && \`*Updated: \${modifiedTime}*\`,
+    url && \`*Source: \${url}*\`,
+  ]
+    .filter(Boolean)
+    .join('\\n');
+
+  return \`\${header}\\n\\n---\\n\\n\${body}\`;
+}
+
+function buildResult(extractionMode, metadata, body, maxLength) {
+  const publicMetadata = compactMetadata(metadata);
+  const limited = truncateDocument(buildMarkdownDocument(publicMetadata, body), maxLength);
+  const words = limited.content.split(/\\s+/).filter(Boolean).length;
+
+  return {
+    success: true,
+    extractionMode,
+    metadata: publicMetadata,
+    markdownContent: limited.content,
+    truncated: limited.truncated,
+    stats: {
+      characterCount: limited.content.length,
+      wordCount: words,
+      estimatedReadTime: Math.ceil(words / 200),
+    },
+  };
+}
+
+function comparableText(text) {
+  return normalizeInlineText(text);
+}
+
+function renderedArticleField(value, renderedText, fallback) {
+  const candidate = comparableText(value);
+  return candidate && renderedText.includes(candidate) ? value : fallback;
+}
+
+function estimatedSerializedDataLength(value, attribute = false) {
+  let length = value.length;
+  if (length > MAX_READABILITY_SOURCE_CHARACTERS) return length;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === '&') length += 4;
+    else if (character === '<') length += 3;
+    else if (attribute && character === '"') length += 5;
+    if (length > MAX_READABILITY_SOURCE_CHARACTERS) return length;
+  }
+  return length;
+}
+
+function isWithinReadabilityBudget(doc) {
+  try {
+    const showAll = doc.defaultView.NodeFilter.SHOW_ALL;
+    const roots = [doc.documentElement];
+    let nodeCount = 0;
+    let elementCount = 0;
+    let sourceCharacters = 0;
+
+    while (roots.length > 0) {
+      const walker = doc.createTreeWalker(roots.pop(), showAll);
+      let node = walker.currentNode;
+      while (node) {
+        nodeCount += 1;
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          elementCount += 1;
+          sourceCharacters += node.tagName.length * 2 + 5;
+          for (const attribute of node.attributes) {
+            sourceCharacters +=
+              attribute.name.length + estimatedSerializedDataLength(attribute.value, true) + 4;
+          }
+          if (node.tagName === 'TEMPLATE') roots.push(node.content);
+        } else if (node.nodeType === Node.TEXT_NODE) {
+          sourceCharacters += estimatedSerializedDataLength(node.data);
+        } else if (node.nodeType === Node.COMMENT_NODE) {
+          sourceCharacters += node.data.length + 7;
+        } else if ('data' in node) {
+          sourceCharacters += node.data.length + 5;
+        }
+        if (
+          nodeCount > MAX_READABILITY_NODES ||
+          elementCount > MAX_READABILITY_ELEMENTS ||
+          sourceCharacters > MAX_READABILITY_SOURCE_CHARACTERS
+        ) {
+          return false;
+        }
+        node = walker.nextNode();
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractArticle(pageMetadata, config, liveRenderedText) {
+  if (!isWithinReadabilityBudget(document)) return null;
+  if (!isProbablyReaderable(document)) return null;
+
+  try {
+    // DOMParser clone satisfies Readability's destructive parsing contract without
+    // touching the live page. _safeHTML keeps this path valid under Trusted Types.
+    const serializedDocument = document.documentElement.outerHTML;
+    if (
+      typeof serializedDocument !== 'string' ||
+      serializedDocument.length > MAX_READABILITY_SOURCE_CHARACTERS
+    ) {
+      return null;
+    }
+    const documentClone = new DOMParser().parseFromString(
+      _safeHTML(serializedDocument),
+      'text/html'
+    );
+    const article = new Readability(documentClone, config).parse();
+    if (!article?.content) return null;
+
+    // Readability strips styles from its clone, which can expose CSS-hidden DOM.
+    // Use article formatting only when its complete text exists in live rendered text.
+    const articleText = comparableText(article.textContent);
+    const renderedText = comparableText(liveRenderedText);
+    if (!articleText || !renderedText.includes(articleText)) return null;
+
+    const markdown = htmlToMarkdown(article.content);
+    if (!markdown) return null;
+
+    return {
+      body: markdown,
+      metadata: {
+        ...pageMetadata,
+        title: renderedArticleField(article.title, renderedText, pageMetadata.title),
+        author: renderedArticleField(article.byline, renderedText, pageMetadata.author),
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function execute(args = {}) {
-  // Readability is now directly available (loaded when script executed)
-  // No eval/Function needed - CSP safe!
-
-  /**
-   * Optimal Readability Configuration for General Use
-   * These defaults are chosen based on extensive testing across diverse content types
-   */
+  const maxLength = normalizeMaxLength(args.maxLength);
   const config = {
-    // charThreshold: 100
-    // Why: Balances between catching short technical docs (>100 chars) while avoiding 
-    // navigation menus. Lower values (50) grab too much nav, higher (500) miss valid content.
     charThreshold: 100,
-
-    // nbTopCandidates: 10  
-    // Why: Sweet spot for modern web layouts. Default 5 misses content on complex pages,
-    // 20+ is overkill and slower. 10 handles news sites, blogs, and docs well.
     nbTopCandidates: 10,
-
-    // keepClasses: false
-    // Why: Removes presentational classes for cleaner extraction. Most semantic info
-    // is in the structure, not CSS classes. Keeping them adds noise for LLMs.
+    maxElemsToParse: MAX_READABILITY_ELEMENTS,
     keepClasses: false,
-
-    // linkDensityModifier: -0.1
-    // Why: Slightly more permissive with links to handle technical documentation
-    // and research articles. Default 0 sometimes drops valid content with citations.
-    linkDensityModifier: -0.1,
-
-    // disableJSONLD: false
-    // Why: JSON-LD often contains accurate metadata (dates, authors, descriptions)
-    // that's valuable for LLM context. No reason to skip it.
     disableJSONLD: false,
-
-    // debug: false
-    // Why: Production use - debug logs would pollute console
-    debug: false
+    debug: false,
   };
-
-  // Extract metadata once at the beginning
   const pageMetadata = extractPageMetadata();
+  const selected = selectRenderedText(document, maxLength);
+  const article = selected.blocksArticle
+    ? null
+    : extractArticle(pageMetadata, config, selected.text);
 
-  // Always check readability first
-  if (!isProbablyReaderable(document)) {
-    // Still return structured data for LLM context
-    return {
-      success: false,
-      readable: false,
-      message: 'This page does not appear to contain article content that can be extracted.',
-      hint: 'The page may be a navigation page, interactive application, or contain primarily non-textual content.',
-      metadata: {
-        ...pageMetadata,
-        siteName: pageMetadata.ogSiteName || pageMetadata.domain
-      },
-      markdownContent: null
-    };
+  if (article) {
+    return buildResult('article', article.metadata, article.body, maxLength);
   }
 
-  // DOMParser clone wrapped in _safeHTML to satisfy Trusted Types on sites like Gmail.
-  // The returned document is TT-free, so Readability's internal innerHTML writes work.
-  const documentClone = new DOMParser().parseFromString(
-    _safeHTML(document.documentElement.outerHTML), 'text/html'
-  );
-
-  try {
-    // Parse with Readability using configured settings
-    const reader = new window.Readability(documentClone, config);
-
-    const article = reader.parse();
-
-    if (!article || !article.content) {
-      // Even on failure, return structured metadata
-      return {
-        success: false,
-        readable: false,
-        message: 'Unable to extract meaningful content from this page.',
-        hint: 'The page structure may not be compatible with article extraction.',
-        metadata: {
-          ...pageMetadata,
-          siteName: pageMetadata.ogSiteName || pageMetadata.domain
-        },
-        markdownContent: null
-      };
-    }
-
-    // Convert HTML to Markdown with optimal settings for LLM consumption
-    let markdown = htmlToMarkdown(article.content, {
-      // includeLinks: false - URLs add noise for LLMs unless specifically needed
-      includeLinks: false,
-      // simpleTables: true - Pipe-separated format is clearer for LLMs than complex HTML tables
-      simpleTables: true
-    });
-
-    // Apply length limit if specified
-    if (args.maxLength > 0 && markdown.length > args.maxLength) {
-      // Find a good break point (end of paragraph)
-      let cutoff = args.maxLength;
-      const nearbyNewline = markdown.lastIndexOf('\\n\\n', cutoff);
-      if (nearbyNewline > cutoff * 0.8) {
-        cutoff = nearbyNewline;
-      }
-      markdown = markdown.substring(0, cutoff) + '\\n\\n[Content truncated]';
-    }
-
-    // Merge article metadata with page metadata, preferring article data when available
-    const metadata = {
-      ...pageMetadata,
-
-      // Override with Readability-extracted data when available
-      title: article.title || pageMetadata.title,
-      byline: article.byline || pageMetadata.author,
-      excerpt: article.excerpt || pageMetadata.description,
-      siteName: article.siteName || pageMetadata.ogSiteName || pageMetadata.domain,
-      publishedTime: article.publishedTime || pageMetadata.publishedTime,
-
-      // Readability-specific fields
-      language: article.lang || pageMetadata.language,
-      direction: article.dir || pageMetadata.direction,
-
-      // Keep both author sources if different
-      author: article.byline || pageMetadata.author
-    };
-
-    // Build self-contained markdown with metadata header
-    // This provides full context for LLMs in a single document
-    const markdownContent = [
-      \`# \${metadata.title}\`,
-      metadata.byline && \`*By \${metadata.byline}*\`,
-      metadata.publishedTime && \`*Published: \${metadata.publishedTime}*\`,
-      metadata.modifiedTime && \`*Updated: \${metadata.modifiedTime}*\`,
-      \`*Source: \${metadata.url}*\`,
-      '', '---', '',
-      markdown
-    ].filter(Boolean).join('\\n');
-
-    // Return clean JSON with metadata and markdown content
-    // Structure optimized for LLM consumption with essential fields only
-    return {
-      success: true,
-      readable: true,
-
-      // Comprehensive metadata object for structured access
-      metadata: metadata,
-
-      // Self-contained markdown with metadata header (best for LLMs)
-      markdownContent: markdownContent,
-
-      // Statistics for quality assessment and token estimation
-      stats: {
-        characterCount: markdownContent.length,
-        wordCount: markdown.split(/\\s+/).filter(w => w).length,  // Word count from clean markdown
-        estimatedReadTime: Math.ceil(markdown.split(/\\s+/).filter(w => w).length / 200), // ~200 words/min
-        imageCount: (article.content.match(/<img/g) || []).length,
-        linkCount: (article.content.match(/<a/g) || []).length
-      },
-
-      // Additional formats available if needed (not primary for LLM use)
-      alternateFormats: {
-        html: article.content,
-        text: article.textContent
-      }
-    };
-
-  } catch (error) {
-    console.error('Readability extraction error:', error);
-    return {
-      success: false,
-      readable: false,
-      message: 'An error occurred while extracting content.',
-      error: error.message,
-      metadata: {
-        ...pageMetadata,
-        siteName: pageMetadata.ogSiteName || pageMetadata.domain
-      },
-      markdownContent: null
-    };
+  const renderedText = normalizeRenderedText(selected.text);
+  if (renderedText) {
+    return buildResult('rendered-text', pageMetadata, renderedText, maxLength);
   }
+
+  const metadataSummary =
+    firstNonBlank(pageMetadata.description, pageMetadata.ogDescription) ||
+    'No rendered text content is available on this page.';
+  return buildResult('metadata', pageMetadata, metadataSummary, maxLength);
 }
 `,
   agentboard_youtube_transcript: `'use webmcp-tool v1';

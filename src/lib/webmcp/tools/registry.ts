@@ -25,9 +25,9 @@ export const COMPILED_TOOLS: CompiledToolInfo[] = [
     id: 'agentboard_read_page',
     file: 'tools/agentboard_read_page.js',
     match: ['<all_urls>'],
-    version: '4.0.1',
+    version: '5.0.0',
     description:
-      'Read the current page as clean markdown with metadata (title, author, date, excerpt).',
+      'Read the rendered page as article Markdown, visible page text, or metadata context.',
   },
   {
     id: 'agentboard_youtube_transcript',

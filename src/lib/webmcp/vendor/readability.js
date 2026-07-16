@@ -1,11 +1,11 @@
 /* eslint-disable */
 /**
- * SINGLE SOURCE OF TRUTH for Readability vendor code
- * Used by:
- * - fetch/content-extractor.ts (imports directly via ES module)
- * - dom_readability/script.js (inlined copy for CSP-safe injection)
- * 
- * See dom_readability/README.md for update instructions
+ * Mozilla Readability v0.5.0
+ * Canonical vendor source used by:
+ * - tools/fetch/content-extractor.ts (ES module import)
+ * - tools/read_page/script.js (CSP-safe inlined copy)
+ *
+ * See vendor/README.md for update instructions and required Trusted Types patches.
  */
 /*
  * Copyright (c) 2010 Arc90 Inc
