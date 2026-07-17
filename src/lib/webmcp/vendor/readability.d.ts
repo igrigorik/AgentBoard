@@ -1,6 +1,6 @@
 /**
  * Type declarations for Readability vendor code
- * Mozilla Readability v0.5.0 (Apache License 2.0)
+ * Mozilla Readability v0.6.0 (Apache License 2.0)
  */
 
 export interface ReadabilityOptions {
@@ -10,32 +10,33 @@ export interface ReadabilityOptions {
   charThreshold?: number;
   classesToPreserve?: string[];
   keepClasses?: boolean;
-  serializer?: (el: Element) => string;
+  serializer?: (node: Node) => string;
   disableJSONLD?: boolean;
   allowedVideoRegex?: RegExp;
+  linkDensityModifier?: number;
 }
 
 export interface ReadabilityArticle {
   /** Article title */
-  title: string;
+  title: string | null | undefined;
   /** HTML string of the article content */
-  content: string;
+  content: string | null | undefined;
   /** Text content of the article */
-  textContent: string;
+  textContent: string | null | undefined;
   /** Length of the article in characters */
-  length: number;
+  length: number | null | undefined;
   /** Excerpt of the article */
-  excerpt: string;
+  excerpt: string | null | undefined;
   /** Article byline (author) */
-  byline: string | null;
+  byline: string | null | undefined;
   /** Text direction */
-  dir: string | null;
+  dir: string | null | undefined;
   /** Language */
-  lang: string | null;
+  lang: string | null | undefined;
   /** Site name */
-  siteName: string | null;
+  siteName: string | null | undefined;
   /** Published time */
-  publishedTime: string | null;
+  publishedTime: string | null | undefined;
 }
 
 export declare class Readability {

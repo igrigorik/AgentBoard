@@ -4,7 +4,11 @@ Third-party libraries shared across WebMCP tools.
 
 ## Readability.js
 
-**Vendored version:** Mozilla Readability v0.5.0
+**Vendored version:** Mozilla Readability v0.6.0
+
+**Package:** `@mozilla/readability@0.6.0`
+
+**npm integrity:** `sha512-juG5VWh4qAivzTAeMzvY9xs9HY5rAcr2E4I7tiSSCokRFi7XIZCAu92ZkSTsIj1OPceCifL3cpfteP3pDT9/QQ==`
 
 **License:** Apache License 2.0
 
@@ -20,25 +24,27 @@ Third-party libraries shared across WebMCP tools.
 - `readability.js`: Canonical vendored source with an ES module export.
 - `readability.d.ts`: TypeScript declarations.
 
+Version 0.6.0 resolves [CVE-2025-2792](https://github.com/advisories/GHSA-3p6v-hrg8-8qj7), a title-parsing denial of service that affects earlier package versions and is reachable through untrusted HTML in the fetch pipeline.
+
 ### Updating Readability
 
 Updating the package is not a blind copy operation. The inlined `read_page` copy has Trusted Types wrappers around Readability's `innerHTML` sinks; those local compatibility patches must survive an update.
 
-1. Download the desired upstream `Readability.js` into a temporary file.
-2. Replace the upstream implementation in `vendor/readability.js`, retaining the license header and `export { Readability };` footer.
-3. Copy the implementation into `tools/read_page/script.js` between the vendored-library markers.
-4. Reapply `_safeHTML(...)` at every Readability `innerHTML` assignment in the inlined copy. At v0.5.0 these include the page-cache restoration and `<noscript>` image-recovery paths.
-5. Keep the `window.Readability = Readability` attachment after the inlined implementation.
-6. Update `readability.d.ts` if the upstream API changed.
-7. Update version references in `vendor/readability.js`, `tools/read_page/script.js`, and `tools/read_page/README.md`.
-8. Run both consumers' tests and the extension build:
+1. Download the exact npm package into a temporary directory and verify its published integrity before extracting `Readability.js`.
+2. Replace the upstream implementation in `vendor/readability.js`, retaining AgentBoard's outer ESLint guard, provenance header, and `export { Readability };` footer.
+3. Remove upstream `eslint-disable-next-line` annotations that are redundant inside AgentBoard's outer vendored-code guard; with `reportUnusedDisableDirectives`, leaving both layers fails lint.
+4. Copy the same implementation into `tools/read_page/script.js` between the vendored-library markers, preserving the outer `/* eslint-disable */` guard.
+5. Reapply `_safeHTML(...)` at every Readability `innerHTML` assignment in the inlined copy. At v0.6.0 these remain the page-cache restoration and `<noscript>` image-recovery paths.
+6. Keep the `window.Readability = Readability` attachment after the inlined implementation.
+7. Update `readability.d.ts` for upstream API changes and update version/integrity references in the vendor files and inlined header.
+8. Run the synchronization, security-regression, consumer, and real-browser tests:
 
 ```bash
-pnpm exec vitest --run tests/webmcp-readability.test.ts tests/webmcp-fetch-url.test.ts
+pnpm exec vitest --run tests/readability-vendor.test.ts tests/webmcp-readability.test.ts tests/webmcp-fetch-url.test.ts
 pnpm run test:browser
 ```
 
-Review the final diff rather than assuming the copies match byte-for-byte: the Trusted Types wrappers are intentional differences required by extension execution on enforcing sites such as Gmail.
+The synchronization test treats the two `_safeHTML(...)` wrappers as the only permitted implementation difference between the canonical and inlined copies. Review any additional difference rather than normalizing it away: the wrappers are required by extension execution on Trusted Types-enforcing sites such as Gmail.
 
 ### Why vendor it?
 
