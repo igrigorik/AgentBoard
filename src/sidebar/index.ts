@@ -293,16 +293,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load agents and set up initial state
   await loadAgents();
 
-  // Add initial assistant message
-  const welcomeMsg: ChatMessage = {
-    id: globalThis.crypto.randomUUID(),
-    role: 'assistant',
-    content: "Hello! I'm your AI assistant. How can I help you today?",
-    timestamp: Date.now(),
-    metadata: { agentId: currentAgentId || undefined },
-  };
-  messageHistory.push(welcomeMsg);
-  displayMessage(welcomeMsg);
+  displayConversationNotice("Hello! I'm your AI assistant. How can I help you today?");
 
   // Start health check
   startHealthCheck();
@@ -1151,6 +1142,11 @@ function addMessage(
   return messageDiv;
 }
 
+function displayConversationNotice(content: string): void {
+  // Sidebar chrome is not model output and must never become an assistant history turn.
+  addMessage('assistant', content);
+}
+
 // Add clear conversation functionality
 function clearConversation() {
   messageHistory = [];
@@ -1164,35 +1160,7 @@ function clearConversation() {
   // Reset scroll state - we're back at the top/beginning
   isUserAtBottom = true;
 
-  // Add welcome message again
-  const welcomeMsg: ChatMessage = {
-    id: globalThis.crypto.randomUUID(),
-    role: 'assistant',
-    content: 'Conversation cleared. How can I help you?',
-    timestamp: Date.now(),
-    metadata: { agentId: currentAgentId || undefined, agentName: currentAgent?.name },
-  };
-  messageHistory.push(welcomeMsg);
-  displayMessage(welcomeMsg);
-}
-
-// Helper function to display a message with its tool calls in chronological order
-function displayMessage(msg: ChatMessage): void {
-  // Display tool calls first (if any) - they happened before the response
-  if (msg.toolCalls && msg.toolCalls.length > 0 && msg.role === 'assistant') {
-    msg.toolCalls.forEach((toolCall) => {
-      const toolBox = new ToolCallBox(toolCall);
-      const toolCallWrapper = document.createElement('div');
-      toolCallWrapper.className = 'tool-call-wrapper';
-      toolCallWrapper.appendChild(toolBox.getElement());
-      messagesContainer.appendChild(toolCallWrapper);
-    });
-  }
-
-  // Then display the message content
-  if (msg.content) {
-    addMessage(msg.role as 'user' | 'assistant' | 'system' | 'error', msg.content);
-  }
+  displayConversationNotice('Conversation cleared. How can I help you?');
 }
 
 // Add keyboard shortcut for clearing (Cmd/Ctrl+K)
