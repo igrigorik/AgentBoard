@@ -1,4 +1,16 @@
+/// <reference types="vitest/jsdom" />
+
 import { vi, beforeAll, afterAll, afterEach } from 'vitest';
+
+// Recent Node versions expose their own localStorage getter. Vitest preserves that
+// property instead of installing JSDOM's, so browser-oriented dependencies such as
+// loglevel hit Node's unconfigured storage and emit one warning per worker.
+const jsdomLocalStorage = jsdom.window.localStorage;
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  enumerable: true,
+  value: jsdomLocalStorage,
+});
 
 // Mock Chrome API for testing
 // This provides a minimal mock implementation - expand as needed
