@@ -26,6 +26,7 @@ import {
   type Detail,
 } from './card-component';
 import { inferProviderFromModel, getProviderDisplay } from '../lib/ai/provider-utils';
+import type { ExtensionMessage } from '../types';
 
 // Get config storage instance
 const configStorage = ConfigStorage.getInstance();
@@ -332,6 +333,13 @@ function setDefaultFormValues() {
 
 // closeModal is now imported from modal-manager
 
+function getExplicitOpenAICompatibility(endpoint: string): boolean | undefined {
+  if (!endpoint) return undefined;
+
+  const checkbox = document.getElementById('agent-openai-compatible') as HTMLInputElement | null;
+  return checkbox?.hasAttribute('data-user-set') ? checkbox.checked : undefined;
+}
+
 async function saveAgent() {
   const form = document.getElementById('agent-form') as HTMLFormElement;
 
@@ -360,13 +368,7 @@ async function saveAgent() {
       apiKey: apiKeyValue || undefined, // Set to undefined if empty
       model,
       endpoint: endpointValue || undefined,
-      openaiCompatible: (() => {
-        if (!endpointValue) return undefined;
-        const checkbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
-        // Only save the value if the user explicitly set it
-        // Otherwise, let the backend use smart detection
-        return checkbox?.hasAttribute('data-user-set') ? checkbox.checked : undefined;
-      })(),
+      openaiCompatible: getExplicitOpenAICompatibility(endpointValue),
       systemPrompt: (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value,
       temperature: parseFloat(
         (document.getElementById('agent-temperature') as HTMLInputElement).value
@@ -424,24 +426,24 @@ async function testCurrentAgent() {
     const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
     const provider = inferProviderFromModel(model);
 
-    // Test the connection directly without saving temp agent
+    // Test the exact unsaved configuration rather than re-inferring its transport in the background.
+    const message = {
+      type: 'TEST_NEW_CONNECTION',
+      provider,
+      apiKey: apiKeyValue || undefined, // Allow undefined for custom endpoints
+      model,
+      endpoint: endpointValue || undefined,
+      openaiCompatible: getExplicitOpenAICompatibility(endpointValue),
+    } satisfies ExtensionMessage;
+
     const result = await new Promise<{ success: boolean; message: string }>((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        {
-          type: 'TEST_NEW_CONNECTION',
-          provider,
-          apiKey: apiKeyValue || undefined, // Allow undefined for custom endpoints
-          model,
-          endpoint: endpointValue || undefined,
-        } as const,
-        (response) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-            return;
-          }
-          resolve(response);
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
         }
-      );
+        resolve(response);
+      });
     });
 
     if (!result) {

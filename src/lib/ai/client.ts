@@ -766,6 +766,7 @@ export class AIClient {
     apiKey?: string;
     model: string;
     endpoint?: string;
+    openaiCompatible?: boolean;
   }): Promise<{ success: boolean; message: string }> {
     try {
       // Create temporary agent config for testing
@@ -776,6 +777,7 @@ export class AIClient {
         apiKey: details.apiKey,
         model: details.model,
         endpoint: details.endpoint,
+        openaiCompatible: details.openaiCompatible,
         systemPrompt: '',
         temperature: 0.7,
         maxTokens: 1000,
@@ -788,46 +790,55 @@ export class AIClient {
         { role: 'user', content: 'Say "Connection successful" in 3 words or less.' },
       ];
 
-      // Create fresh abort controller for test (don't reuse instance one which might be aborted)
+      // A connection probe intentionally stops after the first text chunk. Own the request
+      // with a fresh controller so every exit path also stops any remaining generation/billing.
       const testAbortController = new AbortController();
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-      const result = await streamText({
-        model,
-        messages: testMessages,
-        temperature: 0.7,
-        maxRetries: 1,
-        abortSignal: testAbortController.signal,
-      });
+      try {
+        const result = await streamText({
+          model,
+          messages: testMessages,
+          temperature: 0.7,
+          maxRetries: 1,
+          abortSignal: testAbortController.signal,
+        });
 
-      // Actually consume the stream to verify connection works
-      // Use a timeout to prevent hanging forever
-      const timeoutPromise = new Promise<boolean>((_, reject) => {
-        setTimeout(() => reject(new Error('Test timeout after 10 seconds')), 10000);
-      });
+        const timeoutPromise = new Promise<boolean>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            // Settle the race with the useful timeout error before aborting the losing stream.
+            reject(new Error('Test timeout after 10 seconds'));
+            testAbortController.abort();
+          }, 10000);
+        });
 
-      const streamPromise = (async () => {
-        let receivedData = false;
-        for await (const _chunk of result.textStream) {
-          receivedData = true;
-          break; // Need first chunk to verify connection
+        const streamPromise = (async () => {
+          let receivedData = false;
+          for await (const _chunk of result.textStream) {
+            receivedData = true;
+            break; // Need first chunk to verify connection
+          }
+          return receivedData;
+        })();
+
+        const receivedData = await Promise.race([streamPromise, timeoutPromise]);
+
+        if (!receivedData) {
+          return {
+            success: false,
+            message: `Connection established but no response from ${details.provider}`,
+          };
         }
-        return receivedData;
-      })();
 
-      const receivedData = await Promise.race([streamPromise, timeoutPromise]);
-
-      if (!receivedData) {
+        const endpointInfo = details.endpoint ? ` via ${details.endpoint}` : '';
         return {
-          success: false,
-          message: `Connection established but no response from ${details.provider}`,
+          success: true,
+          message: `Successfully connected to ${details.provider} (${details.model})${endpointInfo}`,
         };
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        testAbortController.abort();
       }
-
-      const endpointInfo = details.endpoint ? ` via ${details.endpoint}` : '';
-      return {
-        success: true,
-        message: `Successfully connected to ${details.provider} (${details.model})${endpointInfo}`,
-      };
     } catch (error) {
       log.error('[AIClient] Test connection failed:', error);
 

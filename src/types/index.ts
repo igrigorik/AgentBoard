@@ -24,11 +24,11 @@ interface TestConnectionMessage {
 
 interface TestNewConnectionMessage {
   type: 'TEST_NEW_CONNECTION';
-  agentId: string;
   provider: AIProvider;
-  apiKey: string;
+  apiKey?: string;
   model: string;
   endpoint?: string;
+  openaiCompatible: boolean | undefined;
 }
 
 interface PingMessage {

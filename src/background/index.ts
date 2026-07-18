@@ -359,6 +359,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           apiKey: request.apiKey,
           model: request.model,
           endpoint: request.endpoint,
+          openaiCompatible: request.openaiCompatible,
         })
         .then((result) => {
           sendResponse(result);
