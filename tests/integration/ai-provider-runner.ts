@@ -199,7 +199,6 @@ async function executeAIIntegrationTarget(
     ],
     tools: { integration_ok: integrationTool },
     toolChoice: { type: 'tool', toolName: 'integration_ok' },
-    maxOutputTokens: 32,
     maxRetries: 0,
     abortSignal,
     onError: ({ error }) => {
