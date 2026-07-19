@@ -8,13 +8,17 @@
 import log from '../logger';
 import { streamText, CoreMessage } from 'ai';
 import type { AgentConfig } from '../storage/config';
-import type { AIProvider, ToolCall } from '../../types';
-import { ConfigStorage, resolveSystemPrompt } from '../storage/config';
+import type { ToolCall } from '../../types';
+import {
+  ConfigStorage,
+  ConfigValidationError,
+  configValidationMessage,
+  resolveSystemPrompt,
+} from '../storage/config';
 import { getToolRegistry } from '../webmcp/tool-registry';
 import { getRemoteMCPManager } from '../mcp/manager';
 import { createModelRuntime } from './model-runtime';
-import { isOpenAIProtocol } from './protocol';
-import { migrateAgentToV2 } from '../storage/config-migration';
+import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
 
 // Interface for API error objects that may have additional properties
 interface APIError extends Error {
@@ -117,12 +121,11 @@ export class AIClient {
       this.abortController?.abort();
       this.abortController = new AbortController();
 
-      const resolvedAgent = migrateAgentToV2(agent);
-      const runtime = createModelRuntime(resolvedAgent);
+      const runtime = createModelRuntime(agent);
 
       // Build system prompt: base + user custom + MCP server instructions (if any)
       const mcpInstructions = getRemoteMCPManager().getMCPInstructions();
-      const systemParts = [resolveSystemPrompt(resolvedAgent), mcpInstructions].filter(Boolean);
+      const systemParts = [resolveSystemPrompt(agent), mcpInstructions].filter(Boolean);
       const systemPrompt = systemParts.join('\n\n');
 
       const messagesWithSystem: CoreMessage[] = systemPrompt
@@ -609,28 +612,29 @@ export class AIClient {
    * Test connection with provided agent details (for new agents before saving)
    */
   async testConnectionWithDetails(details: {
-    provider: AIProvider;
+    apiProtocol: ApiProtocol;
     apiKey?: string;
     model: string;
     endpoint?: string;
-    openaiCompatible?: boolean;
   }): Promise<{ success: boolean; message: string }> {
+    const provider = providerForApiProtocol(details.apiProtocol);
+
     try {
-      // Create temporary agent config for testing
+      // Unsaved probes use the same explicit current contract as saved agents.
       const tempAgent: AgentConfig = {
         id: 'temp-test',
         name: 'Test Agent',
-        provider: details.provider,
+        provider,
+        apiProtocol: details.apiProtocol,
         apiKey: details.apiKey,
         model: details.model,
         endpoint: details.endpoint,
-        openaiCompatible: details.openaiCompatible,
         systemPrompt: '',
         temperature: 0.7,
         maxTokens: 1000,
       };
 
-      const runtime = createModelRuntime(migrateAgentToV2(tempAgent));
+      const runtime = createModelRuntime(tempAgent);
 
       const testMessages: CoreMessage[] = [
         { role: 'user', content: 'Say "Connection successful" in 3 words or less.' },
@@ -676,34 +680,46 @@ export class AIClient {
         if (!receivedData) {
           return {
             success: false,
-            message: `Connection established but no response from ${details.provider}`,
+            message: `Connection established but no response from ${provider}`,
           };
         }
 
         const endpointInfo = details.endpoint ? ` via ${details.endpoint}` : '';
         return {
           success: true,
-          message: `Successfully connected to ${details.provider} (${details.model})${endpointInfo}`,
+          message: `Successfully connected to ${provider} (${details.model})${endpointInfo}`,
         };
       } finally {
         if (timeoutId !== undefined) clearTimeout(timeoutId);
         testAbortController.abort();
       }
     } catch (error) {
-      log.error('[AIClient] Test connection failed:', error);
+      const statusCode =
+        error && typeof error === 'object' && 'statusCode' in error
+          ? (error as APIError).statusCode
+          : undefined;
+      log.error('[AIClient] Test connection failed', { statusCode });
 
       if (error instanceof Error) {
-        if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+        if (
+          statusCode === 401 ||
+          error.message.includes('401') ||
+          error.message.includes('Unauthorized')
+        ) {
           return {
             success: false,
-            message: `Invalid API key for ${details.provider}. Please check your credentials.`,
+            message: `Invalid API key for ${provider}. Please check your credentials.`,
           };
         }
 
-        if (error.message.includes('404') || error.message.includes('model')) {
+        if (
+          statusCode === 404 ||
+          error.message.includes('404') ||
+          error.message.includes('model')
+        ) {
           return {
             success: false,
-            message: `Model '${details.model}' not found for ${details.provider}. Please check the model name.`,
+            message: `The configured model or endpoint was not found for ${provider}.`,
           };
         }
 
@@ -717,13 +733,13 @@ export class AIClient {
         if (error.message.includes('timeout')) {
           return {
             success: false,
-            message: `Connection timeout. The ${details.provider} API took too long to respond.`,
+            message: `Connection timeout. The ${provider} API took too long to respond.`,
           };
         }
 
         return {
           success: false,
-          message: `Connection failed: ${error.message}`,
+          message: `Connection failed for ${provider}. Verify the Connection API, endpoint, model, and credentials.`,
         };
       }
 
@@ -743,32 +759,24 @@ export class AIClient {
       if (!agent) {
         return {
           success: false,
-          message: `Agent ${agentId} not found`,
+          message: 'Agent not found. Reload settings and try again.',
         };
       }
 
-      const testMessages: CoreMessage[] = [
-        { role: 'user', content: 'Say "Connection successful" in 3 words or less.' },
-      ];
-
-      await this.streamChat(agentId, testMessages, undefined, {
-        onFinish: (_fullText: string) => {
-          // Success handled below, fullText ignored for test
-        },
-        onError: (error) => {
-          throw error;
-        },
+      // Saved probes share the same zero-retry, owned-abort path as unsaved probes.
+      return this.testConnectionWithDetails({
+        apiProtocol: agent.apiProtocol,
+        apiKey: agent.apiKey,
+        model: agent.model,
+        endpoint: agent.endpoint,
       });
-
-      const endpointInfo = agent.endpoint ? ` via ${agent.endpoint}` : '';
-      return {
-        success: true,
-        message: `✓ Agent "${agent.name}" connected successfully${endpointInfo}`,
-      };
     } catch (error) {
       return {
         success: false,
-        message: error instanceof Error ? error.message : 'Connection test failed',
+        message:
+          error instanceof ConfigValidationError
+            ? configValidationMessage(error)
+            : 'Connection test failed. Verify the Connection API, endpoint, model, and credentials.',
       };
     }
   }

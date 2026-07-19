@@ -7,7 +7,10 @@ import log from '../lib/logger';
 import './styles.css';
 import {
   ConfigStorage,
+  ConfigValidationError,
+  configValidationMessage,
   type AgentConfig,
+  type LogLevel,
   type MCPConfig,
   type ReasoningConfig,
 } from '../lib/storage/config';
@@ -25,22 +28,37 @@ import {
   type Badge,
   type Detail,
 } from './card-component';
-import { inferProviderFromModel, getProviderDisplay } from '../lib/ai/provider-utils';
+import { providerForApiProtocol, type ApiProtocol } from '../lib/ai/protocol';
+import {
+  protocolBadgeLabel,
+  protocolForConnectionApi,
+  type ConnectionApi,
+  type OpenAIApiProtocol,
+} from './agent-protocol';
 import type { ExtensionMessage } from '../types';
 
 // Get config storage instance
 const configStorage = ConfigStorage.getInstance();
 let editingAgentId: string | null = null;
+let connectionTestGeneration = 0;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
-  await renderAgents();
-  await loadLogLevel();
-  await loadMCPConfig();
-  await initializeWebMCPScripts();
-  await initializeCommands();
-  await initializeBackupRestore();
+  try {
+    await renderAgents();
+    await loadLogLevel();
+    await loadMCPConfig();
+    await initializeWebMCPScripts();
+    await initializeCommands();
+    await initializeBackupRestore();
+  } catch (error) {
+    log.error(
+      'Failed to initialize settings:',
+      error instanceof ConfigValidationError ? error.code : 'CONFIGURATION_UNAVAILABLE'
+    );
+    showStatus(configValidationMessage(error), 'error', false);
+  }
 });
 
 async function renderAgents() {
@@ -74,21 +92,15 @@ async function renderAgents() {
 }
 
 function createAgentCard(agent: AgentConfig): HTMLElement {
-  // Infer provider from model if not explicitly set
-  const inferredProvider = inferProviderFromModel(agent.model);
-  const providerDisplay = getProviderDisplay(inferredProvider);
-
-  // Show provider with proxy indicator if using custom endpoint
+  const provider = providerForApiProtocol(agent.apiProtocol);
   const hasProxy = !!agent.endpoint;
-  const providerText = hasProxy
-    ? `🌐 ${providerDisplay.name}`.toUpperCase()
-    : providerDisplay.name.toUpperCase();
+  const protocolLabel = protocolBadgeLabel(agent.apiProtocol);
 
   const badges: Badge[] = [
     {
-      text: providerText,
-      className: `provider-badge provider-${inferredProvider}`,
-      title: hasProxy ? `Using ${agent.endpoint}` : undefined,
+      text: hasProxy ? `🌐 ${protocolLabel}` : protocolLabel,
+      className: `provider-badge provider-${provider}`,
+      title: hasProxy ? 'Using a custom endpoint' : undefined,
     },
   ];
 
@@ -137,22 +149,13 @@ function setupEventListeners() {
   // Log level selection
   document.getElementById('log-level')?.addEventListener('change', updateLogLevel);
 
-  // Update API key required state when endpoint changes
-  document.getElementById('agent-endpoint')?.addEventListener('input', () => {
-    updateApiKeyRequirement();
-    updateOpenAICompatibleVisibility();
-  });
+  // Endpoint only controls credential requirements; it never selects transport.
+  document.getElementById('agent-endpoint')?.addEventListener('input', updateApiKeyRequirement);
 
-  // Track when user explicitly sets the OpenAI-compatible checkbox
-  document.getElementById('agent-openai-compatible')?.addEventListener('change', (e) => {
-    const checkbox = e.target as HTMLInputElement;
-    // Mark that the user has explicitly set this value
-    checkbox.setAttribute('data-user-set', 'true');
-  });
-
-  // Update inferred provider when model changes
-  document.getElementById('agent-model')?.addEventListener('input', () => {
-    updateInferredProvider();
+  document
+    .getElementById('agent-connection-api')
+    ?.addEventListener('change', updateConnectionApiState);
+  document.getElementById('agent-openai-api-mode')?.addEventListener('change', () => {
     updateReasoningVisibility();
     validateModelReasoning();
   });
@@ -198,22 +201,11 @@ function openCreateModal() {
     onSave: saveAgent,
     onTest: testCurrentAgent,
   });
-
-  // Hide inferred provider for new agent (no model entered yet)
-  const inferredProviderDiv = document.getElementById('inferred-provider');
-  if (inferredProviderDiv) {
-    inferredProviderDiv.classList.add('hidden');
-  }
-
-  // Clear OpenAI-compatible checkbox state for new agent
-  const compatibleCheckbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
-  if (compatibleCheckbox) {
-    compatibleCheckbox.checked = false;
-    compatibleCheckbox.removeAttribute('data-user-set');
-  }
+  setAgentFormBusy(false);
 
   openModal('agent-modal', () => {
     editingAgentId = null;
+    connectionTestGeneration += 1;
   });
 }
 
@@ -243,9 +235,11 @@ async function openEditModal(agentId: string) {
       : undefined,
     onDuplicate: agent ? duplicateAgent : undefined,
   });
+  setAgentFormBusy(false);
 
   openModal('agent-modal', () => {
     editingAgentId = null;
+    connectionTestGeneration += 1;
   });
 }
 
@@ -263,19 +257,7 @@ async function populateForm(agentId: string) {
   (document.getElementById('agent-model') as HTMLInputElement).value = agent.model;
   (document.getElementById('agent-endpoint') as HTMLInputElement).value = endpointValue;
 
-  // Set OpenAI-compatible checkbox - only check if explicitly set by user
-  const compatibleCheckbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
-  if (compatibleCheckbox) {
-    if (endpointValue && agent.openaiCompatible !== undefined) {
-      // User has explicitly set this value
-      compatibleCheckbox.checked = agent.openaiCompatible;
-      compatibleCheckbox.setAttribute('data-user-set', 'true');
-    } else {
-      // No explicit value set - leave unchecked and clear the attribute
-      compatibleCheckbox.checked = false;
-      compatibleCheckbox.removeAttribute('data-user-set');
-    }
-  }
+  setSelectedApiProtocol(agent.apiProtocol);
 
   (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value =
     agent.systemPrompt || '';
@@ -293,10 +275,8 @@ async function populateForm(agentId: string) {
   populateReasoningConfig(agent);
 
   // Update UI state
-  updateInferredProvider();
   updateApiKeyRequirement();
-  updateOpenAICompatibleVisibility();
-  updateReasoningVisibility();
+  updateConnectionApiState();
 }
 
 function setDefaultFormValues() {
@@ -324,20 +304,63 @@ function setDefaultFormValues() {
     maxStepsEl.value = '10';
   }
 
+  // New OpenAI-style agents use Responses unless the user explicitly selects legacy Chat.
+  (document.getElementById('agent-connection-api') as HTMLSelectElement).value = 'openai';
+  (document.getElementById('agent-openai-api-mode') as HTMLSelectElement).value =
+    'openai-responses';
+
   // Clear reasoning configuration
   clearReasoningConfig();
 
-  // Update API key requirement based on empty endpoint (without triggering validation)
   updateApiKeyRequirement();
+  updateConnectionApiState();
 }
 
 // closeModal is now imported from modal-manager
 
-function getExplicitOpenAICompatibility(endpoint: string): boolean | undefined {
-  if (!endpoint) return undefined;
+function getSelectedApiProtocol(): ApiProtocol {
+  const connectionApi = (document.getElementById('agent-connection-api') as HTMLSelectElement)
+    .value;
 
-  const checkbox = document.getElementById('agent-openai-compatible') as HTMLInputElement | null;
-  return checkbox?.hasAttribute('data-user-set') ? checkbox.checked : undefined;
+  switch (connectionApi) {
+    case 'anthropic':
+    case 'google':
+      return protocolForConnectionApi(connectionApi);
+    case 'openai': {
+      const mode = (document.getElementById('agent-openai-api-mode') as HTMLSelectElement).value;
+      if (mode !== 'openai-responses' && mode !== 'openai-chat-completions') {
+        throw new Error('Invalid OpenAI API mode');
+      }
+      return protocolForConnectionApi('openai', mode);
+    }
+    default:
+      throw new Error('Invalid Connection API selection');
+  }
+}
+
+function setSelectedApiProtocol(protocol: ApiProtocol): void {
+  const connectionApi = providerForApiProtocol(protocol);
+  (document.getElementById('agent-connection-api') as HTMLSelectElement).value = connectionApi;
+
+  if (connectionApi === 'openai') {
+    (document.getElementById('agent-openai-api-mode') as HTMLSelectElement).value =
+      protocol as OpenAIApiProtocol;
+  }
+}
+
+function setAgentFormBusy(busy: boolean): void {
+  document
+    .querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    >('#agent-form input, #agent-form select, #agent-form textarea')
+    .forEach((control) => {
+      control.disabled = busy;
+    });
+  document
+    .querySelectorAll<HTMLButtonElement>('#agent-modal .modal-footer button')
+    .forEach((button) => {
+      button.disabled = busy;
+    });
 }
 
 async function saveAgent() {
@@ -357,18 +380,17 @@ async function saveAgent() {
     const reasoningConfig = collectReasoningConfig();
 
     const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
-    const provider = inferProviderFromModel(model);
+    const apiProtocol = getSelectedApiProtocol();
 
-    const agentData: Omit<AgentConfig, 'id'> = {
+    const agentData: Omit<AgentConfig, 'id' | 'provider'> = {
       name: (document.getElementById('agent-name') as HTMLInputElement).value.trim(),
       description:
         (document.getElementById('agent-description') as HTMLInputElement).value.trim() ||
         undefined,
-      provider,
       apiKey: apiKeyValue || undefined, // Set to undefined if empty
       model,
       endpoint: endpointValue || undefined,
-      openaiCompatible: getExplicitOpenAICompatibility(endpointValue),
+      apiProtocol,
       systemPrompt: (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value,
       temperature: parseFloat(
         (document.getElementById('agent-temperature') as HTMLInputElement).value
@@ -386,19 +408,17 @@ async function saveAgent() {
     };
 
     if (editingAgentId) {
+      // Provider is descriptive model metadata, not a transport selector. Editing the
+      // Connection API must not silently rewrite it for proxy-routed models.
       await configStorage.updateAgent(editingAgentId, agentData);
       showStatus('Agent updated successfully!', 'success');
     } else {
-      await configStorage.addAgent(agentData);
+      await configStorage.addAgent({
+        ...agentData,
+        provider: providerForApiProtocol(apiProtocol),
+      });
       showStatus('Agent created successfully!', 'success');
     }
-
-    // Notify background script of config change
-    const newConfig = await configStorage.get();
-    await chrome.runtime.sendMessage({
-      type: 'SAVE_CONFIG',
-      config: newConfig,
-    } as const);
 
     closeModal('agent-modal');
     await renderAgents();
@@ -419,21 +439,21 @@ async function testCurrentAgent() {
     document.getElementById('agent-endpoint') as HTMLInputElement
   ).value.trim();
   const apiKeyValue = (document.getElementById('agent-api-key') as HTMLInputElement).value.trim();
+  const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
+  const apiProtocol = getSelectedApiProtocol();
+  const generation = ++connectionTestGeneration;
 
-  showModalStatus('agent-modal', 'Testing connection...', 'info');
+  setAgentFormBusy(true);
+  showModalStatus('agent-modal', `Testing ${protocolBadgeLabel(apiProtocol)}...`, 'info');
 
   try {
-    const model = (document.getElementById('agent-model') as HTMLInputElement).value.trim();
-    const provider = inferProviderFromModel(model);
-
-    // Test the exact unsaved configuration rather than re-inferring its transport in the background.
+    // Test the exact protocol selected by the same controls Save reads.
     const message = {
       type: 'TEST_NEW_CONNECTION',
-      provider,
+      apiProtocol,
       apiKey: apiKeyValue || undefined, // Allow undefined for custom endpoints
       model,
       endpoint: endpointValue || undefined,
-      openaiCompatible: getExplicitOpenAICompatibility(endpointValue),
     } satisfies ExtensionMessage;
 
     const result = await new Promise<{ success: boolean; message: string }>((resolve, reject) => {
@@ -446,19 +466,26 @@ async function testCurrentAgent() {
       });
     });
 
+    if (generation !== connectionTestGeneration) return;
+    const resultPrefix = `${protocolBadgeLabel(apiProtocol)}: `;
     if (!result) {
-      showModalStatus('agent-modal', 'No response from background script', 'error');
-      return;
-    }
-
-    if (result.success) {
-      showModalStatus('agent-modal', result.message, 'success');
+      showModalStatus('agent-modal', `${resultPrefix}no response from background script`, 'error');
+    } else if (result.success) {
+      showModalStatus('agent-modal', `${resultPrefix}${result.message}`, 'success');
     } else {
-      showModalStatus('agent-modal', result.message || 'Connection test failed', 'error');
+      showModalStatus(
+        'agent-modal',
+        `${resultPrefix}${result.message || 'Connection test failed'}`,
+        'error'
+      );
     }
-  } catch (error) {
-    log.error('Connection test error:', error);
-    showModalStatus('agent-modal', 'Failed to test connection', 'error');
+  } catch {
+    if (generation === connectionTestGeneration) {
+      log.error('Connection test failed');
+      showModalStatus('agent-modal', 'Failed to test connection', 'error');
+    }
+  } finally {
+    if (generation === connectionTestGeneration) setAgentFormBusy(false);
   }
 }
 
@@ -466,13 +493,6 @@ async function deleteAgent(agentId: string) {
   try {
     await configStorage.deleteAgent(agentId);
     showStatus('Agent deleted successfully', 'success');
-
-    // Notify background script of config change
-    const newConfig = await configStorage.get();
-    await chrome.runtime.sendMessage({
-      type: 'SAVE_CONFIG',
-      config: newConfig,
-    } as const);
 
     closeModal('agent-modal');
     await renderAgents();
@@ -506,13 +526,6 @@ async function duplicateAgent() {
     const { id: _id, isDefault: _isDefault, ...agentData } = agent;
     await configStorage.addAgent({ ...agentData, name: newName, isDefault: false });
 
-    // Notify background script of config change
-    const newConfig = await configStorage.get();
-    await chrome.runtime.sendMessage({
-      type: 'SAVE_CONFIG',
-      config: newConfig,
-    } as const);
-
     showStatus(`Agent duplicated as "${newName}"`, 'success');
     closeModal('agent-modal');
     await renderAgents();
@@ -537,7 +550,7 @@ async function loadLogLevel() {
 
 async function updateLogLevel() {
   const select = document.getElementById('log-level') as HTMLSelectElement;
-  const selectedLogLevel = select.value;
+  const selectedLogLevel = select.value as LogLevel;
 
   try {
     await configStorage.set({ logLevel: selectedLogLevel });
@@ -575,51 +588,17 @@ function updateApiKeyRequirement() {
   }
 }
 
-function updateOpenAICompatibleVisibility() {
-  const endpointInput = document.getElementById('agent-endpoint') as HTMLInputElement;
-  const compatibleGroup = document.getElementById('openai-compatible-group') as HTMLDivElement;
-  const compatibleCheckbox = document.getElementById('agent-openai-compatible') as HTMLInputElement;
-  const endpoint = endpointInput?.value?.trim();
-
-  if (compatibleGroup) {
-    if (endpoint) {
-      // Show checkbox when endpoint is set
-      compatibleGroup.style.display = 'block';
-
-      // Don't auto-check based on smart detection - let user decide
-      // The backend will use smart detection if the value is undefined
-    } else {
-      // Hide when no endpoint
-      compatibleGroup.style.display = 'none';
-      // Clear the user-set attribute when endpoint is removed
-      if (compatibleCheckbox) {
-        compatibleCheckbox.removeAttribute('data-user-set');
-      }
-    }
-  }
+function updateConnectionApiState(): void {
+  const connectionApi = (document.getElementById('agent-connection-api') as HTMLSelectElement)
+    .value as ConnectionApi;
+  document
+    .getElementById('openai-api-mode-group')
+    ?.classList.toggle('hidden', connectionApi !== 'openai');
+  updateReasoningVisibility();
+  validateModelReasoning();
 }
 
-function updateInferredProvider() {
-  const modelInput = document.getElementById('agent-model') as HTMLInputElement;
-  const inferredProviderDiv = document.getElementById('inferred-provider');
-  const inferredProviderText = document.getElementById('inferred-provider-text');
-
-  if (!modelInput || !inferredProviderDiv || !inferredProviderText) return;
-
-  const model = modelInput.value.trim();
-  if (!model) {
-    inferredProviderDiv.classList.add('hidden');
-    return;
-  }
-
-  const provider = inferProviderFromModel(model);
-  const providerDisplay = getProviderDisplay(provider);
-
-  inferredProviderText.textContent = providerDisplay.name;
-  inferredProviderDiv.classList.remove('hidden');
-}
-
-function showStatus(message: string, type: 'success' | 'error' | 'info') {
+function showStatus(message: string, type: 'success' | 'error' | 'info', autoHide = true) {
   const statusEl = document.getElementById('status-message');
   if (!statusEl) return;
 
@@ -627,13 +606,15 @@ function showStatus(message: string, type: 'success' | 'error' | 'info') {
   statusEl.className = `status-message ${type}`;
   statusEl.style.display = 'block';
 
-  // Auto-hide after 3 seconds for success/info, 5 seconds for errors
-  setTimeout(
-    () => {
-      statusEl.style.display = 'none';
-    },
-    type === 'error' ? 5000 : 3000
-  );
+  if (autoHide) {
+    // Auto-hide after 3 seconds for success/info, 5 seconds for errors
+    setTimeout(
+      () => {
+        statusEl.style.display = 'none';
+      },
+      type === 'error' ? 5000 : 3000
+    );
+  }
 }
 
 // MCP Configuration Functions
@@ -914,18 +895,17 @@ function toggleReasoningSettings() {
 }
 
 function updateReasoningVisibility() {
-  const modelInput = document.getElementById('agent-model') as HTMLInputElement;
-  const model = modelInput?.value.trim() || '';
-
-  // Hide all provider-specific sections
+  // Reasoning options follow the wire protocol, never the opaque model ID.
   document.getElementById('reasoning-openai')?.classList.add('hidden');
   document.getElementById('reasoning-anthropic')?.classList.add('hidden');
   document.getElementById('reasoning-google')?.classList.add('hidden');
 
-  if (model) {
-    const provider = inferProviderFromModel(model);
-    document.getElementById(`reasoning-${provider}`)?.classList.remove('hidden');
-  }
+  const apiProtocol = getSelectedApiProtocol();
+  const provider = providerForApiProtocol(apiProtocol);
+  document.getElementById(`reasoning-${provider}`)?.classList.remove('hidden');
+  document
+    .getElementById('reasoning-summary-group')
+    ?.classList.toggle('hidden', apiProtocol !== 'openai-responses');
 }
 
 function validateModelReasoning() {
@@ -1000,9 +980,8 @@ function collectReasoningConfig(): ReasoningConfig | undefined {
     return undefined;
   }
 
-  const modelInput = document.getElementById('agent-model') as HTMLInputElement;
-  const model = modelInput?.value.trim() || '';
-  const provider = inferProviderFromModel(model);
+  const apiProtocol = getSelectedApiProtocol();
+  const provider = providerForApiProtocol(apiProtocol);
 
   const config: ReasoningConfig = {
     enabled: true,
@@ -1015,8 +994,10 @@ function collectReasoningConfig(): ReasoningConfig | undefined {
       config.openai = {
         reasoningEffort: (document.getElementById('reasoning-effort') as HTMLSelectElement)
           ?.value as 'minimal' | 'low' | 'medium' | 'high',
-        reasoningSummary: (document.getElementById('reasoning-summary') as HTMLSelectElement)
-          ?.value as 'auto' | 'detailed' | undefined,
+        ...(apiProtocol === 'openai-responses' && {
+          reasoningSummary: (document.getElementById('reasoning-summary') as HTMLSelectElement)
+            ?.value as 'auto' | 'detailed' | undefined,
+        }),
       };
       break;
 

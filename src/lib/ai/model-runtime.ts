@@ -2,7 +2,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { JSONValue, LanguageModel } from 'ai';
-import type { AgentConfigV2 } from '../storage/config-migration';
+import type { AgentConfig } from '../storage/config';
 import type { ApiProtocol } from './protocol';
 
 export type ProviderOptions = Record<string, Record<string, JSONValue>>;
@@ -13,7 +13,7 @@ export interface ModelRuntime {
   providerOptions?: ProviderOptions;
 }
 
-function buildOpenAIResponsesOptions(agent: AgentConfigV2): ProviderOptions {
+function buildOpenAIResponsesOptions(agent: AgentConfig): ProviderOptions {
   const options: Record<string, JSONValue> = { store: false };
   const reasoning = agent.reasoning?.enabled ? agent.reasoning.openai : undefined;
 
@@ -27,7 +27,7 @@ function buildOpenAIResponsesOptions(agent: AgentConfigV2): ProviderOptions {
   return { openai: options };
 }
 
-function buildOpenAIChatOptions(agent: AgentConfigV2): ProviderOptions | undefined {
+function buildOpenAIChatOptions(agent: AgentConfig): ProviderOptions | undefined {
   const reasoning = agent.reasoning?.enabled ? agent.reasoning.openai : undefined;
   if (!reasoning) return undefined;
 
@@ -38,7 +38,7 @@ function buildOpenAIChatOptions(agent: AgentConfigV2): ProviderOptions | undefin
   };
 }
 
-function buildAnthropicOptions(agent: AgentConfigV2): ProviderOptions | undefined {
+function buildAnthropicOptions(agent: AgentConfig): ProviderOptions | undefined {
   const reasoning = agent.reasoning?.enabled ? agent.reasoning.anthropic : undefined;
   if (!reasoning) return undefined;
 
@@ -52,7 +52,7 @@ function buildAnthropicOptions(agent: AgentConfigV2): ProviderOptions | undefine
   };
 }
 
-function buildGoogleOptions(agent: AgentConfigV2): ProviderOptions | undefined {
+function buildGoogleOptions(agent: AgentConfig): ProviderOptions | undefined {
   const reasoning = agent.reasoning?.enabled ? agent.reasoning.google : undefined;
   if (!reasoning) return undefined;
 
@@ -70,7 +70,7 @@ function buildGoogleOptions(agent: AgentConfigV2): ProviderOptions | undefined {
  * Construct the SDK model and protocol-owned request options without issuing a
  * request. The exhaustive switch is the only transport-selection authority.
  */
-export function createModelRuntime(agent: AgentConfigV2): ModelRuntime {
+export function createModelRuntime(agent: AgentConfig): ModelRuntime {
   switch (agent.apiProtocol) {
     case 'openai-responses': {
       const openai = createOpenAI({

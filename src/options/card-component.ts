@@ -155,6 +155,7 @@ export interface ModalFooterConfig {
 export function setupModalFooter(config: ModalFooterConfig): void {
   const modal = document.getElementById(config.modalId);
   if (!modal) return;
+  clearModalStatus(config.modalId);
 
   const footer = modal.querySelector('.modal-footer');
   if (!footer) return;
@@ -202,8 +203,22 @@ export function setupModalFooter(config: ModalFooterConfig): void {
   footer.appendChild(saveBtn);
 }
 
+const modalStatusTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function clearModalStatus(modalId: string): void {
+  const existingTimeout = modalStatusTimeouts.get(modalId);
+  if (existingTimeout !== undefined) clearTimeout(existingTimeout);
+  modalStatusTimeouts.delete(modalId);
+
+  const statusEl = document.getElementById(`${modalId}-status`);
+  if (!statusEl) return;
+  statusEl.textContent = '';
+  statusEl.className = 'modal-status hidden';
+}
+
 /**
- * Show status message in modal
+ * Show status message in modal. A pending info state remains visible until the
+ * request settles; later results replace and cancel any earlier timer.
  */
 export function showModalStatus(
   modalId: string,
@@ -213,16 +228,21 @@ export function showModalStatus(
   const statusEl = document.getElementById(`${modalId}-status`);
   if (!statusEl) return;
 
+  const existingTimeout = modalStatusTimeouts.get(modalId);
+  if (existingTimeout !== undefined) clearTimeout(existingTimeout);
+
   statusEl.textContent = message;
   statusEl.className = `modal-status ${type}`;
+  if (type === 'info') return;
 
-  // Auto-hide after delay
-  setTimeout(
+  const timeout = setTimeout(
     () => {
       statusEl.classList.add('hidden');
+      modalStatusTimeouts.delete(modalId);
     },
     type === 'error' ? 5000 : 3000
   );
+  modalStatusTimeouts.set(modalId, timeout);
 }
 
 /**

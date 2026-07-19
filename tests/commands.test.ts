@@ -15,11 +15,25 @@ import { CommandRegistry } from '../src/lib/commands/registry';
 import { CommandProcessor } from '../src/lib/commands/processor';
 import type { SlashCommand } from '../src/types';
 
+function installCommandStorageMock(initialValue?: unknown): void {
+  vi.mocked(chrome.storage.local.set).mockResolvedValue();
+  vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
+    let storedValue = initialValue;
+    for (const [items] of vi.mocked(chrome.storage.local.set).mock.calls) {
+      if ('slashCommands' in items) storedValue = items.slashCommands;
+    }
+    const result = storedValue === undefined ? {} : { slashCommands: structuredClone(storedValue) };
+    callback?.(result);
+    return Promise.resolve(result);
+  });
+}
+
 describe('CommandRegistry', () => {
   let registry: CommandRegistry;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    installCommandStorageMock();
     registry = new CommandRegistry();
   });
 
@@ -62,8 +76,6 @@ describe('CommandRegistry', () => {
 
   describe('User Commands', () => {
     it('should save and retrieve user commands', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
-
       const command: SlashCommand = {
         name: 'test-cmd',
         instructions: 'Test instruction with $ARGUMENTS',
@@ -82,8 +94,6 @@ describe('CommandRegistry', () => {
     });
 
     it('should handle case-insensitive lookup for user commands', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
-
       const command: SlashCommand = {
         name: 'MyCommand',
         instructions: 'Test',
@@ -135,9 +145,23 @@ describe('CommandRegistry', () => {
       expect(registry.getUserCommands()).toHaveLength(0);
     });
 
-    it('should delete user commands', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
+    it('fails closed instead of retaining stale commands after a malformed reload', async () => {
+      await registry.saveUserCommand({
+        name: 'stale-command',
+        instructions: 'Do not retain',
+        isBuiltin: false,
+        createdAt: Date.now(),
+      });
+      vi.mocked(chrome.storage.local.get).mockResolvedValue({
+        slashCommands: { userCommands: [null] },
+      } as never);
 
+      await registry.loadUserCommands();
+
+      expect(registry.getUserCommands()).toEqual([]);
+    });
+
+    it('should delete user commands', async () => {
       const command: SlashCommand = {
         name: 'to-delete',
         instructions: 'Delete me',
@@ -157,8 +181,6 @@ describe('CommandRegistry', () => {
     });
 
     it('should update existing command', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
-
       const original: SlashCommand = {
         name: 'update-me',
         instructions: 'Original',
@@ -243,8 +265,6 @@ describe('CommandRegistry', () => {
 
   describe('getAllCommands', () => {
     it('should return both built-in and user commands', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
-
       registry.registerBuiltins({
         settings: vi.fn(),
         help: vi.fn(),
@@ -265,8 +285,6 @@ describe('CommandRegistry', () => {
     });
 
     it('should sort with built-ins first, then alphabetical', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
-
       registry.registerBuiltins({
         zulu: vi.fn(),
         alpha: vi.fn(),
@@ -305,8 +323,6 @@ describe('CommandRegistry', () => {
     });
 
     it('should return false for existing user commands', async () => {
-      vi.mocked(chrome.storage.local.set).mockResolvedValue();
-
       await registry.saveUserCommand({
         name: 'taken',
         instructions: 'Test',
@@ -584,6 +600,7 @@ describe('Integration Tests', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    installCommandStorageMock();
     registry = new CommandRegistry();
     processor = new CommandProcessor(registry);
   });
@@ -742,6 +759,7 @@ describe('Edge Cases', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    installCommandStorageMock();
     registry = new CommandRegistry();
     processor = new CommandProcessor(registry);
   });

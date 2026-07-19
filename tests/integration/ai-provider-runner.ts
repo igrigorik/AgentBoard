@@ -2,7 +2,7 @@ import { streamText, tool } from 'ai';
 import { z } from 'zod';
 import { createModelRuntime } from '../../src/lib/ai/model-runtime';
 import type { ApiProtocol } from '../../src/lib/ai/protocol';
-import type { AgentConfigV2 } from '../../src/lib/storage/config-migration';
+import type { AgentConfig } from '../../src/lib/storage/config';
 import {
   AI_INTEGRATION_TARGETS,
   type AIIntegrationTargetDefinition,
@@ -23,7 +23,7 @@ export interface ResolvedAIIntegrationTarget {
   id: AIIntegrationTargetId;
   kind: 'direct' | 'proxy';
   apiProtocol: ApiProtocol;
-  provider: AgentConfigV2['provider'];
+  provider: AgentConfig['provider'];
   endpoint?: string;
   model: string;
   apiKey: string;
@@ -173,7 +173,7 @@ async function executeAIIntegrationTarget(
   target: ResolvedAIIntegrationTarget,
   abortSignal: AbortSignal
 ): Promise<'tool-call'> {
-  const agent: AgentConfigV2 = {
+  const agent: AgentConfig = {
     id: `integration-${target.id}`,
     name: target.id,
     provider: target.provider,

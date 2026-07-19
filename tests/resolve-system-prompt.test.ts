@@ -17,6 +17,7 @@ function makeAgent(systemPrompt: string): AgentConfig {
     id: 'test-1',
     name: 'Test Agent',
     provider: 'openai',
+    apiProtocol: 'openai-responses',
     model: 'gpt-4',
     systemPrompt,
     temperature: 0.7,

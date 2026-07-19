@@ -14,7 +14,7 @@ import log from '../logger';
 import { getRemoteMCPManager } from '../mcp/manager';
 import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
-import { ConfigStorage } from '../storage/config'; // Still needed for remote MCP tools
+import { ConfigStorage, type StorageConfig } from '../storage/config';
 import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
 import { createNavigateTool, NAVIGATE_TOOL_NAME } from './tools/navigate';
 import { calculateSpecificityScore } from './tool-patterns';
@@ -371,7 +371,7 @@ export class ToolRegistryManager {
   /**
    * Load remote MCP server tools
    */
-  async loadRemoteTools(): Promise<void> {
+  async loadRemoteTools(configSnapshot?: StorageConfig): Promise<void> {
     try {
       // First, remove any existing remote tools
       const remoteTools: string[] = [];
@@ -385,8 +385,7 @@ export class ToolRegistryManager {
       }
 
       // Get current config and ensure MCP manager is connected
-      const configStorage = ConfigStorage.getInstance();
-      const config = await configStorage.get();
+      const config = configSnapshot ?? (await ConfigStorage.getInstance().get());
 
       if (!config?.mcpConfig?.mcpServers || Object.keys(config.mcpConfig.mcpServers).length === 0) {
         log.warn('[ToolRegistry] No MCP servers configured');

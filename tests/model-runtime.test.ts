@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentConfigV2 } from '../src/lib/storage/config-migration';
+import type { AgentConfig } from '../src/lib/storage/config';
 
 const mocks = vi.hoisted(() => {
   const responsesModel = { transport: 'responses' };
@@ -35,7 +35,7 @@ vi.mock('@ai-sdk/google', () => ({
 
 import { createModelRuntime } from '../src/lib/ai/model-runtime';
 
-function createAgent(overrides: Partial<AgentConfigV2> = {}): AgentConfigV2 {
+function createAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
     id: 'agent-1',
     name: 'Agent',
@@ -195,7 +195,7 @@ describe('createModelRuntime', () => {
     const agent = {
       ...createAgent(),
       apiProtocol: 'unknown-protocol',
-    } as unknown as AgentConfigV2;
+    } as unknown as AgentConfig;
 
     expect(() => createModelRuntime(agent)).toThrow(
       'Unsupported agent API protocol: unknown-protocol'

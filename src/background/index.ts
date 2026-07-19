@@ -5,7 +5,12 @@
 
 import log from '../lib/logger';
 import { AIClient } from '../lib/ai/client';
-import { ConfigStorage, type StorageConfig } from '../lib/storage/config';
+import {
+  ConfigStorage,
+  ConfigValidationError,
+  configValidationMessage,
+  type StorageConfig,
+} from '../lib/storage/config';
 import { getTabManager } from '../lib/webmcp/lifecycle';
 import { getToolRegistry } from '../lib/webmcp/tool-registry';
 import type { CoreMessage } from 'ai';
@@ -71,15 +76,6 @@ async function setupContextMenu() {
 // Extension installation/update lifecycle
 chrome.runtime.onInstalled.addListener(async (details) => {
   log.info('[Background] Extension installed/updated:', details.reason);
-
-  // Set default configuration on first install
-  if (details.reason === 'install') {
-    // Use the default config from ConfigStorage (single source of truth)
-    const defaultConfig = await configStorage.get();
-    chrome.storage.local.set({
-      config: defaultConfig,
-    });
-  }
 
   // Log available agents after installation/update
   logAvailableAgents();
@@ -308,17 +304,11 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
 
   switch (request.type) {
     case 'GET_CONFIG':
-      chrome.storage.local.get(['config'], (result) => {
-        sendResponse(result.config || {});
-      });
+      configStorage
+        .get()
+        .then((config) => sendResponse(config))
+        .catch(() => sendResponse({ error: 'CONFIGURATION_UNAVAILABLE' }));
       return true; // Keep channel open for async response
-
-    case 'SAVE_CONFIG':
-      chrome.storage.local.set({ config: request.config }, async () => {
-        // Config saved - agents will be loaded on-demand
-        sendResponse({ success: true });
-      });
-      return true;
 
     case 'WEBMCP_SCRIPTS_UPDATED':
       // Hot reload: rebuild built-in and user WebMCP registrations in all tabs
@@ -345,7 +335,10 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
         } catch (error) {
           sendResponse({
             success: false,
-            message: error instanceof Error ? error.message : 'Test failed',
+            message:
+              error instanceof ConfigValidationError
+                ? configValidationMessage(error)
+                : 'Connection test failed. Verify the Connection API and settings.',
           });
         }
       })();
@@ -355,20 +348,19 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       // Test new agent connection with provided details
       aiClient
         .testConnectionWithDetails({
-          provider: request.provider,
+          apiProtocol: request.apiProtocol,
           apiKey: request.apiKey,
           model: request.model,
           endpoint: request.endpoint,
-          openaiCompatible: request.openaiCompatible,
         })
         .then((result) => {
           sendResponse(result);
         })
-        .catch((error) => {
-          log.error('[Background] TEST_NEW_CONNECTION error:', error);
+        .catch(() => {
+          log.error('[Background] TEST_NEW_CONNECTION failed');
           sendResponse({
             success: false,
-            message: error instanceof Error ? error.message : 'Test failed',
+            message: 'Connection test failed. Verify the selected Connection API and settings.',
           });
         });
       return true;
@@ -821,10 +813,18 @@ chrome.runtime.onConnect.addListener((port) => {
             },
           });
         } catch (error) {
-          log.error('[Background] Caught error in stream handler:', error);
+          log.error(
+            '[Background] Stream handler failed:',
+            error instanceof ConfigValidationError ? error.code : 'STREAM_FAILED'
+          );
           port.postMessage({
             type: 'STREAM_ERROR',
-            error: error instanceof Error ? error.message : 'Stream failed',
+            error:
+              error instanceof ConfigValidationError
+                ? configValidationMessage(error)
+                : error instanceof Error
+                  ? error.message
+                  : 'Stream failed',
           });
           connection.isStreaming = false;
         }
@@ -843,27 +843,31 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // Listen for config changes from Options page
-configStorage.onChange(async (newConfig: StorageConfig) => {
-  await toolsReady; // Ensure initial load completes before reload
-  const agents = await aiClient.getAvailableAgents();
-  log.debug(
-    '[Background] Config updated - available agents:',
-    agents.map((a) => `${a.name} (${a.provider})`)
-  );
+configStorage.onChange(
+  async (newConfig: StorageConfig) => {
+    await toolsReady; // Ensure initial load completes before reload
+    log.debug(
+      '[Background] Config updated - available agents:',
+      newConfig.agents.map((agent) => `${agent.name} (${agent.provider})`)
+    );
 
-  const toolRegistry = getToolRegistry();
+    const toolRegistry = getToolRegistry();
 
-  // Re-register system tools if builtin script states changed
-  // This handles enable/disable of fetch_url tool
-  if (newConfig.builtinScripts !== undefined) {
-    log.debug('[Background] Re-registering system tools after builtin config change');
-    await toolRegistry.registerSystemTools();
+    // Re-register system tools if builtin script states changed
+    // This handles enable/disable of fetch_url tool
+    if (newConfig.builtinScripts !== undefined) {
+      log.debug('[Background] Re-registering system tools after builtin config change');
+      await toolRegistry.registerSystemTools();
+    }
+
+    // Reload remote MCP tools
+    log.debug('[Background] Reloading MCP tools after config change');
+    await toolRegistry.loadRemoteTools(newConfig);
+  },
+  (error) => {
+    log.error('[Background] Ignoring invalid stored configuration:', error.code);
   }
-
-  // Reload remote MCP tools
-  log.debug('[Background] Reloading MCP tools after config change');
-  await toolRegistry.loadRemoteTools();
-});
+);
 
 // Initialization gate — handlers that need tools await this to avoid
 // race between async MCP connection and immediate message handlers

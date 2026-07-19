@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { generateDuplicateName } from '../src/options/card-component';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { generateDuplicateName, showModalStatus } from '../src/options/card-component';
+
+afterEach(() => {
+  vi.useRealTimers();
+  document.body.innerHTML = '';
+});
 
 describe('generateDuplicateName', () => {
   it('appends (1) for first duplicate', () => {
@@ -28,5 +33,30 @@ describe('generateDuplicateName', () => {
   it('handles names with special characters', () => {
     const existing = ['Code-Assistant_v2'];
     expect(generateDuplicateName('Code-Assistant_v2', existing)).toBe('Code-Assistant_v2 (1)');
+  });
+});
+
+describe('showModalStatus', () => {
+  it('keeps a pending status visible until a result replaces it', () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<div id="agent-modal-status" class="modal-status hidden"></div>';
+
+    showModalStatus('agent-modal', 'Testing...', 'info');
+    vi.advanceTimersByTime(10_000);
+
+    expect(document.getElementById('agent-modal-status')?.classList.contains('hidden')).toBe(false);
+  });
+
+  it('starts the hide timer from the latest result', () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<div id="agent-modal-status" class="modal-status hidden"></div>';
+
+    showModalStatus('agent-modal', 'First failure', 'error');
+    vi.advanceTimersByTime(2_000);
+    showModalStatus('agent-modal', 'Success', 'success');
+    vi.advanceTimersByTime(2_999);
+    expect(document.getElementById('agent-modal-status')?.classList.contains('hidden')).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(document.getElementById('agent-modal-status')?.classList.contains('hidden')).toBe(true);
   });
 });

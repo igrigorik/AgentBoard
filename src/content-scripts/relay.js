@@ -10,36 +10,27 @@
    * Inline logger that respects user's log level configuration
    *
    * Strategy: Content scripts run in isolated context and can't import ES modules,
-   * so we inline a lightweight logger that reads from chrome.storage directly.
-   * This is the only content script that needs config-aware logging (MAIN world
-   * scripts use raw console.log for dev debugging).
-   *
-   * Trade-off: ~25 lines of inlined code vs. complex build-time injection or
-   * message-passing overhead. Chose inline for simplicity and self-containment.
+   * so this lightweight logger asks the background's validated storage boundary for
+   * configuration. It never trusts a partial chrome.storage record directly.
    */
   const logger = (() => {
     const levels = { silent: 0, error: 1, warn: 2, info: 3, debug: 4, trace: 5 };
     let currentLevel = levels.warn; // Default: warn
 
-    // Read user's log level from storage
-    if (typeof chrome !== 'undefined' && chrome.storage?.local?.get) {
-      chrome.storage.local.get(['config'], (result) => {
-        if (result.config?.logLevel && levels[result.config.logLevel] !== undefined) {
-          currentLevel = levels[result.config.logLevel];
-        }
+    const refreshLevel = () => {
+      if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+      chrome.runtime.sendMessage({ type: 'GET_CONFIG' }, (config) => {
+        if (chrome.runtime.lastError) return;
+        const nextLevel = levels[config?.logLevel];
+        currentLevel = nextLevel === undefined ? levels.warn : nextLevel;
       });
+    };
 
-      // Listen for real-time changes from Options UI
-      if (chrome.storage?.onChanged?.addListener) {
-        chrome.storage.onChanged.addListener((changes, area) => {
-          if (area === 'local' && changes.config?.newValue?.logLevel) {
-            const newLevel = levels[changes.config.newValue.logLevel];
-            if (newLevel !== undefined) {
-              currentLevel = newLevel;
-            }
-          }
-        });
-      }
+    refreshLevel();
+    if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.config) refreshLevel();
+      });
     }
 
     return {
@@ -114,11 +105,14 @@
         this.port.onMessage.addListener((msg) => {
           if (msg?.type === 'webmcp' && msg?.payload) {
             // Forward to MAIN world via postMessage
-            window.postMessage({
-              source: 'webmcp-bridge',
-              jsonrpc: JSONRPC,
-              ...msg.payload
-            }, '*');
+            window.postMessage(
+              {
+                source: 'webmcp-bridge',
+                jsonrpc: JSONRPC,
+                ...msg.payload,
+              },
+              '*'
+            );
 
             logger.log('[WebMCP Relay] Forwarded to MAIN:', msg.payload.method || 'response');
           }
@@ -145,7 +139,6 @@
 
         // Flush any pending messages
         this.flushPendingMessages();
-
       } catch (err) {
         logger.error('[WebMCP Relay] Connection failed:', err);
 
@@ -268,13 +261,15 @@
           type: 'webmcp',
           payload: payload,
           tabUrl: window.location.href,
-          timestamp: Date.now()
+          timestamp: Date.now(),
         };
 
         this.sendToBackground(msg);
 
-        logger.log('[WebMCP Relay] Forwarded to background:',
-          payload.method || `response ${payload.id || '(no id)'}`);
+        logger.log(
+          '[WebMCP Relay] Forwarded to background:',
+          payload.method || `response ${payload.id || '(no id)'}`
+        );
       });
 
       logger.log('[WebMCP Relay] Message relay initialized');

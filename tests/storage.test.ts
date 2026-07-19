@@ -1,350 +1,342 @@
-/**
- * Test for agent-centric storage configuration
- */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  CONFIG_SCHEMA_VERSION,
+  ConfigStorage,
+  ConfigValidationError,
+  DEFAULT_CONFIG,
+  parseStorageConfig,
+  type AgentConfig,
+} from '../src/lib/storage/config';
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ConfigStorage, type AgentConfig } from '../src/lib/storage/config';
+type Stored = { config?: unknown };
+
+function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
+  return {
+    id: 'agent-1',
+    name: 'Agent',
+    provider: 'openai',
+    apiProtocol: 'openai-responses',
+    model: 'model',
+    systemPrompt: '',
+    temperature: 0.7,
+    maxTokens: 1000,
+    ...overrides,
+  };
+}
+
+function current(overrides: Record<string, unknown> = {}): unknown {
+  return { schemaVersion: 2, agents: [agent()], defaultAgentId: 'agent-1', ...overrides };
+}
+
+function useStorage(initial: Stored, readDelay = 0): Stored {
+  const state = initial;
+  vi.mocked(chrome.storage.local.get).mockImplementation(async () => {
+    const snapshot = structuredClone(state);
+    if (readDelay > 0) await new Promise((resolve) => setTimeout(resolve, readDelay));
+    return snapshot;
+  });
+  vi.mocked(chrome.storage.local.set).mockImplementation(async (items) => {
+    Object.assign(state, structuredClone(items));
+  });
+  return state;
+}
+
+describe('schema-v2 parser', () => {
+  it('fully migrates every v1 agent while preserving harmless unknown fields', () => {
+    const legacy = {
+      agents: [
+        { ...agent(), apiProtocol: undefined, openaiCompatible: true },
+        { ...agent({ id: 'agent-2', provider: 'anthropic' }), apiProtocol: undefined },
+      ],
+      defaultAgentId: 'agent-2',
+      harmless: { retained: true },
+    };
+    const parsed = parseStorageConfig(legacy);
+    expect(parsed.migrated).toBe(true);
+    expect(parsed.config.schemaVersion).toBe(2);
+    expect(parsed.config.agents.map((a) => a.apiProtocol)).toEqual([
+      'openai-chat-completions',
+      'anthropic-messages',
+    ]);
+    expect(parsed.config.agents[0]).not.toHaveProperty('openaiCompatible');
+    expect(parsed.config).toHaveProperty('harmless.retained', true);
+  });
+
+  it('validates complete v2 and never infers its protocol', () => {
+    expect(parseStorageConfig(current()).migrated).toBe(false);
+    expect(() =>
+      parseStorageConfig(current({ agents: [{ ...agent(), apiProtocol: undefined }] }))
+    ).toThrowError(ConfigValidationError);
+    expect(() =>
+      parseStorageConfig(current({ agents: [{ ...agent(), openaiCompatible: false }] }))
+    ).toThrowError(ConfigValidationError);
+  });
+
+  it.each([
+    { schemaVersion: 3, agents: [] },
+    { schemaVersion: '2', agents: [] },
+    current({ agents: [{ ...agent(), maxSteps: 0 }] }),
+    current({ agents: [{ ...agent(), temperature: -0.1 }] }),
+    current({ agents: [{ ...agent(), temperature: 2.1 }] }),
+    current({ agents: [agent(), agent()] }),
+    current({ defaultAgentId: 'missing' }),
+    current({ mcpConfig: { mcpServers: { a: { transport: 'stdio', url: 'secret' } } } }),
+    current({ userScripts: [{ id: 'x', code: 4, enabled: true }] }),
+    current({ builtinScripts: [{ id: 'x', enabled: 'yes' }] }),
+    current({ logLevel: 'verbose' }),
+  ])('rejects malformed/future config without exposing values', (value) => {
+    expect(() => parseStorageConfig(value)).toThrowError(/^[A-Z_]+$/);
+  });
+
+  it('isolates validated output from the untrusted input object', () => {
+    const input = current({
+      agents: [
+        agent({
+          reasoning: { enabled: true, openai: { reasoningEffort: 'medium' } },
+        }),
+      ],
+    }) as { agents: AgentConfig[] };
+    const parsed = parseStorageConfig(input);
+
+    input.agents[0].reasoning!.openai!.reasoningEffort = 'high';
+
+    expect(parsed.config.agents[0].reasoning?.openai?.reasoningEffort).toBe('medium');
+  });
+
+  it('allows descriptive provider metadata to differ from proxy wire protocol', () => {
+    const parsed = parseStorageConfig(
+      current({
+        agents: [agent({ provider: 'anthropic', apiProtocol: 'openai-responses' })],
+      })
+    );
+    expect(parsed.config.agents[0]).toMatchObject({
+      provider: 'anthropic',
+      apiProtocol: 'openai-responses',
+    });
+  });
+});
 
 describe('ConfigStorage', () => {
-  let configStorage: ConfigStorage;
+  let storage: ConfigStorage;
 
   beforeEach(() => {
-    // Reset mocks
     vi.clearAllMocks();
-
-    // Get instance
-    configStorage = ConfigStorage.getInstance();
+    storage = ConfigStorage.getInstance();
   });
 
-  it('should return default config when storage is empty', async () => {
-    // Mock empty storage
-    vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-      if (callback) callback({});
-      return Promise.resolve({});
-    });
-
-    const config = await configStorage.get();
-
-    expect(config.agents).toEqual([]);
-    expect(config.defaultAgentId).toBeUndefined();
-    expect(config.mcpConfig).toBeUndefined();
+  it('returns a fresh default without writing for missing storage', async () => {
+    useStorage({});
+    const first = await storage.get();
+    first.logLevel = 'debug';
+    expect(await storage.get()).toEqual(DEFAULT_CONFIG);
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
-  it('should return agents from storage', async () => {
-    const testAgent: AgentConfig = {
-      id: 'test-1',
-      name: 'Test Agent',
-      provider: 'openai',
-      apiKey: 'sk-test',
-      model: 'gpt-4',
-      systemPrompt: 'Test prompt',
-      temperature: 0.7,
-      maxTokens: 2000,
-    };
-
-    // Mock config with agents
-    vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-      const result = {
-        config: {
-          agents: [testAgent],
-          defaultAgentId: 'test-1',
-        },
-      };
-      if (callback) callback(result);
-      return Promise.resolve(result);
-    });
-
-    const config = await configStorage.get();
-
-    expect(config.agents).toHaveLength(1);
-    expect(config.agents[0]).toEqual(testAgent);
-    expect(config.defaultAgentId).toBe('test-1');
+  it('migrates v1 exactly once and a second read does not write', async () => {
+    useStorage({ config: { agents: [{ ...agent(), apiProtocol: undefined }] } });
+    const migrated = await storage.get();
+    expect(migrated.agents[0].apiProtocol).toBe('openai-responses');
+    expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
+    await storage.get();
+    expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
   });
 
-  it('should add new agent', async () => {
-    // Mock empty storage initially
-    vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-      if (callback) callback({});
-      return Promise.resolve({});
-    });
-
-    const agentData = {
-      name: 'Test Agent',
-      provider: 'openai' as const,
-      apiKey: 'sk-test',
-      model: 'gpt-4',
-      systemPrompt: 'Test prompt',
-      temperature: 0.7,
-      maxTokens: 2000,
-    };
-
-    const agentId = await configStorage.addAgent(agentData);
-
-    expect(agentId).toBeDefined();
-    expect(chrome.storage.local.set).toHaveBeenCalledWith({
-      config: expect.objectContaining({
-        agents: expect.arrayContaining([
-          expect.objectContaining({
-            id: agentId,
-            name: 'Test Agent',
-            provider: 'openai',
-          }),
-        ]),
-        defaultAgentId: agentId, // First agent becomes default
-      }),
-    });
+  it('serializes concurrent reads into one migration write', async () => {
+    useStorage({ config: { agents: [{ ...agent(), apiProtocol: undefined }] } });
+    const [a, b] = await Promise.all([storage.get(), storage.get()]);
+    expect(a).toEqual(b);
+    expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
   });
 
-  it('should get agent by ID', async () => {
-    const testAgent: AgentConfig = {
-      id: 'test-1',
-      name: 'Test Agent',
-      provider: 'openai',
-      apiKey: 'sk-test',
-      model: 'gpt-4',
-      systemPrompt: 'Test prompt',
-      temperature: 0.7,
-      maxTokens: 2000,
-    };
+  it.each([{ config: { schemaVersion: 9, agents: [] } }, { config: { agents: 'bad' } }])(
+    'does not write rejected stored config',
+    async (stored) => {
+      useStorage(stored);
+      await expect(storage.get()).rejects.toThrow(ConfigValidationError);
+      expect(chrome.storage.local.set).not.toHaveBeenCalled();
+    }
+  );
 
-    // Mock config with agents
-    vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-      const result = {
-        config: {
-          agents: [testAgent],
-        },
-      };
-      if (callback) callback(result);
-      return Promise.resolve(result);
-    });
+  it('set merges v2 but rejects an explicit non-v2 schema before writing', async () => {
+    const state = useStorage({ config: current() });
 
-    const agent = await configStorage.getAgent('test-1');
+    await expect(storage.set({ schemaVersion: 1 as 2 })).rejects.toThrow(ConfigValidationError);
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
 
-    expect(agent).toEqual(testAgent);
+    await storage.set({ logLevel: 'debug' });
+    expect(state.config).toMatchObject({ schemaVersion: 2, logLevel: 'debug' });
   });
 
-  it('should return null for non-existent agent', async () => {
-    // Mock empty storage
-    vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-      if (callback) callback({});
-      return Promise.resolve({});
+  it('CRUD writes schema and explicit protocol, and reset writes a fresh default', async () => {
+    const state = useStorage({});
+    const { id: _id, ...newAgent } = agent();
+    const id = await storage.addAgent(newAgent);
+    expect(await storage.getAgent(id)).toMatchObject({
+      id,
+      apiProtocol: 'openai-responses',
     });
-
-    const agent = await configStorage.getAgent('non-existent');
-
-    expect(agent).toBeNull();
+    expect(await storage.getAgent('missing')).toBeNull();
+    expect(state.config).toMatchObject({
+      schemaVersion: CONFIG_SCHEMA_VERSION,
+      agents: [expect.objectContaining({ apiProtocol: 'openai-responses' })],
+    });
+    await storage.reset();
+    expect(state.config).toEqual(DEFAULT_CONFIG);
   });
 
-  it('should reset to default config', async () => {
-    await configStorage.reset();
+  it('serializes complete concurrent agent mutations without losing an update', async () => {
+    const state = useStorage({});
+    const { id: _id, ...newAgent } = agent();
 
-    expect(chrome.storage.local.set).toHaveBeenCalledWith({
-      config: expect.objectContaining({
-        agents: [],
-        defaultAgentId: undefined,
-        mcpConfig: undefined,
-      }),
-    });
+    await Promise.all([
+      storage.addAgent({ ...newAgent, name: 'First' }),
+      storage.addAgent({ ...newAgent, name: 'Second' }),
+    ]);
+
+    expect((state.config as { agents: AgentConfig[] }).agents.map(({ name }) => name)).toEqual([
+      'First',
+      'Second',
+    ]);
   });
 
-  it('should be a singleton', () => {
-    const instance1 = ConfigStorage.getInstance();
-    const instance2 = ConfigStorage.getInstance();
+  it('updates, selects, and deletes agents without changing their protocol', async () => {
+    useStorage({
+      config: current({ agents: [agent({ apiKey: 'secret-key' })] }),
+    });
+    await storage.updateAgent('agent-1', {
+      endpoint: 'https://gateway.example.test',
+      apiKey: undefined,
+      maxSteps: 12,
+    });
+    const updated = await storage.getAgent('agent-1');
+    expect(updated).toMatchObject({
+      apiProtocol: 'openai-responses',
+      endpoint: 'https://gateway.example.test',
+      maxSteps: 12,
+    });
+    expect(updated?.apiKey).toBeUndefined();
 
-    expect(instance1).toBe(instance2);
+    const { id: _id, ...second } = agent({ id: 'unused', name: 'Second' });
+    const secondId = await storage.addAgent(second);
+    await storage.setDefaultAgent(secondId);
+    expect((await storage.getDefaultAgent())?.id).toBe(secondId);
+
+    await storage.deleteAgent(secondId);
+    expect((await storage.getDefaultAgent())?.id).toBe('agent-1');
   });
 
-  describe('maxSteps configuration', () => {
-    it('should persist maxSteps when saving an agent', async () => {
-      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-        if (callback) callback({});
-        return Promise.resolve({});
-      });
+  it('serializes concurrent mutations across instances so one write cannot erase another', async () => {
+    useStorage({ config: current({ agents: [], defaultAgentId: undefined }) }, 5);
+    const otherStorage = new ConfigStorage();
+    const { id: _firstId, ...first } = agent({ id: 'unused-1', name: 'First' });
+    const { id: _secondId, ...second } = agent({ id: 'unused-2', name: 'Second' });
 
-      const agentData = {
-        name: 'Steps Agent',
-        provider: 'openai' as const,
-        apiKey: 'sk-test',
-        model: 'gpt-4',
-        systemPrompt: 'Test',
-        temperature: 0.7,
-        maxTokens: 2000,
-        maxSteps: 10,
-      };
+    const [firstId, secondId] = await Promise.all([
+      storage.addAgent(first),
+      otherStorage.addAgent(second),
+    ]);
 
-      await configStorage.addAgent(agentData);
-
-      expect(chrome.storage.local.set).toHaveBeenCalledWith({
-        config: expect.objectContaining({
-          agents: expect.arrayContaining([expect.objectContaining({ maxSteps: 10 })]),
-        }),
-      });
-    });
-
-    it('should load agent without maxSteps (backward compat)', async () => {
-      // Simulate a legacy config saved before maxSteps existed
-      const legacyAgent: AgentConfig = {
-        id: 'legacy-1',
-        name: 'Legacy Agent',
-        provider: 'openai',
-        apiKey: 'sk-test',
-        model: 'gpt-4',
-        systemPrompt: 'Test',
-        temperature: 0.7,
-        maxTokens: 2000,
-        // maxSteps intentionally missing
-      };
-
-      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-        const result = { config: { agents: [legacyAgent] } };
-        if (callback) callback(result);
-        return Promise.resolve(result);
-      });
-
-      const agent = await configStorage.getAgent('legacy-1');
-      expect(agent).toBeDefined();
-      // maxSteps is undefined — callers use ?? 5 fallback
-      expect(agent!.maxSteps).toBeUndefined();
-      expect(agent!.maxSteps ?? 10).toBe(10);
-    });
+    const config = await storage.get();
+    expect(config.agents.map(({ id }) => id).sort()).toEqual([firstId, secondId].sort());
   });
 
-  describe('Proxy URL and API Key validation', () => {
-    it('should accept agent with API key and no proxy', async () => {
-      // Mock empty storage initially
-      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-        if (callback) callback({});
-        return Promise.resolve({});
-      });
+  it('is a singleton', () => {
+    expect(ConfigStorage.getInstance()).toBe(storage);
+  });
 
-      const agentData = {
-        name: 'Test Agent',
-        provider: 'openai' as const,
-        apiKey: 'sk-test-key',
-        model: 'gpt-4',
-        systemPrompt: 'Test prompt',
-        temperature: 0.7,
-        maxTokens: 2000,
-      };
+  it('onChange serializes callbacks and fails closed for malformed/future values', async () => {
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
+    });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
+    });
+    const callback = vi.fn();
+    const onError = vi.fn();
+    storage.onChange(callback, onError);
+    listener?.({ config: { newValue: { schemaVersion: 3, agents: [] } } }, 'local');
+    expect(callback).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(expect.any(ConfigValidationError));
+    listener?.({ config: { newValue: current() } }, 'local');
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1));
+  });
 
-      await configStorage.addAgent(agentData);
+  it('onChange persists v1 before delivering the resulting v2 snapshot', async () => {
+    const state = useStorage({
+      config: { agents: [{ ...agent(), apiProtocol: undefined, openaiCompatible: true }] },
+    });
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
+    });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
+    });
+    const callback = vi.fn();
+    storage.onChange(callback);
 
-      expect(chrome.storage.local.set).toHaveBeenCalledWith({
-        config: expect.objectContaining({
-          agents: expect.arrayContaining([
-            expect.objectContaining({
-              apiKey: 'sk-test-key',
-              // endpoint should be undefined or not present
-            }),
-          ]),
-        }),
-      });
+    listener?.({ config: { newValue: state.config } }, 'local');
+    await vi.waitFor(() => expect(chrome.storage.local.set).toHaveBeenCalledTimes(1));
+    expect(callback).not.toHaveBeenCalled();
+
+    listener?.({ config: { newValue: state.config } }, 'local');
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1));
+    expect(callback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 2,
+        agents: [expect.objectContaining({ apiProtocol: 'openai-chat-completions' })],
+      })
+    );
+  });
+
+  it('onChange continues after a consumer error handler throws', async () => {
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
+    });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
+    });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const callback = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('callback secret'))
+      .mockResolvedValue();
+    storage.onChange(callback, () => {
+      throw new Error('handler secret');
     });
 
-    it('should accept agent with proxy URL and no API key', async () => {
-      // Mock empty storage initially
-      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-        if (callback) callback({});
-        return Promise.resolve({});
-      });
+    listener?.({ config: { newValue: current() } }, 'local');
+    listener?.({ config: { newValue: current() } }, 'local');
 
-      const agentData = {
-        name: 'Test Proxy Agent',
-        provider: 'openai' as const,
-        apiKey: undefined as any, // No API key (cast to bypass TS check in test)
-        endpoint: 'http://localhost:8080', // Has proxy URL
-        model: 'gpt-4',
-        systemPrompt: 'Test prompt',
-        temperature: 0.7,
-        maxTokens: 2000,
-      };
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(2));
+    expect(consoleError).toHaveBeenCalledWith('[ConfigStorage] Config change error handler failed');
+    consoleError.mockRestore();
+  });
 
-      await configStorage.addAgent(agentData);
-
-      expect(chrome.storage.local.set).toHaveBeenCalledWith({
-        config: expect.objectContaining({
-          agents: expect.arrayContaining([
-            expect.objectContaining({
-              endpoint: 'http://localhost:8080',
-              // apiKey should be undefined
-            }),
-          ]),
-        }),
-      });
+  it('onChange reports rejected async callbacks instead of leaking rejections', async () => {
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
     });
-
-    it('should accept agent with both proxy URL and API key', async () => {
-      // Mock empty storage initially
-      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-        if (callback) callback({});
-        return Promise.resolve({});
-      });
-
-      const agentData = {
-        name: 'Test Full Agent',
-        provider: 'anthropic' as const,
-        apiKey: 'sk-ant-test', // Has API key
-        endpoint: 'https://proxy.example.com', // Also has proxy
-        model: 'claude-3',
-        systemPrompt: 'Test prompt',
-        temperature: 0.7,
-        maxTokens: 2000,
-      };
-
-      await configStorage.addAgent(agentData);
-
-      expect(chrome.storage.local.set).toHaveBeenCalledWith({
-        config: expect.objectContaining({
-          agents: expect.arrayContaining([
-            expect.objectContaining({
-              apiKey: 'sk-ant-test',
-              endpoint: 'https://proxy.example.com',
-            }),
-          ]),
-        }),
-      });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
     });
+    const onError = vi.fn();
+    storage.onChange(async () => Promise.reject(new Error('callback secret')), onError);
 
-    it('should handle agent updates with proxy URL changes', async () => {
-      const existingAgent: AgentConfig = {
-        id: 'test-1',
-        name: 'Test Agent',
-        provider: 'openai',
-        apiKey: 'sk-test',
-        model: 'gpt-4',
-        systemPrompt: 'Test prompt',
-        temperature: 0.7,
-        maxTokens: 2000,
-      };
+    listener?.({ config: { newValue: current() } }, 'local');
 
-      // Mock config with existing agent
-      vi.mocked(chrome.storage.local.get).mockImplementation((_keys, callback) => {
-        const result = {
-          config: {
-            agents: [existingAgent],
-          },
-        };
-        if (callback) callback(result);
-        return Promise.resolve(result);
-      });
-
-      // Update agent to use proxy URL and remove API key
-      await configStorage.updateAgent('test-1', {
-        apiKey: undefined,
-        endpoint: 'http://proxy.local:3000',
-      });
-
-      expect(chrome.storage.local.set).toHaveBeenCalledWith({
-        config: expect.objectContaining({
-          agents: expect.arrayContaining([
-            expect.objectContaining({
-              id: 'test-1',
-              apiKey: undefined,
-              endpoint: 'http://proxy.local:3000',
-            }),
-          ]),
-        }),
-      });
-    });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(expect.any(ConfigValidationError)));
+    expect((onError.mock.calls[0][0] as ConfigValidationError).message).toBe('INVALID_CONFIG');
   });
 });

@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { jsonSchemaToZod } from '../schema/jsonschema-to-zod';
 import type { Tool as MCPTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { getRemoteMCPManager } from './manager';
+import { ConfigStorage } from '../storage/config';
 import type { JSONSchema7 } from 'json-schema';
 
 /**
@@ -126,20 +127,17 @@ export async function initializeMCPTools() {
   try {
     log.info('[Tool Bridge] Initializing MCP tools...');
 
-    // Use chrome.storage directly in service worker context
-    const result = await chrome.storage.local.get(['config']);
-    const config = result.config || { agents: [], mcpConfig: undefined };
+    const config = await ConfigStorage.getInstance().get();
+    const servers = config.mcpConfig?.mcpServers;
+    const serverNames = servers ? Object.keys(servers) : [];
 
     log.info('[Tool Bridge] Retrieved config:', {
       hasMcpConfig: !!config.mcpConfig,
-      serverCount: config.mcpConfig?.mcpServers?.length || 0,
+      serverCount: serverNames.length,
     });
 
-    if (config.mcpConfig && config.mcpConfig.mcpServers.length > 0) {
-      log.info(
-        '[Tool Bridge] Loading MCP servers:',
-        config.mcpConfig.mcpServers.map((s: { name: string }) => s.name)
-      );
+    if (config.mcpConfig && serverNames.length > 0) {
+      log.info('[Tool Bridge] Loading MCP servers:', serverNames);
 
       const remoteMCPManager = getRemoteMCPManager();
       const statuses = await remoteMCPManager.loadConfig(config.mcpConfig);

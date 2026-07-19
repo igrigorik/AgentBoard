@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { AIClient } from '../src/lib/ai/client';
 import { createModelRuntime } from '../src/lib/ai/model-runtime';
 import type { ApiProtocol } from '../src/lib/ai/protocol';
-import type { AgentConfigV2 } from '../src/lib/storage/config-migration';
+import type { AgentConfig } from '../src/lib/storage/config';
 import {
   eventSSE,
   sse,
@@ -123,8 +123,8 @@ const responseFixtures = {
 function createAgent(
   apiProtocol: ApiProtocol,
   endpoint: string,
-  overrides: Partial<AgentConfigV2> = {}
-): AgentConfigV2 {
+  overrides: Partial<AgentConfig> = {}
+): AgentConfig {
   return {
     id: 'wire-agent',
     name: 'Wire Agent',
@@ -143,7 +143,7 @@ function createAgent(
 async function captureWireRequest(
   apiProtocol: ApiProtocol,
   chunks: readonly string[],
-  overrides: Partial<AgentConfigV2> = {},
+  overrides: Partial<AgentConfig> = {},
   pathPrefix = '/nested/v1/'
 ): Promise<CapturedWireRequest> {
   const server = await startAIWireServer({ chunks: [...chunks] });
@@ -346,33 +346,29 @@ describe('AI provider wire contracts', () => {
   it.each([
     {
       name: 'OpenAI Responses',
-      provider: 'openai',
+      apiProtocol: 'openai-responses',
       model: 'gpt-5-wire',
-      openaiCompatible: false,
       chunks: responseFixtures.responses,
       expectedPath: '/nested/v1/responses',
     },
     {
       name: 'OpenAI Chat Completions',
-      provider: 'openai',
+      apiProtocol: 'openai-chat-completions',
       model: 'gpt-4o-wire',
-      openaiCompatible: true,
       chunks: responseFixtures.chat,
       expectedPath: '/nested/v1/chat/completions',
     },
     {
       name: 'Anthropic Messages',
-      provider: 'anthropic',
+      apiProtocol: 'anthropic-messages',
       model: 'claude-wire',
-      openaiCompatible: false,
       chunks: responseFixtures.anthropic,
       expectedPath: '/nested/v1/messages',
     },
     {
       name: 'Google Generative AI',
-      provider: 'google',
+      apiProtocol: 'google-generative-ai',
       model: 'gemini-wire',
-      openaiCompatible: false,
       chunks: responseFixtures.google,
       expectedPath: '/nested/v1/models/gemini-wire:streamGenerateContent?alt=sse',
     },
@@ -381,11 +377,10 @@ describe('AI provider wire contracts', () => {
 
     try {
       const result = await AIClient.getInstance().testConnectionWithDetails({
-        provider: testCase.provider,
+        apiProtocol: testCase.apiProtocol,
         apiKey: 'wire-secret-key',
         model: testCase.model,
         endpoint: `${server.baseURL}/nested/v1`,
-        openaiCompatible: testCase.openaiCompatible,
       });
 
       expect(result.success).toBe(true);
@@ -422,11 +417,10 @@ describe('AI provider wire contracts', () => {
 
     try {
       const result = await AIClient.getInstance().testConnectionWithDetails({
-        provider: 'openai',
+        apiProtocol: 'openai-chat-completions',
         apiKey: 'wire-secret-key',
         model: 'gpt-4o-wire',
         endpoint: `${server.baseURL}/nested/v1`,
-        openaiCompatible: true,
       });
 
       expect(result.success).toBe(false);

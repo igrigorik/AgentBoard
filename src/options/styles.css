@@ -334,22 +334,13 @@ header h1 {
   line-height: 1.5;
 }
 
-.inferred-provider {
-  display: block;
-  font-size: 13px;
-  color: #059669;
-  margin-top: 8px;
-  padding: 6px 10px;
-  background: #f0fdf4;
+.field-label-qualifier {
+  margin-left: 6px;
+  padding: 2px 6px;
   border-radius: 6px;
-  border: 1px solid #bbf7d0;
-}
-
-.inferred-provider.hidden {
-  display: none;
-}
-
-.inferred-provider span {
+  background: #f3f4f6;
+  color: #4b5563;
+  font-size: 11px;
   font-weight: 600;
 }
 

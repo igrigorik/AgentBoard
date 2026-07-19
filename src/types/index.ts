@@ -2,19 +2,11 @@
  * Shared TypeScript type definitions
  */
 
-import type { AgentConfig } from '../lib/storage/config';
+import type { ApiProtocol } from '../lib/ai/protocol';
 
 // Individual message type interfaces
 interface GetConfigMessage {
   type: 'GET_CONFIG';
-}
-
-interface SaveConfigMessage {
-  type: 'SAVE_CONFIG';
-  config: {
-    agents?: AgentConfig[];
-    providers?: ProviderConfig[];
-  };
 }
 
 interface TestConnectionMessage {
@@ -24,11 +16,10 @@ interface TestConnectionMessage {
 
 interface TestNewConnectionMessage {
   type: 'TEST_NEW_CONNECTION';
-  provider: AIProvider;
+  apiProtocol: ApiProtocol;
   apiKey?: string;
   model: string;
   endpoint?: string;
-  openaiCompatible: boolean | undefined;
 }
 
 interface PingMessage {
@@ -138,7 +129,6 @@ export interface GetSiteToolHintsMessage {
 // Union type for all possible extension messages
 export type ExtensionMessage =
   | GetConfigMessage
-  | SaveConfigMessage
   | TestConnectionMessage
   | TestNewConnectionMessage
   | PingMessage

@@ -19,7 +19,16 @@ type ModalCallback = () => void | Promise<void>;
 interface ModalState {
   modalId: string;
   onClose?: ModalCallback;
-  escapeKeyHandler?: (e: KeyboardEvent) => void;
+  keyHandler?: (e: KeyboardEvent) => void;
+  previouslyFocused?: HTMLElement;
+}
+
+function focusableElements(modal: HTMLElement): HTMLElement[] {
+  return Array.from(
+    modal.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.closest('.hidden'));
 }
 
 // Track currently open modal
@@ -43,27 +52,37 @@ export function openModal(modalId: string, onClose?: ModalCallback): void {
     return;
   }
 
-  // Setup ESC key handler for this modal
-  const escapeKeyHandler = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
+  const previouslyFocused =
+    document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const keyHandler = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
       closeModal(modalId);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusable = focusableElements(modal);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!(document.activeElement instanceof Node) || !modal.contains(document.activeElement)) {
+      event.preventDefault();
+      first.focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
     }
   };
 
-  // Register ESC listener
-  document.addEventListener('keydown', escapeKeyHandler);
-
-  // Show modal
+  document.addEventListener('keydown', keyHandler);
   modal.classList.remove('hidden');
 
-  // Note: Not auto-focusing to prevent triggering validation states
-
-  // Track state
-  currentModal = {
-    modalId,
-    onClose,
-    escapeKeyHandler,
-  };
+  currentModal = { modalId, onClose, keyHandler, previouslyFocused };
+  const firstFormControl = modal.querySelector<HTMLElement>('input, select, textarea');
+  (firstFormControl ?? focusableElements(modal)[0])?.focus();
 }
 
 /**
@@ -78,22 +97,22 @@ export function closeModal(modalId: string): void {
     return;
   }
 
-  // Remove ESC listener if this is the current modal
-  if (currentModal?.modalId === modalId && currentModal.escapeKeyHandler) {
-    document.removeEventListener('keydown', currentModal.escapeKeyHandler);
-  }
+  const closingState = currentModal?.modalId === modalId ? currentModal : null;
+  if (closingState?.keyHandler) document.removeEventListener('keydown', closingState.keyHandler);
 
-  // Hide modal
   modal.classList.add('hidden');
 
-  // Execute cleanup callback
-  if (currentModal?.modalId === modalId && currentModal.onClose) {
-    currentModal.onClose();
-  }
-
-  // Clear state
-  if (currentModal?.modalId === modalId) {
+  if (closingState) {
+    // Clear state before user cleanup so a callback can safely open another modal.
     currentModal = null;
+    closingState.previouslyFocused?.focus();
+    try {
+      void Promise.resolve(closingState.onClose?.()).catch(() => {
+        log.error('Modal close callback failed');
+      });
+    } catch {
+      log.error('Modal close callback failed');
+    }
   }
 }
 

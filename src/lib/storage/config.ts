@@ -3,6 +3,12 @@
  * Agent-centric configuration for AI assistants
  */
 
+import { isApiProtocol, type ApiProtocol } from '../ai/protocol';
+import { migrateAgentToV2 } from './config-migration';
+import { runStorageOperation } from './operation-queue';
+
+export const CONFIG_SCHEMA_VERSION = 2 as const;
+
 export type AIProvider = 'openai' | 'anthropic' | 'google';
 
 export interface ReasoningConfig {
@@ -26,11 +32,11 @@ export interface AgentConfig {
   id: string;
   name: string;
   description?: string;
-  provider: AIProvider;
+  provider: AIProvider; // Descriptive model metadata; apiProtocol alone selects transport.
   apiKey?: string; // Optional when using custom endpoint/proxy
   model: string;
   endpoint?: string; // Custom API base URL for provider
-  openaiCompatible?: boolean; // When using endpoint: true = OpenAI format, false = native format
+  apiProtocol: ApiProtocol;
   systemPrompt: string;
   temperature: number;
   maxTokens: number;
@@ -40,13 +46,16 @@ export interface AgentConfig {
 }
 
 export interface StorageConfig {
+  schemaVersion: typeof CONFIG_SCHEMA_VERSION;
   agents: AgentConfig[];
   defaultAgentId?: string;
   mcpConfig?: MCPConfig;
   userScripts?: UserScript[]; // WebMCP user-defined tool scripts
   builtinScripts?: BuiltinScript[]; // Built-in tool state (only stores user overrides)
-  logLevel?: string; // Global log level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent'
+  logLevel?: LogLevel;
 }
+
+export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
 export interface MCPConfig {
   mcpServers: Record<string, MCPServerConfig>;
@@ -126,6 +135,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     name: 'OpenAI Assistant',
     description: 'General purpose assistant powered by OpenAI',
     provider: 'openai',
+    apiProtocol: 'openai-responses',
     model: 'gpt-5',
     systemPrompt: '',
     temperature: 0.7,
@@ -143,6 +153,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     name: 'Claude Assistant',
     description: 'Thoughtful assistant powered by Anthropic',
     provider: 'anthropic',
+    apiProtocol: 'anthropic-messages',
     model: 'claude-opus-4-20250514',
     systemPrompt: '',
     temperature: 0.7,
@@ -159,6 +170,7 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     name: 'Gemini Assistant',
     description: 'Creative assistant powered by Google',
     provider: 'google',
+    apiProtocol: 'google-generative-ai',
     model: 'gemini-2.5-flash',
     systemPrompt: '',
     temperature: 0.8,
@@ -176,14 +188,228 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
 
 // Single source of truth for default configuration
 export const DEFAULT_CONFIG: StorageConfig = {
+  schemaVersion: CONFIG_SCHEMA_VERSION,
   agents: [],
   defaultAgentId: undefined,
   mcpConfig: undefined,
   logLevel: 'warn', // Default: balance between feedback and noise
 };
 
+export type ConfigValidationErrorCode =
+  | 'INVALID_CONFIG'
+  | 'UNSUPPORTED_SCHEMA_VERSION'
+  | 'INVALID_AGENT'
+  | 'INVALID_REFERENCE'
+  | 'INVALID_MCP_CONFIG'
+  | 'INVALID_SCRIPT'
+  | 'INVALID_LOG_LEVEL';
+
+export class ConfigValidationError extends Error {
+  constructor(public readonly code: ConfigValidationErrorCode) {
+    super(code);
+    this.name = 'ConfigValidationError';
+  }
+}
+
+export function configValidationMessage(error: unknown): string {
+  if (error instanceof ConfigValidationError && error.code === 'UNSUPPORTED_SCHEMA_VERSION') {
+    return 'This configuration was created by an unsupported AgentBoard version. Update AgentBoard or restore a compatible backup.';
+  }
+  return 'AgentBoard configuration is invalid. Restore a compatible backup or reset the settings.';
+}
+
+const PROVIDERS: readonly AIProvider[] = ['openai', 'anthropic', 'google'];
+const LOG_LEVELS: readonly LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error', 'silent'];
+
+function record(value: unknown, code: ConfigValidationErrorCode): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigValidationError(code);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, code: ConfigValidationErrorCode): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) throw new ConfigValidationError(code);
+}
+
+function optionalString(value: unknown, code: ConfigValidationErrorCode): void {
+  if (value !== undefined && typeof value !== 'string') throw new ConfigValidationError(code);
+}
+
+function optionalBoolean(value: unknown, code: ConfigValidationErrorCode): void {
+  if (value !== undefined && typeof value !== 'boolean') throw new ConfigValidationError(code);
+}
+
+function finiteNumber(value: unknown, code: ConfigValidationErrorCode): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new ConfigValidationError(code);
+}
+
+function validateReasoning(value: unknown): void {
+  if (value === undefined) return;
+  const reasoning = record(value, 'INVALID_AGENT');
+  if (typeof reasoning.enabled !== 'boolean') throw new ConfigValidationError('INVALID_AGENT');
+  optionalBoolean(reasoning.autoExpand, 'INVALID_AGENT');
+  if (reasoning.collapseDelay !== undefined) {
+    finiteNumber(reasoning.collapseDelay, 'INVALID_AGENT');
+    if (reasoning.collapseDelay < 0) throw new ConfigValidationError('INVALID_AGENT');
+  }
+  if (reasoning.openai !== undefined) {
+    const openai = record(reasoning.openai, 'INVALID_AGENT');
+    if (!['minimal', 'low', 'medium', 'high'].includes(openai.reasoningEffort as string)) {
+      throw new ConfigValidationError('INVALID_AGENT');
+    }
+    if (
+      openai.reasoningSummary !== undefined &&
+      !['auto', 'detailed'].includes(openai.reasoningSummary as string)
+    ) {
+      throw new ConfigValidationError('INVALID_AGENT');
+    }
+  }
+  if (reasoning.anthropic !== undefined) {
+    const anthropic = record(reasoning.anthropic, 'INVALID_AGENT');
+    if (anthropic.thinkingBudgetTokens !== undefined) {
+      finiteNumber(anthropic.thinkingBudgetTokens, 'INVALID_AGENT');
+      if (
+        !Number.isInteger(anthropic.thinkingBudgetTokens) ||
+        anthropic.thinkingBudgetTokens < 1000 ||
+        anthropic.thinkingBudgetTokens > 20000
+      ) {
+        throw new ConfigValidationError('INVALID_AGENT');
+      }
+    }
+  }
+  if (reasoning.google !== undefined) {
+    const google = record(reasoning.google, 'INVALID_AGENT');
+    if (google.thinkingBudget !== undefined) {
+      finiteNumber(google.thinkingBudget, 'INVALID_AGENT');
+      if (
+        !Number.isInteger(google.thinkingBudget) ||
+        google.thinkingBudget < -1 ||
+        google.thinkingBudget > 24576
+      ) {
+        throw new ConfigValidationError('INVALID_AGENT');
+      }
+    }
+    optionalBoolean(google.includeThoughts, 'INVALID_AGENT');
+  }
+}
+
+function validateAgent(value: unknown): asserts value is AgentConfig {
+  const agent = record(value, 'INVALID_AGENT');
+  for (const field of ['id', 'name', 'model'] as const)
+    requiredString(agent[field], 'INVALID_AGENT');
+  if (typeof agent.systemPrompt !== 'string') throw new ConfigValidationError('INVALID_AGENT');
+  if (!PROVIDERS.includes(agent.provider as AIProvider) || !isApiProtocol(agent.apiProtocol)) {
+    throw new ConfigValidationError('INVALID_AGENT');
+  }
+  // Provider remains descriptive model metadata. Proxies may legitimately expose a
+  // model from one provider through another provider's wire protocol.
+  if ('openaiCompatible' in agent) throw new ConfigValidationError('INVALID_AGENT');
+  optionalString(agent.description, 'INVALID_AGENT');
+  optionalString(agent.apiKey, 'INVALID_AGENT');
+  optionalString(agent.endpoint, 'INVALID_AGENT');
+  optionalBoolean(agent.isDefault, 'INVALID_AGENT');
+  finiteNumber(agent.temperature, 'INVALID_AGENT');
+  if (agent.temperature < 0 || agent.temperature > 2) {
+    throw new ConfigValidationError('INVALID_AGENT');
+  }
+  finiteNumber(agent.maxTokens, 'INVALID_AGENT');
+  if (agent.maxTokens <= 0 || !Number.isInteger(agent.maxTokens))
+    throw new ConfigValidationError('INVALID_AGENT');
+  if (agent.maxSteps !== undefined) {
+    finiteNumber(agent.maxSteps, 'INVALID_AGENT');
+    if (!Number.isInteger(agent.maxSteps) || agent.maxSteps < 1 || agent.maxSteps > 50)
+      throw new ConfigValidationError('INVALID_AGENT');
+  }
+  validateReasoning(agent.reasoning);
+}
+
+export function validateStorageConfigV2(value: unknown): StorageConfig {
+  const config = record(value, 'INVALID_CONFIG');
+  if (config.schemaVersion !== CONFIG_SCHEMA_VERSION)
+    throw new ConfigValidationError('UNSUPPORTED_SCHEMA_VERSION');
+  if (!Array.isArray(config.agents)) throw new ConfigValidationError('INVALID_CONFIG');
+  config.agents.forEach(validateAgent);
+  const ids = config.agents.map((agent) => agent.id);
+  if (new Set(ids).size !== ids.length) throw new ConfigValidationError('INVALID_REFERENCE');
+  optionalString(config.defaultAgentId, 'INVALID_REFERENCE');
+  if (config.defaultAgentId !== undefined && !ids.includes(config.defaultAgentId))
+    throw new ConfigValidationError('INVALID_REFERENCE');
+
+  if (config.mcpConfig !== undefined) {
+    const mcp = record(config.mcpConfig, 'INVALID_MCP_CONFIG');
+    const servers = record(mcp.mcpServers, 'INVALID_MCP_CONFIG');
+    for (const serverValue of Object.values(servers)) {
+      const server = record(serverValue, 'INVALID_MCP_CONFIG');
+      if (server.transport !== 'http' && server.transport !== 'sse')
+        throw new ConfigValidationError('INVALID_MCP_CONFIG');
+      requiredString(server.url, 'INVALID_MCP_CONFIG');
+      optionalString(server.authToken, 'INVALID_MCP_CONFIG');
+    }
+  }
+
+  for (const [field, code] of [
+    ['userScripts', 'INVALID_SCRIPT'],
+    ['builtinScripts', 'INVALID_SCRIPT'],
+  ] as const) {
+    const scripts = config[field];
+    if (scripts === undefined) continue;
+    if (!Array.isArray(scripts)) throw new ConfigValidationError(code);
+    const scriptIds = new Set<string>();
+    for (const scriptValue of scripts) {
+      const script = record(scriptValue, code);
+      requiredString(script.id, code);
+      if (scriptIds.has(script.id)) throw new ConfigValidationError(code);
+      scriptIds.add(script.id);
+      if (typeof script.enabled !== 'boolean') throw new ConfigValidationError(code);
+      if (field === 'userScripts' && typeof script.code !== 'string')
+        throw new ConfigValidationError(code);
+    }
+  }
+  if (config.logLevel !== undefined && !LOG_LEVELS.includes(config.logLevel as LogLevel))
+    throw new ConfigValidationError('INVALID_LOG_LEVEL');
+  return config as unknown as StorageConfig;
+}
+
+function freshDefaultConfig(): StorageConfig {
+  return globalThis.structuredClone(DEFAULT_CONFIG);
+}
+
+function canonicalConfig(config: StorageConfig): StorageConfig {
+  return validateStorageConfigV2({
+    ...freshDefaultConfig(),
+    ...globalThis.structuredClone(config),
+    schemaVersion: CONFIG_SCHEMA_VERSION,
+  });
+}
+
+/** Parse either persisted schema v1 or current schema v2 without mutating the input. */
+export function parseStorageConfig(value: unknown): { config: StorageConfig; migrated: boolean } {
+  const source = record(value, 'INVALID_CONFIG');
+  if ('schemaVersion' in source && source.schemaVersion !== CONFIG_SCHEMA_VERSION) {
+    throw new ConfigValidationError('UNSUPPORTED_SCHEMA_VERSION');
+  }
+  if (source.schemaVersion === CONFIG_SCHEMA_VERSION) {
+    return { config: canonicalConfig(validateStorageConfigV2(source)), migrated: false };
+  }
+  if (!Array.isArray(source.agents)) throw new ConfigValidationError('INVALID_CONFIG');
+  let agents: Record<string, unknown>[];
+  try {
+    agents = source.agents.map(migrateAgentToV2);
+  } catch {
+    throw new ConfigValidationError('INVALID_AGENT');
+  }
+  const migrated = validateStorageConfigV2({
+    ...source,
+    schemaVersion: CONFIG_SCHEMA_VERSION,
+    agents,
+  });
+  return { config: canonicalConfig(migrated), migrated: true };
+}
+
 export class ConfigStorage {
   private static instance: ConfigStorage;
+  private changeOperations: Promise<void> = Promise.resolve();
 
   static getInstance(): ConfigStorage {
     if (!ConfigStorage.instance) {
@@ -192,26 +418,65 @@ export class ConfigStorage {
     return ConfigStorage.instance;
   }
 
-  async get(): Promise<StorageConfig> {
-    const result = await chrome.storage.local.get(['config']);
-    if (!result.config || !result.config.agents) {
-      return DEFAULT_CONFIG;
-    }
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    return runStorageOperation(operation);
+  }
 
-    return {
-      ...DEFAULT_CONFIG,
-      ...result.config,
-    };
+  private async loadValue(value: unknown): Promise<StorageConfig> {
+    if (value === undefined) return freshDefaultConfig();
+    const parsed = parseStorageConfig(value);
+    if (parsed.migrated) await chrome.storage.local.set({ config: parsed.config });
+    return parsed.config;
+  }
+
+  private async load(): Promise<StorageConfig> {
+    const result = await chrome.storage.local.get(['config']);
+    return this.loadValue(result.config);
+  }
+
+  private update<T>(mutator: (config: StorageConfig) => T): Promise<T> {
+    return this.serialize(async () => {
+      const config = globalThis.structuredClone(await this.load());
+      const result = mutator(config);
+      const validated = validateStorageConfigV2(config);
+      await chrome.storage.local.set({ config: validated });
+      return result;
+    });
+  }
+
+  async get(): Promise<StorageConfig> {
+    return this.serialize(() => this.load());
+  }
+
+  /** Read config and companion keys from one coherent queued storage snapshot. */
+  async getSnapshot(keys: string[]): Promise<{
+    config: StorageConfig;
+    values: Record<string, unknown>;
+  }> {
+    return this.serialize(async () => {
+      const result = await chrome.storage.local.get(['config', ...keys]);
+      const config = await this.loadValue(result.config);
+      const values: Record<string, unknown> = {};
+      for (const key of keys) values[key] = globalThis.structuredClone(result[key]);
+      return { config, values };
+    });
   }
 
   async set(config: Partial<StorageConfig>): Promise<void> {
-    const current = await this.get();
-    const updated = { ...current, ...config };
-    await chrome.storage.local.set({ config: updated });
+    if (
+      Object.prototype.hasOwnProperty.call(config, 'schemaVersion') &&
+      config.schemaVersion !== CONFIG_SCHEMA_VERSION
+    ) {
+      throw new ConfigValidationError('UNSUPPORTED_SCHEMA_VERSION');
+    }
+    const patch = globalThis.structuredClone(config);
+    await this.update((current) => {
+      Object.assign(current, patch, { schemaVersion: CONFIG_SCHEMA_VERSION });
+    });
   }
 
   async reset(): Promise<void> {
-    await chrome.storage.local.set({ config: DEFAULT_CONFIG });
+    await this.serialize(() => chrome.storage.local.set({ config: freshDefaultConfig() }));
   }
 
   // Agent management methods
@@ -228,108 +493,112 @@ export class ConfigStorage {
   async getDefaultAgent(): Promise<AgentConfig | null> {
     const config = await this.get();
     if (config.defaultAgentId) {
-      return this.getAgent(config.defaultAgentId);
+      return config.agents.find((agent) => agent.id === config.defaultAgentId) || null;
     }
 
-    // Fall back to first agent with isDefault flag
-    const agents = await this.getAgents();
-    return agents.find((agent) => agent.isDefault) || agents[0] || null;
+    return config.agents.find((agent) => agent.isDefault) || config.agents[0] || null;
   }
 
   async addAgent(agent: Omit<AgentConfig, 'id'>): Promise<string> {
-    const agents = await this.getAgents();
     const id = globalThis.crypto.randomUUID();
-    const newAgent: AgentConfig = { ...agent, id };
-
-    // If this is the first agent or marked as default, make it the default
-    let defaultAgentId: string | undefined;
-    if (agents.length === 0 || agent.isDefault) {
-      defaultAgentId = id;
-    }
-
-    await this.set({
-      agents: [...agents, newAgent],
-      ...(defaultAgentId ? { defaultAgentId } : {}),
+    await this.update((config) => {
+      const newAgent: AgentConfig = { ...agent, id };
+      config.agents.push(newAgent);
+      if (config.agents.length === 1 || agent.isDefault) {
+        config.defaultAgentId = id;
+      }
     });
-
     return id;
   }
 
   async updateAgent(id: string, updates: Partial<Omit<AgentConfig, 'id'>>): Promise<void> {
-    const agents = await this.getAgents();
-    const index = agents.findIndex((agent) => agent.id === id);
+    await this.update((config) => {
+      const index = config.agents.findIndex((agent) => agent.id === id);
+      if (index === -1) throw new Error(`Agent ${id} not found`);
 
-    if (index === -1) {
-      throw new Error(`Agent ${id} not found`);
-    }
-
-    agents[index] = { ...agents[index], ...updates };
-
-    // Handle default agent updates
-    let defaultAgentId: string | undefined;
-    if (updates.isDefault) {
-      // Clear other default flags
-      agents.forEach((agent) => {
-        if (agent.id !== id) {
-          agent.isDefault = false;
-        }
-      });
-      defaultAgentId = id;
-    }
-
-    await this.set({
-      agents,
-      ...(defaultAgentId ? { defaultAgentId } : {}),
+      config.agents[index] = { ...config.agents[index], ...updates };
+      if (updates.isDefault) {
+        config.agents.forEach((agent) => {
+          agent.isDefault = agent.id === id;
+        });
+        config.defaultAgentId = id;
+      }
     });
   }
 
   async deleteAgent(id: string): Promise<void> {
-    const agents = await this.getAgents();
-    const filteredAgents = agents.filter((agent) => agent.id !== id);
+    await this.update((config) => {
+      const index = config.agents.findIndex((agent) => agent.id === id);
+      if (index === -1) throw new Error(`Agent ${id} not found`);
+      config.agents.splice(index, 1);
 
-    if (filteredAgents.length === agents.length) {
-      throw new Error(`Agent ${id} not found`);
-    }
-
-    const config = await this.get();
-    let defaultAgentId = config.defaultAgentId;
-
-    // If we deleted the default agent, pick a new one
-    if (defaultAgentId === id) {
-      const newDefault = filteredAgents.find((agent) => agent.isDefault) || filteredAgents[0];
-      defaultAgentId = newDefault?.id;
-    }
-
-    await this.set({
-      agents: filteredAgents,
-      defaultAgentId,
+      if (config.defaultAgentId === id) {
+        const newDefault = config.agents.find((agent) => agent.isDefault) || config.agents[0];
+        config.defaultAgentId = newDefault?.id;
+      }
     });
   }
 
   async setDefaultAgent(id: string): Promise<void> {
-    const agents = await this.getAgents();
-    const agent = agents.find((a) => a.id === id);
-
-    if (!agent) {
-      throw new Error(`Agent ${id} not found`);
-    }
-
-    // Update isDefault flags
-    agents.forEach((a) => {
-      a.isDefault = a.id === id;
-    });
-
-    await this.set({
-      agents,
-      defaultAgentId: id,
+    await this.update((config) => {
+      if (!config.agents.some((agent) => agent.id === id)) {
+        throw new Error(`Agent ${id} not found`);
+      }
+      config.agents.forEach((agent) => {
+        agent.isDefault = agent.id === id;
+      });
+      config.defaultAgentId = id;
     });
   }
 
   // Listen for config changes
-  onChange(callback: (config: StorageConfig) => void): void {
+  onChange(
+    callback: (config: StorageConfig) => void | Promise<void>,
+    onError?: (error: ConfigValidationError) => void
+  ): void {
+    const reportError = (error: unknown) => {
+      const sanitized =
+        error instanceof ConfigValidationError
+          ? error
+          : new ConfigValidationError('INVALID_CONFIG');
+      if (!onError) {
+        console.error(`[ConfigStorage] Config change rejected: ${sanitized.code}`);
+        return;
+      }
+      try {
+        onError(sanitized);
+      } catch {
+        console.error('[ConfigStorage] Config change error handler failed');
+      }
+    };
+    const notify = (config: StorageConfig) => {
+      const operation = this.changeOperations.then(() =>
+        callback(globalThis.structuredClone(config))
+      );
+      this.changeOperations = operation.then(
+        () => undefined,
+        (error) => reportError(error)
+      );
+    };
+
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local' && changes.config) {
-        callback(changes.config.newValue);
+      if (area !== 'local' || !changes.config) return;
+      if (changes.config.newValue === undefined) {
+        notify(freshDefaultConfig());
+        return;
+      }
+
+      try {
+        const parsed = parseStorageConfig(changes.config.newValue);
+        if (parsed.migrated) {
+          // Do not expose migrated state until the complete v2 value is durable. The
+          // resulting v2 storage event invokes the callback after the write succeeds.
+          void this.get().catch(reportError);
+          return;
+        }
+        notify(parsed.config);
+      } catch (error) {
+        reportError(error);
       }
     });
   }
@@ -346,39 +615,32 @@ export class ConfigStorage {
   }
 
   async addUserScript(code: string, enabled = true): Promise<string> {
-    const scripts = await this.getUserScripts();
     const id = globalThis.crypto.randomUUID();
-    const newScript: UserScript = { id, code, enabled };
-
-    await this.set({
-      userScripts: [...scripts, newScript],
+    await this.update((config) => {
+      config.userScripts ??= [];
+      config.userScripts.push({ id, code, enabled });
     });
-
     return id;
   }
 
   async updateUserScript(id: string, updates: Partial<Omit<UserScript, 'id'>>): Promise<void> {
-    const scripts = await this.getUserScripts();
-    const index = scripts.findIndex((script) => script.id === id);
-
-    if (index === -1) {
-      throw new Error(`User script ${id} not found`);
-    }
-
-    scripts[index] = { ...scripts[index], ...updates };
-
-    await this.set({ userScripts: scripts });
+    await this.update((config) => {
+      const scripts = config.userScripts ?? [];
+      const index = scripts.findIndex((script) => script.id === id);
+      if (index === -1) throw new Error(`User script ${id} not found`);
+      scripts[index] = { ...scripts[index], ...updates };
+      config.userScripts = scripts;
+    });
   }
 
   async deleteUserScript(id: string): Promise<void> {
-    const scripts = await this.getUserScripts();
-    const filteredScripts = scripts.filter((script) => script.id !== id);
-
-    if (filteredScripts.length === scripts.length) {
-      throw new Error(`User script ${id} not found`);
-    }
-
-    await this.set({ userScripts: filteredScripts });
+    await this.update((config) => {
+      const scripts = config.userScripts ?? [];
+      const index = scripts.findIndex((script) => script.id === id);
+      if (index === -1) throw new Error(`User script ${id} not found`);
+      scripts.splice(index, 1);
+      config.userScripts = scripts;
+    });
   }
 
   async toggleUserScript(id: string, enabled: boolean): Promise<void> {
@@ -410,16 +672,14 @@ export class ConfigStorage {
    * Creates entry if it doesn't exist (sparse storage)
    */
   async toggleBuiltinScript(id: string, enabled: boolean): Promise<void> {
-    const scripts = await this.getBuiltinScripts();
-    const existingIndex = scripts.findIndex((s) => s.id === id);
-
-    if (existingIndex >= 0) {
-      scripts[existingIndex].enabled = enabled;
-    } else {
-      // Create new entry for user override
-      scripts.push({ id, enabled });
-    }
-
-    await this.set({ builtinScripts: scripts });
+    await this.update((config) => {
+      config.builtinScripts ??= [];
+      const existing = config.builtinScripts.find((script) => script.id === id);
+      if (existing) {
+        existing.enabled = enabled;
+      } else {
+        config.builtinScripts.push({ id, enabled });
+      }
+    });
   }
 }

@@ -1,61 +1,51 @@
 /**
- * Centralized logging module using loglevel
- * Provides consistent log level management across all extension contexts
- *
- * Design decisions:
- * - Single global logger (no namespacing) for simplicity
- * - Two-phase initialization: sync default -> async storage override
- * - Default level: 'warn' to balance feedback vs noise
- * - User-configurable via Options UI, stored in chrome.storage
- * - All contexts (background, sidebar, options, content scripts) respect same level
+ * Centralized logging module using loglevel.
+ * Configuration is applied only after the complete AgentBoard record validates;
+ * malformed/future records must not enable verbose logging as a side effect.
  */
 
 import log from 'loglevel';
+import { parseStorageConfig, type LogLevel, type StorageConfig } from '../storage/config';
 
-// Detect test environment - Vitest sets process.env.NODE_ENV and global test context
 const isTestEnvironment =
   (typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') ||
   (typeof globalThis !== 'undefined' && 'vitest' in globalThis);
+const DEFAULT_LOG_LEVEL: LogLevel = isTestEnvironment ? 'silent' : 'warn';
 
-// Default log level - applied synchronously on import to capture early logs
-// Silent in tests to avoid noise, warn in production for useful feedback
-const DEFAULT_LOG_LEVEL = isTestEnvironment ? 'silent' : 'warn';
-
-// Initialize with default immediately (synchronous)
-log.setLevel(DEFAULT_LOG_LEVEL as log.LogLevelDesc);
-
-// Phase 2: Override from storage asynchronously
-// This runs ASAP after import, updates level if user has configured it
-// Guard against test environments where chrome APIs may not be fully mocked
-if (typeof chrome !== 'undefined' && chrome.storage?.local?.get) {
-  chrome.storage.local.get(['config'], (result) => {
-    if (result.config?.logLevel) {
-      try {
-        log.setLevel(result.config.logLevel as log.LogLevelDesc);
-      } catch (error) {
-        console.error('[Logger] Invalid log level in storage:', result.config.logLevel, error);
-      }
-    }
-  });
+function applyLogLevel(config: StorageConfig): void {
+  log.setLevel(config.logLevel ?? DEFAULT_LOG_LEVEL);
 }
 
-// Phase 3: Listen for real-time changes from Options UI
-// Only set up listener if chrome.storage.onChanged is available
+function rejectLogLevel(): void {
+  log.setLevel(DEFAULT_LOG_LEVEL);
+  console.error('[Logger] Ignoring invalid stored configuration');
+}
+
+function applyStoredConfig(value: unknown): void {
+  if (value === undefined) {
+    log.setLevel(DEFAULT_LOG_LEVEL);
+    return;
+  }
+  try {
+    const parsed = parseStorageConfig(value);
+    // ConfigStorage owns migration. Logger stays at its safe default until the
+    // resulting durable v2 storage event arrives.
+    if (!parsed.migrated) applyLogLevel(parsed.config);
+  } catch {
+    rejectLogLevel();
+  }
+}
+
+log.setLevel(DEFAULT_LOG_LEVEL);
+
+if (typeof chrome !== 'undefined' && chrome.storage?.local?.get) {
+  chrome.storage.local.get(['config'], (result) => applyStoredConfig(result.config));
+}
+
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.config?.newValue?.logLevel) {
-      try {
-        log.setLevel(changes.config.newValue.logLevel as log.LogLevelDesc);
-      } catch (error) {
-        console.error(
-          '[Logger] Invalid log level in update:',
-          changes.config.newValue.logLevel,
-          error
-        );
-      }
-    }
+    if (area === 'local' && changes.config) applyStoredConfig(changes.config.newValue);
   });
 }
 
-// Export configured logger
 export default log;

@@ -1,9 +1,5 @@
-import type { AgentConfig, AIProvider } from './config';
+import type { AIProvider } from './config';
 import { isApiProtocol, type ApiProtocol } from '../ai/protocol';
-
-export type AgentConfigV2 = Omit<AgentConfig, 'openaiCompatible'> & {
-  apiProtocol: ApiProtocol;
-};
 
 const KNOWN_PROVIDERS: readonly AIProvider[] = ['openai', 'anthropic', 'google'];
 
@@ -48,7 +44,7 @@ function inferLegacyEndpointProtocol(endpoint: string, provider: AIProvider): Ap
  * fields that can influence transport; complete config validation belongs at the
  * schema-v2 storage/import boundary.
  */
-export function migrateAgentToV2(agent: unknown): AgentConfigV2 {
+export function migrateAgentToV2(agent: unknown): Record<string, unknown> {
   if (!agent || typeof agent !== 'object' || Array.isArray(agent)) {
     throw new Error('Invalid agent configuration');
   }
@@ -91,11 +87,7 @@ export function migrateAgentToV2(agent: unknown): AgentConfigV2 {
     apiProtocol = nativeProtocol(record.provider);
   }
 
-  const migrated = {
-    ...(record as unknown as AgentConfig),
-    apiProtocol,
-  } as AgentConfigV2 & { openaiCompatible?: boolean };
-
+  const migrated: Record<string, unknown> = { ...record, apiProtocol };
   delete migrated.openaiCompatible;
   return migrated;
 }

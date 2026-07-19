@@ -135,12 +135,12 @@
     </main>
 
     <!-- Agent Edit Modal -->
-    <div id="agent-modal" class="modal hidden">
+    <div id="agent-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div class="modal-backdrop"></div>
       <div class="modal-content">
         <div class="modal-header">
           <h3 id="modal-title">Create Agent</h3>
-          <button id="modal-close" class="modal-close">&times;</button>
+          <button id="modal-close" class="modal-close" aria-label="Close agent editor">&times;</button>
         </div>
         
         <form id="agent-form" class="modal-body">
@@ -159,12 +159,28 @@
           </div>
 
           <div class="form-group">
+            <label for="agent-connection-api">Connection API *</label>
+            <select id="agent-connection-api" required>
+              <option value="openai">OpenAI-style API</option>
+              <option value="anthropic">Anthropic API</option>
+              <option value="google">Google Gemini API</option>
+            </select>
+            <span class="field-hint">Select the HTTP API contract. Model IDs and endpoints are passed through unchanged.</span>
+          </div>
+
+          <div class="form-group" id="openai-api-mode-group">
+            <label for="agent-openai-api-mode">OpenAI API mode <span class="field-label-qualifier">Advanced</span></label>
+            <select id="agent-openai-api-mode">
+              <option value="openai-responses">Responses (recommended)</option>
+              <option value="openai-chat-completions">Chat Completions (legacy compatibility)</option>
+            </select>
+            <span class="field-hint">Use legacy Chat only when the endpoint does not support Responses. AgentBoard never falls back automatically.</span>
+          </div>
+
+          <div class="form-group">
             <label for="agent-model">Model *</label>
-            <input type="text" id="agent-model" placeholder="e.g., gpt-4o, claude-3-5-sonnet-20241022" required>
-            <span class="field-hint">Enter the exact model name</span>
-            <div id="inferred-provider" class="inferred-provider hidden">
-              Provider: <span id="inferred-provider-text"></span>
-            </div>
+            <input type="text" id="agent-model" placeholder="Enter the exact model ID" required>
+            <span class="field-hint">Passed unchanged to the selected Connection API</span>
           </div>
 
           <!-- Reasoning Configuration -->
@@ -189,7 +205,7 @@
                 </select>
                 <span class="field-hint">Higher effort uses more tokens but provides deeper insights</span>
               </div>
-              <div class="form-group">
+              <div class="form-group" id="reasoning-summary-group">
                 <label for="reasoning-summary">Reasoning Summary</label>
                 <select id="reasoning-summary">
                   <option value="auto" selected>Auto - Model decides</option>
@@ -235,14 +251,6 @@
             <input type="url" id="agent-endpoint">
           </div>
 
-          <div class="form-group" id="openai-compatible-group" style="display: none;">
-            <label class="checkbox-label">
-              <input type="checkbox" id="agent-openai-compatible">
-              <span class="checkmark"></span>
-              Endpoint uses OpenAI-compatible format
-            </label>
-          </div>
-
           <div class="form-group">
             <label for="agent-api-key">API Key *</label>
             <input type="password" id="agent-api-key" placeholder="Your API key">
@@ -284,7 +292,7 @@
           </div>
         </form>
 
-        <div id="agent-modal-status" class="modal-status hidden"></div>
+        <div id="agent-modal-status" class="modal-status hidden" role="status" aria-live="polite"></div>
 
         <div class="modal-footer">
           <!-- Footer buttons will be dynamically generated -->
@@ -293,12 +301,12 @@
     </div>
 
     <!-- WebMCP Script Editor Modal -->
-    <div id="script-modal" class="modal hidden">
+    <div id="script-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="script-modal-title">
       <div class="modal-backdrop"></div>
       <div class="modal-content modal-large">
         <div class="modal-header">
           <h3 id="script-modal-title">Create WebMCP Script</h3>
-          <button id="script-modal-close" class="modal-close">&times;</button>
+          <button id="script-modal-close" class="modal-close" aria-label="Close script editor">&times;</button>
         </div>
         
         <form id="script-form" class="modal-body script-editor-body">
@@ -348,7 +356,7 @@
 
         </form>
 
-        <div id="script-modal-status" class="modal-status hidden"></div>
+        <div id="script-modal-status" class="modal-status hidden" role="status" aria-live="polite"></div>
 
         <div class="modal-footer">
           <button id="validate-script" class="button button-secondary">Validate</button>
@@ -358,12 +366,12 @@
     </div>
 
     <!-- Command Edit Modal -->
-    <div id="command-modal" class="modal hidden">
+    <div id="command-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="command-modal-title">
       <div class="modal-backdrop"></div>
       <div class="modal-content">
         <div class="modal-header">
           <h3 id="command-modal-title">Create Command</h3>
-          <button id="command-modal-close" class="modal-close">&times;</button>
+          <button id="command-modal-close" class="modal-close" aria-label="Close command editor">&times;</button>
         </div>
         
         <form id="command-form" class="modal-body">
@@ -397,7 +405,7 @@
           </div>
         </form>
 
-        <div id="command-modal-status" class="modal-status hidden"></div>
+        <div id="command-modal-status" class="modal-status hidden" role="status" aria-live="polite"></div>
 
         <div class="modal-footer">
           <!-- Footer buttons will be dynamically generated -->

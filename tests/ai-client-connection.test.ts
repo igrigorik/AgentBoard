@@ -59,16 +59,16 @@ function successfulTextStream() {
 describe('AIClient connection testing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({} as never);
     mocks.streamText.mockReturnValue({ textStream: successfulTextStream() });
   });
 
-  it('uses the Responses API when OpenAI compatibility is explicitly disabled', async () => {
+  it('uses the explicitly selected Responses API', async () => {
     const result = await AIClient.getInstance().testConnectionWithDetails({
-      provider: 'openai',
+      apiProtocol: 'openai-responses',
       apiKey: 'sk-test',
       model: 'gpt-5.6-sol',
       endpoint: 'https://gateway.example.test/v1',
-      openaiCompatible: false,
     });
 
     expect(result.success).toBe(true);
@@ -83,13 +83,12 @@ describe('AIClient connection testing', () => {
     );
   });
 
-  it('uses Chat Completions when OpenAI compatibility is explicitly enabled', async () => {
+  it('uses explicitly selected Chat Completions', async () => {
     const result = await AIClient.getInstance().testConnectionWithDetails({
-      provider: 'openai',
+      apiProtocol: 'openai-chat-completions',
       apiKey: 'sk-test',
       model: 'gpt-4o',
       endpoint: 'https://example.test/v1',
-      openaiCompatible: true,
     });
 
     expect(result.success).toBe(true);
@@ -100,17 +99,46 @@ describe('AIClient connection testing', () => {
     );
   });
 
-  it('preserves URL-based Chat Completions inference when no choice was made', async () => {
+  it('routes saved agents through the same zero-retry probe path', async () => {
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      config: {
+        schemaVersion: 2,
+        agents: [
+          {
+            id: 'saved-agent',
+            name: 'Saved',
+            provider: 'anthropic',
+            apiProtocol: 'openai-chat-completions',
+            model: 'opaque-model',
+            endpoint: 'https://example.test/v1',
+            systemPrompt: '',
+            temperature: 0.7,
+            maxTokens: 1000,
+          },
+        ],
+      },
+    } as never);
+
+    const result = await AIClient.getInstance().testConnection('saved-agent');
+
+    expect(result.success).toBe(true);
+    expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('opaque-model');
+    expect(mocks.streamText).toHaveBeenCalledWith(
+      expect.objectContaining({ model: mocks.chatModel, maxRetries: 0 })
+    );
+  });
+
+  it('does not let a /v1 endpoint override explicit Responses selection', async () => {
     const result = await AIClient.getInstance().testConnectionWithDetails({
-      provider: 'openai',
+      apiProtocol: 'openai-responses',
       apiKey: 'sk-test',
       model: 'gpt-4o',
       endpoint: 'https://example.test/v1',
     });
 
     expect(result.success).toBe(true);
-    expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('gpt-4o');
-    expect(mocks.openAIProvider.responses).not.toHaveBeenCalled();
+    expect(mocks.openAIProvider.responses).toHaveBeenCalledWith('gpt-4o');
+    expect(mocks.openAIProvider.chat).not.toHaveBeenCalled();
   });
 
   it('aborts the provider request after the first successful chunk', async () => {
@@ -121,11 +149,10 @@ describe('AIClient connection testing', () => {
     });
 
     const result = await AIClient.getInstance().testConnectionWithDetails({
-      provider: 'openai',
+      apiProtocol: 'openai-responses',
       apiKey: 'sk-test',
       model: 'gpt-5.6-sol',
       endpoint: 'https://gateway.example.test/v1',
-      openaiCompatible: false,
     });
 
     expect(result.success).toBe(true);
@@ -142,17 +169,18 @@ describe('AIClient connection testing', () => {
     });
 
     const result = await AIClient.getInstance().testConnectionWithDetails({
-      provider: 'openai',
+      apiProtocol: 'openai-chat-completions',
       apiKey: 'sk-test',
       model: 'gpt-4o',
       endpoint: 'https://example.test/v1',
-      openaiCompatible: true,
     });
 
     expect(result).toEqual({
       success: false,
-      message: 'Connection failed: upstream stream failed',
+      message:
+        'Connection failed for openai. Verify the Connection API, endpoint, model, and credentials.',
     });
+    expect(result.message).not.toContain('upstream stream failed');
     expect(signal?.aborted).toBe(true);
   });
 
@@ -171,11 +199,10 @@ describe('AIClient connection testing', () => {
 
     try {
       const resultPromise = AIClient.getInstance().testConnectionWithDetails({
-        provider: 'openai',
+        apiProtocol: 'openai-chat-completions',
         apiKey: 'sk-test',
         model: 'gpt-4o',
         endpoint: 'https://example.test/v1',
-        openaiCompatible: true,
       });
 
       await vi.advanceTimersByTimeAsync(10000);

@@ -7,9 +7,7 @@ import type { SlashCommand } from '../types';
 import { CommandRegistry } from '../lib/commands/registry';
 import { openModal, closeModal, setupBackdropHandler } from './modal-manager';
 import { createCard, setupModalFooter } from './card-component';
-
-// Built-in commands that cannot be overridden by users
-const BUILTIN_COMMANDS = ['settings', 'tools', 'help', 'clear'];
+import { isBuiltinCommandName } from '../lib/commands/storage';
 
 let commandRegistry: CommandRegistry;
 let editingCommandName: string | null = null;
@@ -96,7 +94,7 @@ function setupCommandEventListeners(): void {
  */
 function checkCommandConflicts(name: string): string {
   // Check for conflicts with built-in commands
-  if (BUILTIN_COMMANDS.includes(name.toLowerCase())) {
+  if (isBuiltinCommandName(name)) {
     return `"${name}" is a built-in command and cannot be used`;
   }
 
