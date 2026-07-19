@@ -30,14 +30,14 @@
     "postinstall": "husky || true"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.74",
-    "@ai-sdk/google": "^2.0.68",
-    "@ai-sdk/openai": "^2.0.102",
+    "@ai-sdk/anthropic": "^2.0.87",
+    "@ai-sdk/google": "^2.0.82",
+    "@ai-sdk/openai": "^2.0.114",
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/json-schema": "^7.0.15",
     "@types/prismjs": "^1.26.6",
-    "ai": "^5.0.173",
+    "ai": "^5.0.216",
     "json-formatter-js": "^2.5.23",
     "linkedom": "^0.18.12",
     "loglevel": "^1.9.2",
