@@ -59,27 +59,3 @@ export function getProviderDisplay(provider: AIProvider): { name: string; icon: 
       return { name: provider, icon: '' };
   }
 }
-
-/**
- * Check if an endpoint URL looks like an OpenAI-compatible format
- * Simple heuristics for smart defaults
- *
- * @param endpoint - The endpoint URL
- * @returns true if likely OpenAI-compatible
- */
-export function isLikelyOpenAICompatible(endpoint: string): boolean {
-  if (!endpoint) return false;
-
-  const endpointLower = endpoint.toLowerCase();
-
-  // Common OpenAI-compatible patterns
-  if (endpointLower.includes('/v1')) return true;
-
-  // Native provider endpoints (NOT OpenAI-compatible)
-  if (endpointLower.includes('/vendors/')) return false;
-  if (endpointLower.includes('anthropic.com')) return false;
-  if (endpointLower.includes('googleapis.com')) return false;
-
-  // Default to true - most proxies are OpenAI-compatible
-  return true;
-}

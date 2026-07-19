@@ -3,12 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => {
   const responsesModel = { transport: 'responses' };
   const chatModel = { transport: 'chat-completions' };
-  const openAIProvider = Object.assign(
-    vi.fn(() => responsesModel),
-    {
-      chat: vi.fn(() => chatModel),
-    }
-  );
+  const openAIProvider = {
+    responses: vi.fn(() => responsesModel),
+    chat: vi.fn(() => chatModel),
+  };
 
   return {
     responsesModel,
@@ -62,15 +60,18 @@ describe('AIClient connection testing', () => {
       provider: 'openai',
       apiKey: 'sk-test',
       model: 'gpt-5.6-sol',
-      endpoint: 'https://proxy.shopify.ai/v1',
+      endpoint: 'https://gateway.example.test/v1',
       openaiCompatible: false,
     });
 
     expect(result.success).toBe(true);
-    expect(mocks.openAIProvider).toHaveBeenCalledWith('gpt-5.6-sol');
+    expect(mocks.openAIProvider.responses).toHaveBeenCalledWith('gpt-5.6-sol');
     expect(mocks.openAIProvider.chat).not.toHaveBeenCalled();
     expect(mocks.streamText).toHaveBeenCalledWith(
-      expect.objectContaining({ model: mocks.responsesModel })
+      expect.objectContaining({
+        model: mocks.responsesModel,
+        providerOptions: { openai: { store: false } },
+      })
     );
   });
 
@@ -85,7 +86,7 @@ describe('AIClient connection testing', () => {
 
     expect(result.success).toBe(true);
     expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('gpt-4o');
-    expect(mocks.openAIProvider).not.toHaveBeenCalled();
+    expect(mocks.openAIProvider.responses).not.toHaveBeenCalled();
     expect(mocks.streamText).toHaveBeenCalledWith(
       expect.objectContaining({ model: mocks.chatModel })
     );
@@ -101,7 +102,7 @@ describe('AIClient connection testing', () => {
 
     expect(result.success).toBe(true);
     expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('gpt-4o');
-    expect(mocks.openAIProvider).not.toHaveBeenCalled();
+    expect(mocks.openAIProvider.responses).not.toHaveBeenCalled();
   });
 
   it('aborts the provider request after the first successful chunk', async () => {
@@ -115,7 +116,7 @@ describe('AIClient connection testing', () => {
       provider: 'openai',
       apiKey: 'sk-test',
       model: 'gpt-5.6-sol',
-      endpoint: 'https://proxy.shopify.ai/v1',
+      endpoint: 'https://gateway.example.test/v1',
       openaiCompatible: false,
     });
 

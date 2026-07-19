@@ -6,16 +6,15 @@
  */
 
 import log from '../logger';
-import { createOpenAI } from '@ai-sdk/openai';
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { streamText, type LanguageModel, CoreMessage, type JSONValue } from 'ai';
+import { streamText, CoreMessage } from 'ai';
 import type { AgentConfig } from '../storage/config';
 import type { AIProvider, ToolCall } from '../../types';
 import { ConfigStorage, resolveSystemPrompt } from '../storage/config';
 import { getToolRegistry } from '../webmcp/tool-registry';
 import { getRemoteMCPManager } from '../mcp/manager';
-import { inferProviderFromModel, isLikelyOpenAICompatible } from './provider-utils';
+import { createModelRuntime } from './model-runtime';
+import { isOpenAIProtocol } from './protocol';
+import { migrateAgentToV2 } from '../storage/config-migration';
 
 // Interface for API error objects that may have additional properties
 interface APIError extends Error {
@@ -73,154 +72,6 @@ export class AIClient {
   }
 
   /**
-   * Build provider-specific options for reasoning support
-   * Uses dynamic configuration from agent.reasoning
-   */
-  private buildReasoningOptions(
-    agent: AgentConfig
-  ): Record<string, Record<string, JSONValue>> | undefined {
-    if (!agent.reasoning?.enabled) return undefined;
-
-    // Provider-specific reasoning configurations
-    switch (agent.provider) {
-      case 'anthropic':
-        // Claude 4 models support thinking with budgetTokens
-        return {
-          anthropic: {
-            thinking: {
-              type: 'enabled',
-              budgetTokens: agent.reasoning.anthropic?.thinkingBudgetTokens || 12000,
-            },
-          },
-        };
-
-      case 'openai': {
-        // GPT-5 models support reasoningEffort and reasoningSummary
-        const openaiConfig: {
-          openai: {
-            reasoningEffort: string;
-            reasoningSummary?: string;
-          };
-        } = {
-          openai: {
-            reasoningEffort: agent.reasoning.openai?.reasoningEffort || 'medium',
-          },
-        };
-        if (agent.reasoning.openai?.reasoningSummary) {
-          openaiConfig.openai.reasoningSummary = agent.reasoning.openai.reasoningSummary;
-        }
-        return openaiConfig;
-      }
-
-      case 'google': {
-        // Gemini 2.5 models support thinkingConfig
-        return {
-          google: {
-            thinkingConfig: {
-              thinkingBudget: agent.reasoning.google?.thinkingBudget ?? 8192,
-              includeThoughts: agent.reasoning.google?.includeThoughts ?? true,
-            },
-          },
-        };
-      }
-
-      default:
-        return undefined;
-    }
-  }
-
-  /**
-   * Create a provider instance for a specific agent
-   *
-   * Flexible proxy strategy:
-   * - Support both OpenAI-compatible and native format proxies
-   * - Infer provider from model name when needed
-   * - Show visual indicators for proxy connections
-   */
-  private createProviderForAgent(agent: AgentConfig): () => LanguageModel {
-    // When custom endpoint is set, determine format
-    if (agent.endpoint) {
-      // Determine if we should use OpenAI format
-      // Priority: explicit setting > smart default
-      const useOpenAIFormat = agent.openaiCompatible ?? isLikelyOpenAICompatible(agent.endpoint);
-
-      if (useOpenAIFormat) {
-        log.warn(
-          `[AIClient] Using OpenAI-compatible format for endpoint: ${agent.endpoint} (model: ${agent.model})`
-        );
-        const openai = createOpenAI({
-          apiKey: agent.apiKey || 'no-key-provided',
-          baseURL: agent.endpoint,
-        });
-        // Use .chat() to force /v1/chat/completions (not /v1/responses)
-        return () => openai.chat(agent.model);
-      }
-
-      // Native format with custom endpoint
-      log.warn(`[AIClient] Using native ${agent.provider} format for endpoint: ${agent.endpoint}`);
-      // Fall through to native SDK creation with custom endpoint
-    }
-
-    // Use provider field if set, otherwise infer from model
-    const effectiveProvider = agent.provider || inferProviderFromModel(agent.model);
-
-    // Create provider SDK (either direct or with custom endpoint)
-    switch (effectiveProvider) {
-      case 'openai': {
-        const openai = createOpenAI({
-          apiKey: agent.apiKey || 'no-key-provided',
-          baseURL: agent.endpoint, // undefined for direct, custom for native proxy
-        });
-        return () => openai(agent.model);
-      }
-
-      case 'anthropic': {
-        const anthropicConfig: Parameters<typeof createAnthropic>[0] = {
-          apiKey: agent.apiKey || 'no-key-provided',
-          baseURL: agent.endpoint,
-        };
-
-        // Only add CORS headers for direct API (no custom endpoint)
-        if (!agent.endpoint) {
-          anthropicConfig.headers = {
-            'anthropic-dangerous-direct-browser-access': 'true',
-          };
-          anthropicConfig.fetch = async (url, options) => {
-            return globalThis.fetch(url, {
-              ...options,
-              headers: {
-                ...options?.headers,
-                'anthropic-dangerous-direct-browser-access': 'true',
-              },
-            });
-          };
-        }
-
-        const anthropic = createAnthropic(anthropicConfig);
-        return () => anthropic(agent.model);
-      }
-
-      case 'google': {
-        const google = createGoogleGenerativeAI({
-          apiKey: agent.apiKey || 'no-key-provided',
-          baseURL: agent.endpoint,
-        });
-        return () => google(agent.model);
-      }
-
-      default: {
-        // For unknown providers, default to OpenAI SDK (most compatible)
-        log.warn(`[AIClient] Unknown provider "${effectiveProvider}", using OpenAI SDK`);
-        const openai = createOpenAI({
-          apiKey: agent.apiKey || 'no-key-provided',
-          baseURL: agent.endpoint,
-        });
-        return () => openai(agent.model);
-      }
-    }
-  }
-
-  /**
    * Check if an agent is configured and ready
    */
   async isAgentAvailable(agentId: string): Promise<boolean> {
@@ -266,13 +117,12 @@ export class AIClient {
       this.abortController?.abort();
       this.abortController = new AbortController();
 
-      // Create provider for this agent
-      const modelFactory = this.createProviderForAgent(agent);
-      const model = modelFactory();
+      const resolvedAgent = migrateAgentToV2(agent);
+      const runtime = createModelRuntime(resolvedAgent);
 
       // Build system prompt: base + user custom + MCP server instructions (if any)
       const mcpInstructions = getRemoteMCPManager().getMCPInstructions();
-      const systemParts = [resolveSystemPrompt(agent), mcpInstructions].filter(Boolean);
+      const systemParts = [resolveSystemPrompt(resolvedAgent), mcpInstructions].filter(Boolean);
       const systemPrompt = systemParts.join('\n\n');
 
       const messagesWithSystem: CoreMessage[] = systemPrompt
@@ -314,11 +164,8 @@ export class AIClient {
           log.warn('[AIClient] No tools available in registry');
         }
 
-        // Build reasoning options if enabled
-        const reasoningOptions = this.buildReasoningOptions(agent);
-
         const streamParams: Parameters<typeof streamText>[0] = {
-          model,
+          model: runtime.model,
           messages: messagesWithSystem,
           // Don't pass temperature when reasoning is enabled (SDK warning suggests this)
           ...(agent.reasoning?.enabled ? {} : { temperature: agent.temperature }),
@@ -337,9 +184,8 @@ export class AIClient {
               return false;
             },
           }),
-          // Add provider-specific reasoning options under providerOptions
-          ...(reasoningOptions && {
-            providerOptions: reasoningOptions,
+          ...(runtime.providerOptions && {
+            providerOptions: runtime.providerOptions,
           }),
         };
 
@@ -350,7 +196,8 @@ export class AIClient {
           toolCount: hasTools ? Object.keys(allTools).length : 0,
           temperature: agent.temperature,
           reasoningEnabled: agent.reasoning?.enabled || false,
-          reasoningOptions,
+          apiProtocol: runtime.apiProtocol,
+          providerOptions: runtime.providerOptions,
           fullStreamParams: streamParams,
         });
 
@@ -359,7 +206,7 @@ export class AIClient {
             provider: agent.provider,
             model: agent.model,
             config: agent.reasoning,
-            reasoningOptions,
+            apiProtocol: runtime.apiProtocol,
             providerOptions: streamParams.providerOptions,
           });
         }
@@ -515,7 +362,7 @@ export class AIClient {
               if (part.type === 'text-start') {
                 // For non-OpenAI providers, end reasoning if it's still active
                 // OpenAI sends explicit reasoning-end events, so we don't need this
-                if (isReasoning && agent.provider !== 'openai') {
+                if (isReasoning && !isOpenAIProtocol(runtime.apiProtocol)) {
                   log.warn('🧠 [Reasoning] Ended (text-start detected)');
                   callbacks.onReasoningEnd?.(reasoningTokens ? { reasoningTokens } : undefined);
                   isReasoning = false;
@@ -783,8 +630,7 @@ export class AIClient {
         maxTokens: 1000,
       };
 
-      const modelFactory = this.createProviderForAgent(tempAgent);
-      const model = modelFactory();
+      const runtime = createModelRuntime(migrateAgentToV2(tempAgent));
 
       const testMessages: CoreMessage[] = [
         { role: 'user', content: 'Say "Connection successful" in 3 words or less.' },
@@ -797,11 +643,12 @@ export class AIClient {
 
       try {
         const result = await streamText({
-          model,
+          model: runtime.model,
           messages: testMessages,
           temperature: 0.7,
           maxRetries: 1,
           abortSignal: testAbortController.signal,
+          ...(runtime.providerOptions && { providerOptions: runtime.providerOptions }),
         });
 
         const timeoutPromise = new Promise<boolean>((_, reject) => {
