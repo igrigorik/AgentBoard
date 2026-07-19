@@ -43,10 +43,17 @@ vi.mock('../src/lib/mcp/manager', () => ({
 
 import { AIClient } from '../src/lib/ai/client';
 
+function textStream(read: () => Promise<ReadableStreamReadResult<string>>) {
+  return {
+    getReader: () => ({
+      read,
+      releaseLock: vi.fn(),
+    }),
+  };
+}
+
 function successfulTextStream() {
-  return (async function* () {
-    yield 'OK';
-  })();
+  return textStream(async () => ({ done: false, value: 'OK' }));
 }
 
 describe('AIClient connection testing', () => {
@@ -70,6 +77,7 @@ describe('AIClient connection testing', () => {
     expect(mocks.streamText).toHaveBeenCalledWith(
       expect.objectContaining({
         model: mocks.responsesModel,
+        maxRetries: 0,
         providerOptions: { openai: { store: false } },
       })
     );
@@ -129,9 +137,7 @@ describe('AIClient connection testing', () => {
     mocks.streamText.mockImplementation((options: { abortSignal?: AbortSignal }) => {
       signal = options.abortSignal;
       return {
-        textStream: (async function* () {
-          yield await Promise.reject(new Error('upstream stream failed'));
-        })(),
+        textStream: textStream(async () => Promise.reject(new Error('upstream stream failed'))),
       };
     });
 
@@ -156,10 +162,10 @@ describe('AIClient connection testing', () => {
     mocks.streamText.mockImplementation((options: { abortSignal?: AbortSignal }) => {
       signal = options.abortSignal;
       return {
-        textStream: (async function* () {
+        textStream: textStream(async () => {
           await new Promise(() => {});
-          yield 'unreachable';
-        })(),
+          return { done: false, value: 'unreachable' };
+        }),
       };
     });
 

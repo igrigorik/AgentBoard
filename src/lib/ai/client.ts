@@ -646,7 +646,7 @@ export class AIClient {
           model: runtime.model,
           messages: testMessages,
           temperature: 0.7,
-          maxRetries: 1,
+          maxRetries: 0,
           abortSignal: testAbortController.signal,
           ...(runtime.providerOptions && { providerOptions: runtime.providerOptions }),
         });
@@ -660,12 +660,15 @@ export class AIClient {
         });
 
         const streamPromise = (async () => {
-          let receivedData = false;
-          for await (const _chunk of result.textStream) {
-            receivedData = true;
-            break; // Need first chunk to verify connection
+          // Reading one chunk directly avoids AsyncIterator.return(), which cancels some
+          // provider streams with an undefined reason before our owned abort can run.
+          const reader = result.textStream.getReader();
+          try {
+            const { done, value } = await reader.read();
+            return !done && value.length > 0;
+          } finally {
+            reader.releaseLock();
           }
-          return receivedData;
         })();
 
         const receivedData = await Promise.race([streamPromise, timeoutPromise]);
