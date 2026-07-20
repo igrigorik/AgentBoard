@@ -25,6 +25,27 @@ declare global {
 
 const configStorage = ConfigStorage.getInstance();
 
+/** Keep programmatic injection aligned with manifest host permissions and browser-protected stores. */
+export function supportsWebMCPInjection(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === 'http:') return url.hostname === 'localhost';
+    if (url.protocol !== 'https:') return false;
+    if (url.hostname === 'chromewebstore.google.com') return false;
+    if (url.hostname === 'chrome.google.com' && url.pathname.startsWith('/webstore')) return false;
+    if (url.hostname === 'microsoftedge.microsoft.com' && url.pathname.startsWith('/addons')) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isProtectedExtensionGalleryError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('extensions gallery cannot be scripted');
+}
+
 export interface InjectionOptions {
   tabId: number;
   url: string;
@@ -338,6 +359,10 @@ export async function reinjectScripts(
       log.debug(`[WebMCP Injector] Tab ${tabId} has no URL`);
       return;
     }
+    if (!supportsWebMCPInjection(tab.url)) {
+      log.debug('[WebMCP Injector] Skipping unsupported injection target');
+      return;
+    }
 
     const generation = globalThis.crypto.randomUUID();
 
@@ -375,6 +400,11 @@ export async function reinjectScripts(
       generation,
     });
   } catch (error) {
+    if (isProtectedExtensionGalleryError(error)) {
+      // Navigation can race the URL check above; browser extension stores remain protected.
+      log.debug('[WebMCP Injector] Skipping protected extension gallery');
+      return;
+    }
     log.error(`[WebMCP Injector] Failed to re-inject scripts:`, error);
   }
 }

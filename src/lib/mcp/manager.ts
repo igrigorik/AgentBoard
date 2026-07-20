@@ -262,16 +262,6 @@ export class RemoteMCPManager {
     this.serverTools.clear();
     this.serverInstructions.clear();
   }
-
-  /**
-   * Get tools for AI SDK integration
-   * Returns tools in a format ready for the AI SDK
-   */
-  async getAISDKTools() {
-    // Import dynamically to avoid circular dependencies
-    const { getMCPToolsForAISDK } = await import('./tool-bridge');
-    return getMCPToolsForAISDK();
-  }
 }
 
 // Singleton instance

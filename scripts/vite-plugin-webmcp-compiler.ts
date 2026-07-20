@@ -59,6 +59,11 @@ const DEFAULT_CONFIG: PluginConfig = {
   sourcesOutputPath: 'src/lib/webmcp/builtin-sources.ts',
 };
 
+const SYSTEM_TOOL_SOURCES = [
+  { id: 'agentboard_fetch_url', path: 'fetch/fetch-url.ts' },
+  { id: 'agentboard_navigate', path: 'navigate/index.ts' },
+] as const;
+
 /**
  * Main plugin function
  */
@@ -80,28 +85,37 @@ export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin
       console.log('[WebMCP Compiler] Starting tool compilation...');
 
       try {
-        // Scan tool directories
-        const toolDirs = fs.readdirSync(config.toolsSourceDir).filter((name) => {
+        // Page tools are self-registering script.js files. System tools are
+        // ordinary TypeScript modules bundled through the extension entrypoints.
+        const allToolDirs = fs.readdirSync(config.toolsSourceDir).filter((name) => {
           const fullPath = path.join(config.toolsSourceDir, name);
           return fs.statSync(fullPath).isDirectory();
         });
+        const systemToolDirs = new Set(
+          SYSTEM_TOOL_SOURCES.map(({ path: source }) => path.dirname(source))
+        );
+        const pageToolDirs = allToolDirs.filter((toolDir) =>
+          fs.existsSync(path.join(config.toolsSourceDir, toolDir, 'script.js'))
+        );
+        const invalidToolDirs = allToolDirs.filter(
+          (toolDir) => !pageToolDirs.includes(toolDir) && !systemToolDirs.has(toolDir)
+        );
+        if (invalidToolDirs.length > 0) {
+          throw new Error(`Tool directories missing script.js: ${invalidToolDirs.join(', ')}`);
+        }
 
         // eslint-disable-next-line no-console
-        console.log(`[WebMCP Compiler] Found ${toolDirs.length} tool directories`);
+        console.log(
+          `[WebMCP Compiler] Found ${pageToolDirs.length} page tools and ${systemToolDirs.size} system tools`
+        );
 
         compiledTools = [];
         compiledToolsMap.clear();
 
-        // Compile each tool
-        for (const toolDir of toolDirs) {
+        // Compile each page tool
+        for (const toolDir of pageToolDirs) {
           try {
             const scriptPath = path.join(config.toolsSourceDir, toolDir, 'script.js');
-
-            if (!fs.existsSync(scriptPath)) {
-              console.warn(`[WebMCP Compiler] No script.js found in ${toolDir}, skipping`);
-              continue;
-            }
-
             const { info, code } = await compileTool(scriptPath);
             compiledTools.push(info);
             compiledToolsMap.set(info.file, code);
@@ -408,13 +422,10 @@ function generateBuiltinSources(toolsSourceDir: string, outputPath: string): voi
   }
 
   // Read system tool sources (TypeScript)
-  const systemTools = [
-    ['agentboard_fetch_url', path.join(toolsSourceDir, 'fetch', 'fetch-url.ts')],
-    ['agentboard_navigate', path.join(toolsSourceDir, 'navigate', 'index.ts')],
-  ] as const;
-  for (const [toolId, toolPath] of systemTools) {
+  for (const { id, path: sourcePath } of SYSTEM_TOOL_SOURCES) {
+    const toolPath = path.join(toolsSourceDir, sourcePath);
     if (fs.existsSync(toolPath)) {
-      sources[toolId] = fs.readFileSync(toolPath, 'utf-8');
+      sources[id] = fs.readFileSync(toolPath, 'utf-8');
     }
   }
 

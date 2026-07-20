@@ -5,7 +5,12 @@
 
 import log from '../logger';
 import type { WebMCPMessage, ToolsListChangedParams } from '../../types/index';
-import { injectUserScripts, reinjectScripts } from './script-injector';
+import {
+  injectUserScripts,
+  isProtectedExtensionGalleryError,
+  reinjectScripts,
+  supportsWebMCPInjection,
+} from './script-injector';
 import { getToolRegistry } from './tool-registry';
 import { COMPILED_TOOLS } from './tools/index';
 import { matchesUrl } from './script-parser';
@@ -531,14 +536,8 @@ export class TabManager {
       const tab = await chrome.tabs.get(tabId);
       if (!tab?.url) return;
 
-      // Skip chrome:// and other restricted URLs
-      if (
-        tab.url.startsWith('chrome://') ||
-        tab.url.startsWith('chrome-extension://') ||
-        tab.url.startsWith('edge://') ||
-        tab.url.startsWith('about:')
-      ) {
-        log.debug(`[WebMCP Lifecycle] Skipping injection for restricted URL: ${tab.url}`);
+      if (!supportsWebMCPInjection(tab.url)) {
+        log.debug('[WebMCP Lifecycle] Skipping unsupported injection target');
         return;
       }
 
@@ -582,6 +581,9 @@ export class TabManager {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg.includes('No tab with id')) {
         log.debug(`[WebMCP Lifecycle] Tab ${tabId} gone before injection (prerender/discard)`);
+      } else if (isProtectedExtensionGalleryError(error)) {
+        // Navigation can race the URL check above; browser extension stores remain protected.
+        log.debug('[WebMCP Lifecycle] Skipping protected extension gallery');
       } else {
         log.error(`[WebMCP Lifecycle] Failed to inject scripts into tab ${tabId}:`, error);
       }
@@ -717,15 +719,7 @@ export class TabManager {
       const tabUrl = tab.url;
       if (!tabId || !tabUrl) continue;
 
-      // Skip restricted URLs
-      if (
-        tabUrl.startsWith('chrome://') ||
-        tabUrl.startsWith('chrome-extension://') ||
-        tabUrl.startsWith('edge://') ||
-        tabUrl.startsWith('about:')
-      ) {
-        continue;
-      }
+      if (!supportsWebMCPInjection(tabUrl)) continue;
 
       try {
         await this.runScriptOperation(tabId, () =>

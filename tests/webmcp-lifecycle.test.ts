@@ -438,23 +438,23 @@ describe('TabManager', () => {
       expect(mockChrome.scripting.executeScript).not.toHaveBeenCalled();
     });
 
-    it('should skip injection for restricted URLs', async () => {
-      mockChrome.tabs.get.mockResolvedValue({
-        id: 123,
-        url: 'chrome://extensions',
-      });
+    it('should skip URLs outside manifest permissions and protected extension stores', async () => {
+      const unsupportedUrls = [
+        'chrome://extensions',
+        'chrome-extension://abc123',
+        'about:blank',
+        'file:///tmp/example.html',
+        'http://example.com',
+        'https://chromewebstore.google.com/detail/example/abc123',
+        'https://chrome.google.com/webstore/detail/example/abc123',
+        'https://microsoftedge.microsoft.com/addons/detail/example/abc123',
+      ];
 
-      await lifecycle.injectScripts(123);
+      for (const url of unsupportedUrls) {
+        mockChrome.tabs.get.mockResolvedValue({ id: 123, url });
+        await lifecycle.injectScripts(123);
+      }
 
-      expect(mockChrome.scripting.executeScript).not.toHaveBeenCalled();
-
-      // Test other restricted URLs
-      mockChrome.tabs.get.mockResolvedValue({
-        id: 123,
-        url: 'chrome-extension://abc123',
-      });
-
-      await lifecycle.injectScripts(123);
       expect(mockChrome.scripting.executeScript).not.toHaveBeenCalled();
     });
   });
