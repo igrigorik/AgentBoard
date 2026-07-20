@@ -644,7 +644,7 @@ export class AIClient {
         if (!receivedData) {
           return {
             success: false,
-            message: 'Connection established but no response was received.',
+            message: 'Endpoint returned no text. Verify it implements the selected Connection API.',
           };
         }
 

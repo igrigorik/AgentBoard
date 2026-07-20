@@ -564,27 +564,26 @@ async function updateLogLevel() {
 function updateApiKeyRequirement() {
   const endpointInput = document.getElementById('agent-endpoint') as HTMLInputElement;
   const apiKeyInput = document.getElementById('agent-api-key') as HTMLInputElement;
+  const requiredMarker = document.getElementById('agent-api-key-required');
   const hintEl = document.querySelector('.api-key-hint') as HTMLElement;
   const endpoint = endpointInput?.value?.trim();
 
   if (apiKeyInput) {
-    // Toggle required attribute based on endpoint presence
+    // A custom endpoint may authenticate out of band, but its mere presence
+    // cannot prove that requests are anonymous.
     if (endpoint) {
       apiKeyInput.removeAttribute('required');
     } else {
       apiKeyInput.setAttribute('required', '');
     }
   }
+  requiredMarker?.classList.toggle('hidden', Boolean(endpoint));
 
-  // Update hint text
   if (hintEl) {
-    if (endpoint) {
-      hintEl.textContent = '✓ Optional with proxy URL';
-      hintEl.className = 'api-key-hint valid';
-    } else {
-      hintEl.textContent = '';
-      hintEl.className = 'api-key-hint';
-    }
+    hintEl.textContent = endpoint
+      ? 'Optional only if this endpoint accepts requests without an API key.'
+      : 'Required for direct provider connections.';
+    hintEl.className = 'api-key-hint';
   }
 }
 

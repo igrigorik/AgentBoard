@@ -16,6 +16,23 @@ export interface ModelRuntime {
   providerOptions?: ProviderOptions;
 }
 
+const PROVIDER_AUTH_HEADERS = ['authorization', 'x-api-key', 'x-goog-api-key'] as const;
+
+async function fetchWithoutProviderAuthentication(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  for (const header of PROVIDER_AUTH_HEADERS) headers.delete(header);
+  return globalThis.fetch(input, { ...init, headers });
+}
+
+function keylessEndpointFetch(
+  agent: AgentConfig
+): typeof fetchWithoutProviderAuthentication | undefined {
+  return agent.endpoint && !agent.apiKey ? fetchWithoutProviderAuthentication : undefined;
+}
+
 function buildOpenAIResponsesOptions(agent: AgentConfig): ProviderOptions {
   const options: Record<string, JSONValue> = { store: false };
   const reasoning = agent.reasoning?.enabled ? agent.reasoning.openai : undefined;
@@ -76,9 +93,11 @@ function buildGoogleOptions(agent: AgentConfig): ProviderOptions | undefined {
 export function createModelRuntime(agent: AgentConfig): ModelRuntime {
   switch (agent.apiProtocol) {
     case 'openai-responses': {
+      const keylessFetch = keylessEndpointFetch(agent);
       const openai = createOpenAI({
         apiKey: agent.apiKey || 'no-key-provided',
         baseURL: agent.endpoint,
+        ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
         apiProtocol: agent.apiProtocol,
@@ -88,9 +107,11 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
     }
 
     case 'openai-chat-completions': {
+      const keylessFetch = keylessEndpointFetch(agent);
       const openai = createOpenAI({
         apiKey: agent.apiKey || 'no-key-provided',
         baseURL: agent.endpoint,
+        ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
         apiProtocol: agent.apiProtocol,
@@ -100,9 +121,11 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
     }
 
     case 'anthropic-messages': {
+      const keylessFetch = keylessEndpointFetch(agent);
       const anthropicConfig: Parameters<typeof createAnthropic>[0] = {
         apiKey: agent.apiKey || 'no-key-provided',
         baseURL: agent.endpoint,
+        ...(keylessFetch && { fetch: keylessFetch }),
       };
 
       // Anthropic requires this opt-in only for browser-to-provider requests.
@@ -130,9 +153,11 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
     }
 
     case 'google-generative-ai': {
+      const keylessFetch = keylessEndpointFetch(agent);
       const google = createGoogleGenerativeAI({
         apiKey: agent.apiKey || 'no-key-provided',
         baseURL: agent.endpoint,
+        ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
         apiProtocol: agent.apiProtocol,

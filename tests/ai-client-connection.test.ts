@@ -187,6 +187,25 @@ describe('AIClient connection testing', () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it('explains that an empty stream can indicate an API contract mismatch', async () => {
+    mocks.streamText.mockReturnValue({
+      textStream: textStream(async () => ({ done: true, value: undefined })),
+    });
+
+    const result = await AIClient.getInstance().testConnectionWithDetails({
+      apiProtocol: 'openai-chat-completions',
+      model: 'opaque-model',
+      endpoint: 'https://example.test/v1',
+    });
+
+    expect(result).toEqual({
+      success: false,
+      message: 'Endpoint returned no text. Verify it implements the selected Connection API.',
+    });
+    expect(JSON.stringify(result)).not.toContain('example.test');
+    expect(JSON.stringify(result)).not.toContain('opaque-model');
+  });
+
   it('aborts the provider request when stream consumption fails', async () => {
     let signal: AbortSignal | undefined;
     mocks.streamText.mockImplementation((options: { abortSignal?: AbortSignal }) => {

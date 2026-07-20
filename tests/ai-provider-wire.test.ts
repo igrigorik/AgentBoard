@@ -332,6 +332,50 @@ describe('AI provider wire contracts', () => {
     });
   });
 
+  it.each([
+    {
+      name: 'OpenAI Responses',
+      apiProtocol: 'openai-responses',
+      provider: 'openai',
+      model: 'gpt-5-wire',
+      chunks: responseFixtures.responses,
+    },
+    {
+      name: 'OpenAI Chat Completions',
+      apiProtocol: 'openai-chat-completions',
+      provider: 'openai',
+      model: 'gpt-4o-wire',
+      chunks: responseFixtures.chat,
+    },
+    {
+      name: 'Anthropic Messages',
+      apiProtocol: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-wire',
+      chunks: responseFixtures.anthropic,
+    },
+    {
+      name: 'Google Generative AI',
+      apiProtocol: 'google-generative-ai',
+      provider: 'google',
+      model: 'gemini-wire',
+      chunks: responseFixtures.google,
+    },
+  ] as const)(
+    'omits provider authentication for a keyless custom $name endpoint',
+    async (testCase) => {
+      const request = await captureWireRequest(testCase.apiProtocol, testCase.chunks, {
+        provider: testCase.provider,
+        model: testCase.model,
+        apiKey: undefined,
+      });
+
+      expect(request.headers.authorization).toBeUndefined();
+      expect(request.headers['x-api-key']).toBeUndefined();
+      expect(request.headers['x-goog-api-key']).toBeUndefined();
+    }
+  );
+
   it('normalizes a direct-style trailing-slash base URL', async () => {
     const request = await captureWireRequest(
       'openai-responses',

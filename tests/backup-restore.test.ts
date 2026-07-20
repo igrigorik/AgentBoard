@@ -92,6 +92,22 @@ describe('backup schema boundary', () => {
     expect(chrome.storage.local.clear).not.toHaveBeenCalled();
   });
 
+  it('accepts schema v2 config wrapped by a rolled-back v1 exporter', () => {
+    const source = backup('1.0', {
+      schemaVersion: 2,
+      agents: [currentAgent({ apiProtocol: 'openai-chat-completions' })],
+    });
+
+    const prepared = prepareBackupImport(source);
+
+    expect(prepared.config).toMatchObject({
+      schemaVersion: 2,
+      agents: [expect.objectContaining({ apiProtocol: 'openai-chat-completions' })],
+    });
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+    expect(chrome.storage.local.clear).not.toHaveBeenCalled();
+  });
+
   it('accepts a v2 backup without legacy inference or mutable input aliases', () => {
     const source = backup('2.0', {
       schemaVersion: 2,
@@ -109,7 +125,6 @@ describe('backup schema boundary', () => {
 
   it.each([
     backup('2.0', { agents: [legacyAgent()] }),
-    backup('1.0', { schemaVersion: 2, agents: [currentAgent()] }),
     { ...backup('2.0', { schemaVersion: 2, agents: [] }), version: '3.0' },
     backup('1.0', { agents: [legacyAgent(), null] }),
     backup('2.0', {

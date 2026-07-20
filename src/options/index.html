@@ -160,12 +160,12 @@
 
           <div class="form-group">
             <label for="agent-connection-api">Connection API *</label>
-            <select id="agent-connection-api" required>
+            <select id="agent-connection-api" aria-describedby="agent-connection-api-hint" required>
               <option value="openai">OpenAI-style API</option>
-              <option value="anthropic">Anthropic API</option>
-              <option value="google">Google Gemini API</option>
+              <option value="anthropic">Anthropic Messages API</option>
+              <option value="google">Google Generative AI API</option>
             </select>
-            <span class="field-hint">Select the HTTP API contract. Model IDs and endpoints are passed through unchanged.</span>
+            <span class="field-hint" id="agent-connection-api-hint">Choose the API contract implemented by the endpoint, not the model vendor. A Gemini model behind an OpenAI-compatible proxy uses OpenAI-style.</span>
           </div>
 
           <div class="form-group" id="openai-api-mode-group">
@@ -248,13 +248,14 @@
 
           <div class="form-group">
             <label for="agent-endpoint">Custom provider endpoint / proxy (optional)</label>
-            <input type="url" id="agent-endpoint">
+            <input type="url" id="agent-endpoint" aria-describedby="agent-endpoint-hint">
+            <span class="field-hint" id="agent-endpoint-hint">Must implement the selected Connection API, including its authentication and streaming format.</span>
           </div>
 
           <div class="form-group">
-            <label for="agent-api-key">API Key *</label>
-            <input type="password" id="agent-api-key" placeholder="Your API key">
-            <span class="api-key-hint"></span>
+            <label for="agent-api-key">API Key <span id="agent-api-key-required">*</span></label>
+            <input type="password" id="agent-api-key" aria-describedby="agent-api-key-hint" placeholder="Your API key">
+            <span class="api-key-hint" id="agent-api-key-hint" aria-live="polite"></span>
           </div>
 
           <div class="form-group">

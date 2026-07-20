@@ -26,6 +26,6 @@ export function protocolBadgeLabel(protocol: ApiProtocol): string {
     case 'anthropic-messages':
       return 'Anthropic';
     case 'google-generative-ai':
-      return 'Google Gemini';
+      return 'Google Generative AI';
   }
 }

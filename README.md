@@ -65,7 +65,7 @@ Every agent has an explicit Connection API. AgentBoard never guesses a protocol 
 | Anthropic                  | `anthropic-messages`      | Anthropic Messages API                                                                         |
 | Google                     | `google-generative-ai`    | Google Generative AI API                                                                       |
 
-A custom endpoint must implement the selected contract, including its authentication and streaming format. The descriptive `provider` field can intentionally differ from the Connection API for proxy-routed agents.
+Choose the contract implemented by the endpoint, not the company that produced the model. For example, a Gemini model served by an OpenAI-compatible proxy uses an OpenAI-style Connection API. A custom endpoint must implement the selected contract, including its authentication and streaming format; when its API key is left blank, AgentBoard omits provider authentication headers. Existing or imported proxy-routed agents can retain descriptive `provider` metadata that differs from the Connection API, while newly created agents derive that metadata from the selected API.
 
 **Google with thinking:**
 
@@ -99,7 +99,7 @@ A custom endpoint must implement the selected contract, including its authentica
 }
 ```
 
-Configure as many profiles as you want. Switch mid-conversation. Current settings and exports use schema v2 with required `schemaVersion: 2` and per-agent `apiProtocol`. Released v1 settings and v1 backups are migrated once. Older releases ignore `apiProtocol` and may infer a different transport, so a safe rollback that preserves routing requires a pre-migration export or an explicit reverse migration.
+Configure as many profiles as you want. Switch mid-conversation. Current settings and exports use schema v2 with required `schemaVersion: 2` and per-agent `apiProtocol`. Released v1 settings and v1 backups are migrated once; a v1 backup envelope containing already-migrated v2 settings after a rollback is also accepted. Older releases ignore `apiProtocol` and may infer a different transport, so a safe rollback that preserves routing requires a pre-migration export or an explicit reverse migration.
 
 ## MCP tools
 
@@ -196,7 +196,7 @@ pnpm test         # Run tests
 pnpm run check    # Type check + lint + test
 ```
 
-Load `dist/` folder in `chrome://extensions` (Developer Mode).
+Load `dist/` folder in `chrome://extensions` (Developer Mode). Chromium derives an unpacked extension's identity from its absolute path, so loading `dist/` from a different checkout creates a separate installation with separate `chrome.storage.local` settings. Rebuild and reload the same unpacked path when testing an upgrade, or use an export to move settings between installations.
 
 ---
 

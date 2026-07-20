@@ -328,6 +328,23 @@ async function main() {
       ),
       true
     );
+    assert.match(
+      await evaluate(`document.querySelector('#agent-connection-api + .field-hint')?.textContent`),
+      /not the model vendor/i
+    );
+    assert.equal(
+      await evaluate(`document.querySelector('#agent-connection-api')?.getAttribute('aria-describedby')`),
+      'agent-connection-api-hint'
+    );
+    assert.equal(await evaluate(`document.querySelector('#agent-api-key')?.required`), false);
+    assert.equal(
+      await evaluate(`document.querySelector('#agent-api-key')?.getAttribute('aria-describedby')`),
+      'agent-api-key-hint'
+    );
+    assert.match(
+      await evaluate(`document.querySelector('.api-key-hint')?.textContent`),
+      /only if this endpoint accepts requests without an API key/i
+    );
     console.log('✓ rendered migrated legacy Chat as an explicit Connection API choice');
 
     await observeConfig();

@@ -21,7 +21,7 @@ const protocols = [
   {
     protocol: 'google-generative-ai' as const,
     connectionApi: 'google' as const,
-    badge: 'Google Gemini',
+    badge: 'Google Generative AI',
   },
 ] as const;
 

@@ -164,9 +164,9 @@ export function prepareBackupImport(value: unknown): PreparedBackup {
   }
 
   const parsed = parseStorageConfig(backup.config);
-  if (backup.version === LEGACY_BACKUP_VERSION && !parsed.migrated) {
-    throw new Error('Invalid legacy backup configuration');
-  }
+  // A v1 exporter can legitimately wrap schema-v2 config after a user rolls
+  // back to an older build. The envelope version describes the exporter, not
+  // the storage schema, so accept either validated schema under v1.
   if (backup.version === BACKUP_VERSION && parsed.migrated) {
     throw new Error('Invalid current backup configuration');
   }
