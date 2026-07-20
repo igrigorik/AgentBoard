@@ -23,6 +23,7 @@ export interface MCPToolExecution {
   toolName: string;
   serverName: string;
   input: Record<string, unknown>;
+  signal?: AbortSignal;
   output?: unknown;
   error?: Error;
 }
@@ -102,13 +103,11 @@ export class RemoteMCPManager {
           tools: [],
         };
       }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
+    } catch {
       return {
         name,
         status: 'error',
-        error: errorMessage,
+        error: 'Connection failed',
         tools: [],
       };
     }
@@ -142,36 +141,26 @@ export class RemoteMCPManager {
    * Tries servers in order until one has the tool
    */
   async executeTool(execution: MCPToolExecution): Promise<CallToolResult> {
+    if (execution.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
     log.info('🎯 [RemoteMCPManager] Executing tool:', {
       tool: execution.toolName,
       server: execution.serverName,
       input: execution.input,
     });
 
-    const startTime = Date.now();
-
     // First try the specified server if provided
     if (execution.serverName) {
       const client = this.clients.get(execution.serverName);
       if (client?.isConnected()) {
         try {
-          const result = await client.callTool(execution.toolName, execution.input);
-          const duration = Date.now() - startTime;
-
-          log.info('✅ [RemoteMCPManager] Tool execution complete:', {
-            tool: execution.toolName,
-            server: execution.serverName,
-            duration: `${duration}ms`,
-            resultType: typeof result,
-          });
-
-          return result;
+          return await client.callTool(execution.toolName, execution.input, execution.signal);
         } catch (error) {
           log.error(`Tool execution failed on ${execution.serverName}:`, error);
           throw error;
         }
       } else {
-        throw new Error(`Server '${execution.serverName}' is not connected`);
+        throw new Error('MCP server is not connected');
       }
     }
 
@@ -182,16 +171,17 @@ export class RemoteMCPManager {
         const client = this.clients.get(serverName);
         if (client?.isConnected()) {
           try {
-            return await client.callTool(execution.toolName, execution.input);
+            return await client.callTool(execution.toolName, execution.input, execution.signal);
           } catch (error) {
             log.error(`Tool execution failed on ${serverName}:`, error);
+            if (execution.signal?.aborted) throw error;
             // Continue to try other servers
           }
         }
       }
     }
 
-    throw new Error(`No connected server found with tool '${execution.toolName}'`);
+    throw new Error('MCP tool is unavailable');
   }
 
   /**

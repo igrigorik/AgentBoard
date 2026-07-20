@@ -55,10 +55,7 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
   'use strict';
   // Guard against double injection
   const scriptId = '${scriptName.replace(/'/g, "\\'")}';
-  if (window.__webmcpInjected && window.__webmcpInjected[scriptId]) {
-    console.log('[WebMCP] Script already injected:', scriptId);
-    return;
-  }
+  if (window.__webmcpInjected && window.__webmcpInjected[scriptId]) return;
 
   // Mark as injected and bind every registration or async discovery to this script lifetime.
   window.__webmcpInjected = window.__webmcpInjected || {};
@@ -71,25 +68,13 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
   const registrationController = new AbortController();
   registrations.set(scriptId, registrationController);
 
-  console.log('[WebMCP] Executing user script: ${scriptName}');
-
   try {
     ${transformedCode}
 
-    console.log('[WebMCP] User script executed, checking exports:', {
-      hasMetadata: typeof metadata !== 'undefined',
-      hasExecute: typeof execute !== 'undefined',
-      hasShouldRegister: typeof shouldRegister !== 'undefined'
-    });
-
     if (typeof shouldRegister === 'function') {
       try {
-        if (!shouldRegister({ signal: registrationController.signal })) {
-          console.log('[WebMCP] Tool ${scriptName} skipped registration (shouldRegister returned false)');
-          return;
-        }
-      } catch (error) {
-        console.error('[WebMCP] Error in shouldRegister for ${scriptName}:', error);
+        if (!shouldRegister({ signal: registrationController.signal })) return;
+      } catch {
         // Continue with registration if shouldRegister throws (fail-open)
       }
     }
@@ -108,33 +93,22 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
           signal: registrationController.signal
         });
         Promise.resolve(registration).then(
-          () => console.log('[WebMCP] Registered tool ${toolName} v${metadata.version}'),
+          () => undefined,
           (error) => {
             if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
-            if (registrationController.signal.aborted) {
-              console.log('[WebMCP] Superseded registration for ${scriptName}');
-              return;
-            }
+            if (registrationController.signal.aborted) return;
             registrationController.abort(error);
-            console.error('[WebMCP] Failed to register ${scriptName}:', error);
           }
         );
       } catch (error) {
         if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
         throw error;
       }
-    } else {
-      console.error('[WebMCP] Failed to register ${scriptName}:', {
-        hasModelContext: !!modelContext,
-        hasMetadata: typeof metadata !== 'undefined',
-        hasExecute: typeof execute !== 'undefined'
-      });
     }
 
   } catch (error) {
     if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
     registrationController.abort(error);
-    console.error('[WebMCP] Error executing script ${scriptName}:', error);
   }
 })();
 //# sourceURL=webmcp-script:${scriptName}.js`;
@@ -206,7 +180,6 @@ async function injectSingleScript(
 
     const injectionFunc = (codeToInject: string, expectedGeneration: string) =>
       new Promise<void>((resolve, reject) => {
-        console.warn('[WebMCP] Creating blob URL for user script injection');
         let blobUrl: string | undefined;
         let script: HTMLScriptElement | undefined;
         const cleanup = () => {
@@ -214,13 +187,13 @@ async function injectSingleScript(
           blobUrl = undefined;
           try {
             if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
-          } catch (error) {
-            console.warn('[WebMCP] Failed to revoke user script blob URL:', error);
+          } catch {
+            // Best-effort cleanup only.
           }
           try {
             script?.remove();
-          } catch (error) {
-            console.warn('[WebMCP] Failed to remove user script element:', error);
+          } catch {
+            // Best-effort cleanup only.
           }
         };
 
@@ -229,7 +202,6 @@ async function injectSingleScript(
             window.__agentboardUserScriptGeneration = expectedGeneration;
           }
           if (window.__agentboardUserScriptGeneration !== expectedGeneration) {
-            console.warn('[WebMCP] Skipping stale user script generation');
             resolve();
             return;
           }
@@ -240,8 +212,6 @@ async function injectSingleScript(
           const blob = new Blob([guardedCode], { type: 'application/javascript' });
           blobUrl = URL.createObjectURL(blob);
 
-          console.warn('[WebMCP] Blob URL created:', blobUrl);
-
           // Load script from blob: URL (external source, not inline)
           script = document.createElement('script');
 
@@ -249,40 +219,27 @@ async function injectSingleScript(
           try {
             // Use TT policy if available (created by webmcp-polyfill.js)
             if (window.__agentboardTTPolicy) {
-              console.warn('[WebMCP] Using Trusted Types policy for user script');
               script.src = window.__agentboardTTPolicy.createScriptURL(blobUrl);
             } else {
               script.src = blobUrl;
             }
           } catch (trustedTypesError) {
-            console.error('[WebMCP] ❌ Trusted Types blocked user script injection');
-            console.error(
-              '[WebMCP] This site requires TrustedScriptURL but policy creation failed'
-            );
-            console.error('[WebMCP] Possible reasons:');
-            console.error('[WebMCP]   1. CSP restricts policy names (trusted-types directive)');
-            console.error('[WebMCP]   2. Site blocks all dynamic policy creation');
-            console.error('[WebMCP] Technical details:', trustedTypesError);
-
             cleanup();
             reject(trustedTypesError);
             return;
           }
 
           script.onload = () => {
-            console.warn('[WebMCP] ✅ User script loaded successfully via blob URL');
             cleanup();
             resolve();
           };
-          script.onerror = (event) => {
-            console.error('[WebMCP] ❌ Failed to load script from blob URL:', event);
+          script.onerror = () => {
             cleanup();
             reject(new Error('Failed to load WebMCP user script from blob URL'));
           };
 
           (document.head || document.documentElement).appendChild(script);
         } catch (error) {
-          console.error('[WebMCP] ❌ Unexpected error during blob injection:', error);
           cleanup();
           reject(error);
         }
@@ -403,8 +360,6 @@ export async function reinjectScripts(
         }
 
         if (window.__webmcpInjected) {
-          // eslint-disable-next-line no-console
-          console.log('[WebMCP] Clearing injected scripts for re-injection');
           window.__webmcpInjected = {};
         }
       },

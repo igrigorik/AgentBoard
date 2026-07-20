@@ -33,10 +33,11 @@
       });
     }
 
+    // Never forward caller values: relay messages and errors can contain page data.
     return {
-      log: (...args) => currentLevel >= levels.info && console.log(...args),
-      warn: (...args) => currentLevel >= levels.warn && console.warn(...args),
-      error: (...args) => currentLevel >= levels.error && console.error(...args),
+      log: () => currentLevel >= levels.info && console.log('[AgentBoard] Relay event'),
+      warn: () => currentLevel >= levels.warn && console.warn('[AgentBoard] Relay warning'),
+      error: () => currentLevel >= levels.error && console.error('[AgentBoard] Relay failure'),
     };
   })();
 

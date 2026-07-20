@@ -5,7 +5,6 @@
  * Streaming responses are sent back to sidebar via Chrome runtime messaging.
  */
 
-import log from '../logger';
 import { streamText, CoreMessage } from 'ai';
 import type { AgentConfig } from '../storage/config';
 import type { ToolCall } from '../../types';
@@ -20,10 +19,104 @@ import { getRemoteMCPManager } from '../mcp/manager';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
 
-// Interface for API error objects that may have additional properties
 interface APIError extends Error {
   statusCode?: number;
-  responseBody?: string | object;
+  status?: number;
+}
+
+function getErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const candidate = error as APIError;
+  return typeof candidate.statusCode === 'number'
+    ? candidate.statusCode
+    : typeof candidate.status === 'number'
+      ? candidate.status
+      : undefined;
+}
+
+function isAbortError(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'name' in error && error.name === 'AbortError';
+}
+
+function raceWithAbort<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
+async function* abortableAsyncIterable<T>(
+  source: AsyncIterable<T>,
+  signal: AbortSignal
+): AsyncGenerator<T> {
+  const iterator = source[Symbol.asyncIterator]();
+  let completed = false;
+  try {
+    while (true) {
+      const next = await raceWithAbort(iterator.next(), signal);
+      if (next.done) {
+        completed = true;
+        return;
+      }
+      yield next.value;
+    }
+  } finally {
+    if (!completed && iterator.return) {
+      try {
+        void Promise.resolve(iterator.return()).catch(() => undefined);
+      } catch {
+        // A non-cooperative provider must not delay cancellation cleanup.
+      }
+    }
+  }
+}
+
+/** Provider errors may contain prompts, generated text, headers, or proxy internals. */
+function publicAIRequestError(error: unknown): Error {
+  const status = getErrorStatus(error);
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (
+    status === 401 ||
+    status === 403 ||
+    message.includes('401') ||
+    message.includes('403') ||
+    message.includes('unauthorized')
+  ) {
+    return new Error('Authentication failed. Check the configured credentials.');
+  }
+  if (status === 404 || message.includes('404') || message.includes('not found')) {
+    return new Error('The configured model or endpoint was not found.');
+  }
+  if (status === 408 || message.includes('408') || message.includes('timeout')) {
+    return new Error('The AI request timed out. Try again.');
+  }
+  if (status === 429 || message.includes('429') || message.includes('rate limit')) {
+    return new Error('The AI service rate limit was reached. Try again later.');
+  }
+  if (status !== undefined && status >= 500) {
+    return new Error('The AI service is temporarily unavailable. Try again later.');
+  }
+  if (error instanceof TypeError) {
+    return new Error('Could not connect to the configured AI endpoint.');
+  }
+  return new Error(
+    'AI request failed. Verify the Connection API, endpoint, model, and credentials.'
+  );
 }
 
 export interface StreamFinishMetadata {
@@ -43,6 +136,7 @@ export interface StreamCallbacks {
 
   onFinish: (fullText: string, metadata?: StreamFinishMetadata) => void;
   onError: (error: Error) => void;
+  onAbort?: () => void;
 
   // Tool callbacks
   onToolCall?: (toolCall: ToolCall) => void;
@@ -62,7 +156,17 @@ export interface StreamCallbacks {
 export class AIClient {
   private static instance: AIClient;
   private configStorage: ConfigStorage;
-  private abortController?: AbortController;
+  private activeStream?: {
+    id: string;
+    controller: AbortController;
+    notifyAbort: () => void;
+  };
+  private streamRequestSequence = 0;
+  private latestAcceptedStreamSequence = 0;
+  private pendingStreams = new Map<
+    string,
+    { controller: AbortController; notifyAbort: () => void; sequence: number }
+  >();
 
   static getInstance(): AIClient {
     if (!AIClient.instance) {
@@ -94,32 +198,65 @@ export class AIClient {
   /**
    * Stream a chat completion from the specified agent
    * @param tabId - Optional tab ID to scope tools to a specific tab
+   * @param streamId - Ownership token required to cancel this specific stream
    */
   async streamChat(
     agentId: string,
     messages: CoreMessage[],
     tabId: number | undefined,
-    callbacks: StreamCallbacks
+    callbacks: StreamCallbacks,
+    streamId: string = globalThis.crypto.randomUUID()
   ): Promise<void> {
-    // Get the agent configuration
-    const agent = await this.configStorage.getAgent(agentId);
-    if (!agent) {
-      throw new Error(`Agent ${agentId} not found. Please check your configuration.`);
-    }
-
-    // Require API key unless custom endpoint is provided
-    if (!agent.apiKey && !agent.endpoint) {
-      throw new Error(
-        `No API key or custom endpoint configured for agent "${agent.name}". Please update in settings.`
-      );
-    }
-
-    log.warn(`[AIClient] Using agent: ${agent.name} (${agent.provider})`);
+    const requestSequence = ++this.streamRequestSequence;
+    let abortController: AbortController | undefined;
+    let abortNotified = false;
+    const notifyAbort = () => {
+      if (abortNotified) return;
+      abortNotified = true;
+      try {
+        callbacks.onAbort?.();
+      } catch {
+        // Cancellation ownership must not depend on a stale caller callback succeeding.
+      }
+    };
+    const pendingStream = {
+      controller: new AbortController(),
+      notifyAbort,
+      sequence: requestSequence,
+    };
+    this.pendingStreams.set(streamId, pendingStream);
 
     try {
-      // Cancel any existing stream
-      this.abortController?.abort();
-      this.abortController = new AbortController();
+      const agent = await raceWithAbort(
+        this.configStorage.getAgent(agentId),
+        pendingStream.controller.signal
+      );
+      if (requestSequence < this.latestAcceptedStreamSequence) {
+        notifyAbort();
+        return;
+      }
+      if (!agent) {
+        throw new Error('Agent configuration was not found. Reload settings and try again.');
+      }
+      if (!agent.apiKey && !agent.endpoint) {
+        throw new Error('Configure credentials or a custom endpoint in Settings.');
+      }
+
+      // Only a validated newer request may supersede the active provider stream.
+      // The sequence check prevents slower setup from reclaiming ownership later.
+      this.latestAcceptedStreamSequence = requestSequence;
+      this.pendingStreams.delete(streamId);
+      for (const [pendingId, olderPendingStream] of this.pendingStreams) {
+        if (olderPendingStream.sequence >= requestSequence) continue;
+        this.pendingStreams.delete(pendingId);
+        olderPendingStream.controller.abort();
+        olderPendingStream.notifyAbort();
+      }
+      const supersededStream = this.activeStream;
+      supersededStream?.controller.abort();
+      supersededStream?.notifyAbort();
+      abortController = new AbortController();
+      this.activeStream = { id: streamId, controller: abortController, notifyAbort };
 
       const runtime = createModelRuntime(agent);
 
@@ -143,15 +280,11 @@ export class AIClient {
         const toolRegistry = getToolRegistry();
         unsubToolChange = toolRegistry.onTabToolsChanged(tabId, () => {
           toolsInvalidated = true;
-          log.warn(
-            `[AIClient] Tools changed for tab ${tabId} during stream — will stop after current step`
-          );
         });
       }
 
       try {
         // Get tools from unified registry (already loaded by background)
-        log.warn('[AIClient] Getting tools from unified registry for tab:', tabId);
         const toolRegistry = getToolRegistry();
 
         // Get tools scoped to the specific tab if tabId is provided.
@@ -161,19 +294,13 @@ export class AIClient {
 
         const hasTools = Object.keys(allTools).length > 0;
 
-        if (hasTools) {
-          log.warn('[AIClient] Got tools from registry:', Object.keys(allTools));
-        } else {
-          log.warn('[AIClient] No tools available in registry');
-        }
-
         const streamParams: Parameters<typeof streamText>[0] = {
           model: runtime.model,
           messages: messagesWithSystem,
           // Don't pass temperature when reasoning is enabled (SDK warning suggests this)
           ...(agent.reasoning?.enabled ? {} : { temperature: agent.temperature }),
           maxRetries: 2,
-          abortSignal: this.abortController.signal,
+          abortSignal: abortController.signal,
           ...(hasTools && {
             tools: allTools,
             // Stop after current step if tools changed (navigation, etc.)
@@ -192,338 +319,212 @@ export class AIClient {
           }),
         };
 
-        log.warn('[AIClient] streamText parameters:', {
-          modelProvider: agent.provider,
-          messageCount: messagesWithSystem.length,
-          hasTools,
-          toolCount: hasTools ? Object.keys(allTools).length : 0,
-          temperature: agent.temperature,
-          reasoningEnabled: agent.reasoning?.enabled || false,
-          apiProtocol: runtime.apiProtocol,
-          providerOptions: runtime.providerOptions,
-          fullStreamParams: streamParams,
-        });
-
-        if (agent.reasoning?.enabled) {
-          log.warn('🧠 [AIClient] Reasoning is ENABLED for this session', {
-            provider: agent.provider,
-            model: agent.model,
-            config: agent.reasoning,
-            apiProtocol: runtime.apiProtocol,
-            providerOptions: streamParams.providerOptions,
-          });
-        }
-
         const streamResult = streamText(streamParams as Parameters<typeof streamText>[0]);
 
         // Handle the stream with tool support
         const { textStream, fullStream } = await streamResult;
 
         let _fullText = '';
-        let textBlockCount = 0; // Count text blocks for debugging
+        let textBlockCount = 0;
         let currentTextBlockId: string | null = null; // Track the active text block
         let isReasoning = false; // Track if we're currently in reasoning phase
         let currentReasoningId: string | undefined; // Track the current reasoning segment ID
-        let reasoningBlockCount = 0; // Count reasoning blocks
         let reasoningTokens: number | undefined; // Track reasoning token usage
 
-        try {
-          // Use fullStream for tools OR reasoning support
-          if (hasTools || agent.reasoning?.enabled) {
-            for await (const part of fullStream) {
-              // Debug log to see what events we're actually getting
-              log.warn('[AIClient] Stream event:', part.type, {
-                type: part.type,
-                hasText: !!(part as Record<string, unknown>).text,
-                hasTextDelta: !!(part as Record<string, unknown>).textDelta,
-                hasDelta: !!(part as Record<string, unknown>).delta,
-                hasProviderMetadata: !!(part as Record<string, unknown>).providerMetadata,
-                providerMetadata: (part as Record<string, unknown>).providerMetadata,
-                fullPart: part,
-              });
+        // Use fullStream for tools OR reasoning support
+        if (hasTools || agent.reasoning?.enabled) {
+          for await (const part of abortableAsyncIterable(fullStream, abortController.signal)) {
+            // Handle reasoning events from various providers.
+            const eventType = (part as Record<string, unknown>).type;
 
-              // Handle reasoning events from various providers
-              // Different providers emit different event types for reasoning
-              // First, let's check what event types we're actually seeing
-              const eventType = (part as Record<string, unknown>).type;
+            // Handle OpenAI reasoning-start event (marks beginning but no content)
+            if (eventType === 'reasoning-start') {
+              // OpenAI uses reasoning-start to mark beginning, but content comes in reasoning-delta
+              continue;
+            }
 
-              // Handle OpenAI reasoning-start event (marks beginning but no content)
-              if (eventType === 'reasoning-start') {
-                log.warn('🧠 [Reasoning] OpenAI reasoning-start event detected', part);
-                // OpenAI uses reasoning-start to mark beginning, but content comes in reasoning-delta
-                continue;
+            // Handle OpenAI reasoning-end event (marks end of a segment)
+            if (eventType === 'reasoning-end') {
+              if (isReasoning) {
+                callbacks.onReasoningEnd?.();
+                isReasoning = false;
+                currentReasoningId = undefined;
               }
+              continue;
+            }
 
-              // Handle OpenAI reasoning-end event (marks end of a segment)
-              if (eventType === 'reasoning-end') {
-                log.warn('🧠 [Reasoning] OpenAI reasoning-end event detected', part);
-                if (isReasoning) {
-                  log.warn(`🧠 [Reasoning] Ending segment ${currentReasoningId}`);
+            // For OpenAI, check if this is a reasoning-delta with a new segment ID
+            if (eventType === 'reasoning-delta' || eventType === 'reasoning') {
+              const partData = part as Record<string, unknown>;
+              const reasoningId = partData.id as string | undefined;
+
+              // Extract segment ID from format like "rs_xxx:3" -> "3"
+              const segmentId = reasoningId?.split(':').pop();
+
+              // Check if this is a new reasoning segment
+              if (segmentId && segmentId !== currentReasoningId) {
+                // End previous reasoning segment if one was active
+                if (isReasoning && currentReasoningId) {
                   callbacks.onReasoningEnd?.();
                   isReasoning = false;
-                  currentReasoningId = undefined;
                 }
-                continue;
+
+                // Start new reasoning segment
+                currentReasoningId = segmentId;
+                isReasoning = true;
+                callbacks.onReasoningStart?.();
               }
 
-              // For OpenAI, check if this is a reasoning-delta with a new segment ID
-              if (eventType === 'reasoning-delta' || eventType === 'reasoning') {
-                const partData = part as Record<string, unknown>;
-                const reasoningId = partData.id as string | undefined;
+              const reasoningText =
+                (partData.text as string) ||
+                (partData.textDelta as string) ||
+                (partData.delta as string) ||
+                '';
 
-                // Extract segment ID from format like "rs_xxx:3" -> "3"
-                const segmentId = reasoningId?.split(':').pop();
+              if (reasoningText) {
+                callbacks.onReasoningChunk?.(reasoningText);
+              }
+              continue;
+            }
 
-                log.warn('🧠 [Reasoning] Found reasoning event type:', eventType, {
-                  id: reasoningId,
-                  segmentId,
-                  currentReasoningId,
-                  part,
-                });
+            // Check for other reasoning event types (Claude, Gemini)
+            if (
+              eventType === 'thinking' ||
+              eventType === 'thinking-delta' ||
+              eventType === 'thought' ||
+              eventType === 'thought-delta'
+            ) {
+              const reasoningText =
+                ((part as Record<string, unknown>).text as string) ||
+                ((part as Record<string, unknown>).textDelta as string) ||
+                ((part as Record<string, unknown>).delta as string) ||
+                '';
 
-                // Check if this is a new reasoning segment
-                if (segmentId && segmentId !== currentReasoningId) {
-                  // End previous reasoning segment if one was active
-                  if (isReasoning && currentReasoningId) {
-                    log.warn(
-                      `🧠 [Reasoning] Ending segment ${currentReasoningId} (new segment ${segmentId} starting)`
-                    );
-                    callbacks.onReasoningEnd?.();
-                    isReasoning = false;
-                  }
-
-                  // Start new reasoning segment
-                  currentReasoningId = segmentId;
-                  reasoningBlockCount++;
-                  isReasoning = true;
-                  log.warn(
-                    `🧠 [Reasoning] Starting segment ${segmentId} (block #${reasoningBlockCount})`
-                  );
-                  callbacks.onReasoningStart?.();
-                }
-
-                const reasoningText =
-                  (partData.text as string) ||
-                  (partData.textDelta as string) ||
-                  (partData.delta as string) ||
-                  '';
-
-                if (reasoningText) {
-                  log.warn('🧠 [Reasoning] Chunk:', reasoningText.substring(0, 100));
-                  callbacks.onReasoningChunk?.(reasoningText);
-                }
-                continue;
+              if (!isReasoning) {
+                isReasoning = true;
+                callbacks.onReasoningStart?.();
               }
 
-              // Check for other reasoning event types (Claude, Gemini)
-              if (
-                eventType === 'thinking' ||
-                eventType === 'thinking-delta' ||
-                eventType === 'thought' ||
-                eventType === 'thought-delta'
-              ) {
-                log.warn('🧠 [Reasoning] Found reasoning event type:', eventType, part);
+              if (reasoningText) {
+                callbacks.onReasoningChunk?.(reasoningText);
+              }
+              continue;
+            }
 
-                const reasoningText =
-                  ((part as Record<string, unknown>).text as string) ||
-                  ((part as Record<string, unknown>).textDelta as string) ||
-                  ((part as Record<string, unknown>).delta as string) ||
-                  '';
-
-                if (!isReasoning) {
-                  isReasoning = true;
-                  reasoningBlockCount++;
-                  log.warn(
-                    `🧠 [Reasoning] Started (via ${eventType} event, block #${reasoningBlockCount})`
-                  );
-                  callbacks.onReasoningStart?.();
+            // Also check if the part has providerMetadata that might contain reasoning
+            const metadata = (part as Record<string, unknown>).providerMetadata as
+              | {
+                  anthropic?: { thinking?: unknown };
+                  google?: { thinking?: unknown };
                 }
+              | undefined;
+            if (metadata?.anthropic?.thinking || metadata?.google?.thinking) {
+              if (!isReasoning) {
+                isReasoning = true;
+                callbacks.onReasoningStart?.();
+              }
+            }
 
-                if (reasoningText) {
-                  log.warn('🧠 [Reasoning] Chunk:', reasoningText.substring(0, 100));
-                  callbacks.onReasoningChunk?.(reasoningText);
-                }
-                continue;
+            // Handle text blocks as separate messages
+            if (part.type === 'text-start') {
+              // For non-OpenAI providers, end reasoning if it's still active
+              // OpenAI sends explicit reasoning-end events, so we don't need this
+              if (isReasoning && !isOpenAIProtocol(runtime.apiProtocol)) {
+                callbacks.onReasoningEnd?.(reasoningTokens ? { reasoningTokens } : undefined);
+                isReasoning = false;
+                currentReasoningId = undefined;
               }
 
-              // Also check if the part has providerMetadata that might contain reasoning
-              const metadata = (part as Record<string, unknown>).providerMetadata as
-                | {
-                    anthropic?: { thinking?: unknown };
-                    google?: { thinking?: unknown };
-                  }
-                | undefined;
-              if (metadata?.anthropic?.thinking || metadata?.google?.thinking) {
-                log.warn('🧠 [Reasoning] Found reasoning in providerMetadata:', metadata);
-                if (!isReasoning) {
-                  isReasoning = true;
-                  callbacks.onReasoningStart?.();
-                }
+              textBlockCount++;
+              // Always use our own incrementing ID since SDK reuses "0" across steps
+              currentTextBlockId = `block-${textBlockCount}`;
+
+              // Always treat text blocks as regular response blocks
+              callbacks.onTextBlockStart?.(currentTextBlockId);
+            } else if (part.type === 'text-end') {
+              // Use the current block ID that was set at text-start
+              if (currentTextBlockId) {
+                // Emit text block end event
+                callbacks.onTextBlockEnd?.(currentTextBlockId);
+
+                // Clear the current block ID
+                currentTextBlockId = null;
+              }
+            } else if (part.type === 'text-delta') {
+              // If reasoning was active and now text is coming, end reasoning
+              if (isReasoning) {
+                callbacks.onReasoningEnd?.(reasoningTokens ? { reasoningTokens } : undefined);
+                isReasoning = false;
               }
 
-              // Handle text blocks as separate messages
-              if (part.type === 'text-start') {
-                // For non-OpenAI providers, end reasoning if it's still active
-                // OpenAI sends explicit reasoning-end events, so we don't need this
-                if (isReasoning && !isOpenAIProtocol(runtime.apiProtocol)) {
-                  log.warn('🧠 [Reasoning] Ended (text-start detected)');
-                  callbacks.onReasoningEnd?.(reasoningTokens ? { reasoningTokens } : undefined);
-                  isReasoning = false;
-                  currentReasoningId = undefined;
-                }
+              const chunk = part.text || '';
 
+              // Use the current block ID that was set at text-start
+              if (!currentTextBlockId) {
                 textBlockCount++;
-                // Always use our own incrementing ID since SDK reuses "0" across steps
                 currentTextBlockId = `block-${textBlockCount}`;
-                log.warn(
-                  `📝 [Text Block #${textBlockCount}] Starting with ID: ${currentTextBlockId} (SDK id: ${(part as Record<string, unknown>).id})`
-                );
-
-                // Always treat text blocks as regular response blocks
-                log.warn(`📝 [Text Block #${textBlockCount}] Regular response block`);
                 callbacks.onTextBlockStart?.(currentTextBlockId);
-              } else if (part.type === 'text-end') {
-                // Use the current block ID that was set at text-start
-                if (currentTextBlockId) {
-                  log.warn(`📝 [Text Block] Ending block: ${currentTextBlockId}`);
-                  // Emit text block end event
-                  callbacks.onTextBlockEnd?.(currentTextBlockId);
+              }
 
-                  // Clear the current block ID
-                  currentTextBlockId = null;
-                } else {
-                  log.warn('⚠️ [Text Block] text-end without current block ID');
-                }
-              } else if (part.type === 'text-delta') {
-                // If reasoning was active and now text is coming, end reasoning
-                if (isReasoning) {
-                  log.warn('🧠 [Reasoning] Ended (text-delta detected)');
-                  callbacks.onReasoningEnd?.(reasoningTokens ? { reasoningTokens } : undefined);
-                  isReasoning = false;
-                }
+              // Emit text block chunk event for interleaved display
+              callbacks.onTextBlockChunk?.(currentTextBlockId, chunk);
 
-                const chunk = part.text || '';
+              _fullText += chunk;
+            } else if (part.type === 'tool-call') {
+              // Create structured tool call object
+              const toolCall: ToolCall = {
+                id: part.toolCallId,
+                toolName: part.toolName,
+                input: part.input,
+                status: 'running',
+                startTime: Date.now(),
+              };
 
-                // Use the current block ID that was set at text-start
-                if (!currentTextBlockId) {
-                  log.warn('⚠️ [Text Block] text-delta without current block ID, creating one');
-                  textBlockCount++;
-                  currentTextBlockId = `block-${textBlockCount}`;
-                  callbacks.onTextBlockStart?.(currentTextBlockId);
-                }
-
-                log.warn(
-                  `📝 [Text Block] Delta for block: ${currentTextBlockId}, chunk: "${chunk.substring(0, 50)}..."`
-                );
-
-                // Emit text block chunk event for interleaved display
-                callbacks.onTextBlockChunk?.(currentTextBlockId, chunk);
-
-                _fullText += chunk;
-              } else if ((part as Record<string, unknown>).type === 'finish-step') {
-                // Step finished
-                log.warn('📍 [Step] Finished step');
-              } else if ((part as Record<string, unknown>).type === 'start-step') {
-                // New step starting
-                log.warn('📍 [Step] Starting new step');
-              } else if (part.type === 'tool-call') {
-                log.warn('🔧 [MCP Tool Call]', {
-                  tool: part.toolName,
-                  input: part.input,
-                  callId: part.toolCallId,
-                });
-
-                // Create structured tool call object
-                const toolCall: ToolCall = {
+              // Emit structured tool call event if callback exists
+              if (callbacks.onToolCall) {
+                callbacks.onToolCall(toolCall);
+              }
+            } else if (part.type === 'tool-result') {
+              // Emit structured tool result event if callback exists
+              if (callbacks.onToolResult) {
+                callbacks.onToolResult({
                   id: part.toolCallId,
-                  toolName: part.toolName,
-                  input: part.input,
-                  status: 'running',
-                  startTime: Date.now(),
-                };
-
-                // Emit structured tool call event if callback exists
-                if (callbacks.onToolCall) {
-                  callbacks.onToolCall(toolCall);
-                }
-              } else if (part.type === 'tool-result') {
-                log.warn('✅ [MCP Tool Result]', {
-                  tool: part.toolName,
                   output: part.output,
-                  callId: part.toolCallId,
-                });
-
-                // Emit structured tool result event if callback exists
-                if (callbacks.onToolResult) {
-                  callbacks.onToolResult({
-                    id: part.toolCallId,
-                    output: part.output,
-                    status: 'success',
-                  });
-                }
-                // The AI should continue generating text after tool results
-              } else if (part.type === 'finish') {
-                // Handle finish event with usage data
-                // The finish event has totalUsage property according to SDK types
-                const usage = part.totalUsage || (part as Record<string, unknown>).usage || {};
-                reasoningTokens = (usage as Record<string, unknown>)?.reasoningTokens as
-                  | number
-                  | undefined;
-
-                // If reasoning is still active at finish (no text phase), end it now
-                if (isReasoning) {
-                  log.warn('🧠 [Reasoning] Ended (stream finished)');
-                  callbacks.onReasoningEnd?.({ reasoningTokens: reasoningTokens || 0 });
-                  isReasoning = false;
-                }
-
-                log.warn('🧠 [Reasoning] Stream finished', {
-                  reasoningTokens,
-                  totalTokens: usage?.totalTokens,
+                  status: 'success',
                 });
               }
-            }
-          } else {
-            // No tools, use simple text stream
-            for await (const chunk of textStream) {
-              _fullText += chunk;
-              // Legacy mode - no structured events, just raw text
-            }
-          }
+              // The AI should continue generating text after tool results
+            } else if (part.type === 'tool-error') {
+              callbacks.onToolResult?.({
+                id: part.toolCallId,
+                output: null,
+                status: 'error',
+                error: 'Tool execution failed',
+              });
+            } else if (part.type === 'finish') {
+              // Handle finish event with usage data
+              // The finish event has totalUsage property according to SDK types
+              const usage = part.totalUsage || (part as Record<string, unknown>).usage || {};
+              reasoningTokens = (usage as Record<string, unknown>)?.reasoningTokens as
+                | number
+                | undefined;
 
-          callbacks.onFinish(_fullText, { toolsChanged: toolsInvalidated, stepsExhausted });
-        } catch (iterationError) {
-          log.error('[AIClient] Error during stream iteration:', iterationError);
-
-          // Check for API call errors and extract useful details
-          const errorObj = iterationError as APIError;
-          if (errorObj.statusCode && errorObj.responseBody) {
-            // Parse responseBody if it's a string
-            let parsedResponseBody;
-            try {
-              parsedResponseBody =
-                typeof errorObj.responseBody === 'string'
-                  ? JSON.parse(errorObj.responseBody)
-                  : errorObj.responseBody;
-            } catch {
-              parsedResponseBody = errorObj.responseBody;
-            }
-
-            // Enhanced error message for proxy/gateway errors
-            if (parsedResponseBody?.error && parsedResponseBody?.location === 'proxy') {
-              const proxyError = new Error(
-                `Proxy/Gateway Error: ${parsedResponseBody.reason || parsedResponseBody.error}\n` +
-                  `Details: ${parsedResponseBody.description || 'No additional details'}`
-              );
-              throw proxyError;
+              // If reasoning is still active at finish (no text phase), end it now
+              if (isReasoning) {
+                callbacks.onReasoningEnd?.({ reasoningTokens: reasoningTokens || 0 });
+                isReasoning = false;
+              }
             }
           }
-
-          throw iterationError;
+        } else {
+          // No tools, use simple text stream
+          for await (const chunk of abortableAsyncIterable(textStream, abortController.signal)) {
+            _fullText += chunk;
+            // Legacy mode - no structured events, just raw text
+          }
         }
-      } catch (streamError) {
-        log.error('[AIClient] Stream error:', streamError);
-        throw streamError;
+
+        callbacks.onFinish(_fullText, { toolsChanged: toolsInvalidated, stepsExhausted });
       } finally {
         // Always clean up the tool-change subscription to prevent leaks
         unsubToolChange?.();
@@ -531,72 +532,22 @@ export class AIClient {
 
       // Note: onFinish above handles the completion
     } catch (error) {
-      log.error('[AIClient] Error in streamChat:', error);
-
-      if (error instanceof Error) {
-        log.error('[AIClient] Error message:', error.message);
-
-        // Check for API call errors and extract useful details (same as iteration block)
-        const errorObj = error as APIError;
-        if (errorObj.statusCode && errorObj.responseBody) {
-          // Parse responseBody if it's a string
-          let parsedResponseBody;
-          try {
-            parsedResponseBody =
-              typeof errorObj.responseBody === 'string'
-                ? JSON.parse(errorObj.responseBody)
-                : errorObj.responseBody;
-          } catch {
-            parsedResponseBody = errorObj.responseBody;
-          }
-
-          // Enhanced error message for proxy/gateway errors
-          if (parsedResponseBody?.error && parsedResponseBody?.location === 'proxy') {
-            const proxyError = new Error(
-              `Proxy/Gateway Error: ${parsedResponseBody.reason || parsedResponseBody.error}\n` +
-                `Details: ${parsedResponseBody.description || 'No additional details'}`
-            );
-            callbacks.onError(proxyError);
-            return;
-          }
-        }
-
-        // Enhance error messages for common issues
-        if (error.message.includes('401') || error.message.includes('Unauthorized')) {
-          const endpointInfo = agent.endpoint ? ` (using custom endpoint: ${agent.endpoint})` : '';
-          callbacks.onError(
-            new Error(
-              `Invalid API key for agent "${agent.name}"${endpointInfo}. Please check your settings.`
-            )
-          );
-        } else if (error.message.includes('429')) {
-          callbacks.onError(
-            new Error(`Rate limit exceeded for agent "${agent.name}". Please try again later.`)
-          );
-        } else if (
-          error.message.includes('ECONNREFUSED') ||
-          error.message.includes('fetch failed')
-        ) {
-          const endpointInfo = agent.endpoint ? ` at ${agent.endpoint}` : '';
-          callbacks.onError(
-            new Error(
-              `Cannot connect to ${agent.provider} service${endpointInfo}. Please check the endpoint is accessible.`
-            )
-          );
-        } else if (error.message.includes('404') && agent.endpoint) {
-          callbacks.onError(
-            new Error(
-              `Endpoint not found at ${agent.endpoint}. Please verify the custom endpoint URL and path.`
-            )
-          );
-        } else if (error.message.includes('abort')) {
-          // Stream was cancelled, not an error
-          return;
-        } else {
-          callbacks.onError(error);
-        }
-      } else {
-        callbacks.onError(new Error('An unknown error occurred'));
+      if (
+        requestSequence < this.latestAcceptedStreamSequence ||
+        pendingStream.controller.signal.aborted ||
+        abortController?.signal.aborted ||
+        isAbortError(error)
+      ) {
+        notifyAbort();
+        return;
+      }
+      callbacks.onError(publicAIRequestError(error));
+    } finally {
+      if (this.pendingStreams.get(streamId) === pendingStream) {
+        this.pendingStreams.delete(streamId);
+      }
+      if (abortController && this.activeStream?.controller === abortController) {
+        this.activeStream = undefined;
       }
     }
   }
@@ -604,8 +555,21 @@ export class AIClient {
   /**
    * Cancel the current streaming operation
    */
-  cancelStream(): void {
-    this.abortController?.abort();
+  cancelStream(streamId: string): boolean {
+    const pendingStream = this.pendingStreams.get(streamId);
+    if (pendingStream) {
+      this.pendingStreams.delete(streamId);
+      pendingStream.controller.abort();
+      pendingStream.notifyAbort();
+      return true;
+    }
+
+    const stream = this.activeStream;
+    if (stream?.id !== streamId) return false;
+    stream.controller.abort();
+    stream.notifyAbort();
+    if (this.activeStream === stream) this.activeStream = undefined;
+    return true;
   }
 
   /**
@@ -680,72 +644,29 @@ export class AIClient {
         if (!receivedData) {
           return {
             success: false,
-            message: `Connection established but no response from ${provider}`,
+            message: 'Connection established but no response was received.',
           };
         }
 
-        const endpointInfo = details.endpoint ? ` via ${details.endpoint}` : '';
         return {
           success: true,
-          message: `Successfully connected to ${provider} (${details.model})${endpointInfo}`,
+          message: 'Connection successful.',
         };
       } finally {
         if (timeoutId !== undefined) clearTimeout(timeoutId);
         testAbortController.abort();
       }
     } catch (error) {
-      const statusCode =
-        error && typeof error === 'object' && 'statusCode' in error
-          ? (error as APIError).statusCode
-          : undefined;
-      log.error('[AIClient] Test connection failed', { statusCode });
-
-      if (error instanceof Error) {
-        if (
-          statusCode === 401 ||
-          error.message.includes('401') ||
-          error.message.includes('Unauthorized')
-        ) {
-          return {
-            success: false,
-            message: `Invalid API key for ${provider}. Please check your credentials.`,
-          };
-        }
-
-        if (
-          statusCode === 404 ||
-          error.message.includes('404') ||
-          error.message.includes('model')
-        ) {
-          return {
-            success: false,
-            message: `The configured model or endpoint was not found for ${provider}.`,
-          };
-        }
-
-        if (error.message.includes('aborted') || error.name === 'AbortError') {
-          return {
-            success: false,
-            message: `Test was cancelled or aborted. Try again.`,
-          };
-        }
-
-        if (error.message.includes('timeout')) {
-          return {
-            success: false,
-            message: `Connection timeout. The ${provider} API took too long to respond.`,
-          };
-        }
-
+      if (isAbortError(error)) {
         return {
           success: false,
-          message: `Connection failed for ${provider}. Verify the Connection API, endpoint, model, and credentials.`,
+          message: 'Connection test was cancelled. Try again.',
         };
       }
 
       return {
         success: false,
-        message: 'Connection test failed with unknown error',
+        message: publicAIRequestError(error).message,
       };
     }
   }
@@ -779,71 +700,5 @@ export class AIClient {
             : 'Connection test failed. Verify the Connection API, endpoint, model, and credentials.',
       };
     }
-  }
-
-  /**
-   * Validate agent configuration
-   */
-  validateAgentConfig(agent: AgentConfig): string[] {
-    const errors: string[] = [];
-
-    if (!agent.name.trim()) {
-      errors.push('Agent name is required');
-    }
-
-    if (!agent.apiKey) {
-      errors.push('API key is required');
-    }
-
-    if (!agent.model) {
-      errors.push('Model selection is required');
-    }
-
-    if (agent.temperature < 0 || agent.temperature > 2) {
-      errors.push('Temperature must be between 0 and 2');
-    }
-
-    if (agent.maxTokens < 1) {
-      errors.push('Max tokens must be at least 1');
-    }
-
-    // Validate custom endpoint URL if provided
-    if (agent.endpoint) {
-      try {
-        const url = new URL(agent.endpoint);
-        if (!['http:', 'https:'].includes(url.protocol)) {
-          errors.push('Custom endpoint must use http:// or https:// protocol');
-        }
-      } catch {
-        errors.push('Custom endpoint must be a valid URL');
-      }
-    }
-
-    // Provider-specific validation
-    switch (agent.provider) {
-      case 'openai':
-        if (agent.apiKey && !agent.apiKey.startsWith('sk-')) {
-          errors.push('OpenAI API key should start with "sk-"');
-        }
-        // Provide helpful hints for common OpenAI-compatible endpoints
-        if (agent.endpoint) {
-          if (!agent.endpoint.includes('/v1') && !agent.endpoint.endsWith('/v1')) {
-            errors.push(
-              'OpenAI-compatible endpoints typically require "/v1" path (e.g., http://localhost:1234/v1)'
-            );
-          }
-        }
-        break;
-      case 'anthropic':
-        if (agent.apiKey && !agent.apiKey.includes('sk-ant-')) {
-          errors.push('Anthropic API key should contain "sk-ant-"');
-        }
-        break;
-      case 'google':
-        // Google API keys don't have a consistent prefix
-        break;
-    }
-
-    return errors;
   }
 }

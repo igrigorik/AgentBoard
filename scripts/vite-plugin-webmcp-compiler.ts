@@ -407,11 +407,15 @@ function generateBuiltinSources(toolsSourceDir: string, outputPath: string): voi
     }
   }
 
-  // Read system tool source (TypeScript)
-  const fetchToolPath = path.join(toolsSourceDir, 'fetch', 'fetch-url.ts');
-  if (fs.existsSync(fetchToolPath)) {
-    const sourceCode = fs.readFileSync(fetchToolPath, 'utf-8');
-    sources['agentboard_fetch_url'] = sourceCode;
+  // Read system tool sources (TypeScript)
+  const systemTools = [
+    ['agentboard_fetch_url', path.join(toolsSourceDir, 'fetch', 'fetch-url.ts')],
+    ['agentboard_navigate', path.join(toolsSourceDir, 'navigate', 'index.ts')],
+  ] as const;
+  for (const [toolId, toolPath] of systemTools) {
+    if (fs.existsSync(toolPath)) {
+      sources[toolId] = fs.readFileSync(toolPath, 'utf-8');
+    }
   }
 
   // Generate TypeScript source file

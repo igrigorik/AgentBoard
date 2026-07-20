@@ -10,6 +10,7 @@
 
 import { COMPILED_TOOLS, type CompiledToolInfo } from './tools/registry';
 import { FETCH_URL_TOOL_NAME, FETCH_URL_METADATA } from './tools/fetch';
+import { NAVIGATE_TOOL_NAME, NAVIGATE_TOOL_METADATA } from './tools/navigate';
 
 export type BuiltinToolType = 'system' | 'webmcp';
 
@@ -38,6 +39,16 @@ const SYSTEM_TOOLS: BuiltinToolInfo[] = [
     version: FETCH_URL_METADATA.version,
     match: ['<all_urls>'], // Background tool - available globally on all URLs
     inputSchema: FETCH_URL_METADATA.inputSchema,
+  },
+  {
+    id: NAVIGATE_TOOL_NAME,
+    name: 'navigate',
+    namespace: 'agentboard',
+    type: 'system',
+    description: NAVIGATE_TOOL_METADATA.description,
+    version: NAVIGATE_TOOL_METADATA.version,
+    match: ['<all_urls>'],
+    inputSchema: NAVIGATE_TOOL_METADATA.inputSchema,
   },
 ];
 

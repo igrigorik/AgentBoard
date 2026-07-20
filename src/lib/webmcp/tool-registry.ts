@@ -65,33 +65,42 @@ export class ToolRegistryManager {
    * Respects user enable/disable preferences (default: enabled)
    */
   async registerSystemTools(): Promise<void> {
-    // Check if system tool is enabled (default: true)
     const configStorage = ConfigStorage.getInstance();
-    const isEnabled = await configStorage.isBuiltinToolEnabled(FETCH_URL_TOOL_NAME);
-
-    if (!isEnabled) {
-      log.info('[ToolRegistry] System tool disabled by user:', FETCH_URL_TOOL_NAME);
-      return;
-    }
-
-    // Register fetch URL tool (already pre-converted to AI SDK format)
-    this.addTool(FETCH_URL_TOOL_NAME, {
-      tool: fetchUrlTool,
-      source: 'system',
-      origin: 'system',
-      description: 'Fetch content from external URLs (not the current page)',
-    });
-
-    // Register tab-bound system tools (created per-tab via factory)
-    const isNavEnabled = await configStorage.isBuiltinToolEnabled(NAVIGATE_TOOL_NAME);
-    if (isNavEnabled) {
-      this.tabBoundFactories.set(NAVIGATE_TOOL_NAME, createNavigateTool);
-    }
-
-    log.info('[ToolRegistry] Registered system tools:', [
-      FETCH_URL_TOOL_NAME,
-      ...(isNavEnabled ? [NAVIGATE_TOOL_NAME] : []),
+    const [isFetchEnabled, isNavigateEnabled] = await Promise.all([
+      configStorage.isBuiltinToolEnabled(FETCH_URL_TOOL_NAME),
+      configStorage.isBuiltinToolEnabled(NAVIGATE_TOOL_NAME),
     ]);
+    let changed = false;
+
+    if (isFetchEnabled) {
+      const existingFetch = this.tools.get(FETCH_URL_TOOL_NAME);
+      if (existingFetch?.tool !== fetchUrlTool || existingFetch.source !== 'system') changed = true;
+      this.addTool(
+        FETCH_URL_TOOL_NAME,
+        {
+          tool: fetchUrlTool,
+          source: 'system',
+          origin: 'system',
+          description: 'Fetch content from external URLs (not the current page)',
+        },
+        { silent: true }
+      );
+    } else {
+      changed = this.tools.delete(FETCH_URL_TOOL_NAME) || changed;
+    }
+
+    if (isNavigateEnabled) {
+      if (this.tabBoundFactories.get(NAVIGATE_TOOL_NAME) !== createNavigateTool) changed = true;
+      this.tabBoundFactories.set(NAVIGATE_TOOL_NAME, createNavigateTool);
+    } else {
+      changed = this.tabBoundFactories.delete(NAVIGATE_TOOL_NAME) || changed;
+    }
+
+    if (changed) {
+      this.notifyListeners();
+      for (const tabId of this.tabChangeCallbacks.keys()) this.notifyTabChange(tabId);
+    }
+    log.info('[ToolRegistry] System tool configuration applied');
   }
 
   /**
@@ -154,14 +163,10 @@ export class ToolRegistryManager {
     }
   }
 
-  /**
-   * Collect, score, and sort tools by specificity.
-   * Returns tools as Record (ordered by score descending) plus debug info.
-   */
-  private getToolsSortedBySpecificity(filter?: (name: string, meta: ToolWithMetadata) => boolean): {
-    tools: Record<string, AISDKTool>;
-    debug: string[];
-  } {
+  /** Collect and sort tools by specificity for deterministic model ordering. */
+  private getToolsSortedBySpecificity(
+    filter?: (name: string, meta: ToolWithMetadata) => boolean
+  ): Record<string, AISDKTool> {
     type Candidate = {
       name: string;
       tool: AISDKTool;
@@ -185,7 +190,7 @@ export class ToolRegistryManager {
     }
 
     const scored: Candidate[] = [];
-    for (const [name, candidates] of grouped) {
+    for (const candidates of grouped.values()) {
       if (candidates.length === 1) {
         scored.push(candidates[0]);
         continue;
@@ -199,19 +204,13 @@ export class ToolRegistryManager {
       if (protectedCandidates.length === 1) {
         scored.push(protectedCandidates[0]);
       } else {
-        log.warn(
-          `[ToolRegistry] Omitting ambiguous tool ${name} from:`,
-          candidates.map(({ meta }) => meta.origin || meta.source)
-        );
+        log.warn('[ToolRegistry] Ambiguous tool omitted');
       }
     }
 
     scored.sort((a, b) => b.score - a.score);
 
-    return {
-      tools: Object.fromEntries(scored.map(({ name, tool }) => [name, tool])),
-      debug: scored.map(({ name, score }) => `${name}:${score}`),
-    };
+    return Object.fromEntries(scored.map(({ name, tool }) => [name, tool]));
   }
 
   /**
@@ -219,9 +218,7 @@ export class ToolRegistryManager {
    * Ordered by specificity score (descending)
    */
   getAllTools(): Record<string, AISDKTool> {
-    const { tools, debug } = this.getToolsSortedBySpecificity();
-    log.info(`[ToolRegistry] Providing ${debug.length} tools (all):`, debug);
-    return tools;
+    return this.getToolsSortedBySpecificity();
   }
 
   /**
@@ -233,7 +230,7 @@ export class ToolRegistryManager {
    * See tool-patterns.ts for scoring logic.
    */
   getToolsForTab(tabId: number): Record<string, AISDKTool> {
-    const { tools, debug } = this.getToolsSortedBySpecificity(
+    const tools = this.getToolsSortedBySpecificity(
       (_, meta) =>
         meta.origin === `tab-${tabId}` || meta.source === 'remote' || meta.source === 'system'
     );
@@ -241,10 +238,8 @@ export class ToolRegistryManager {
     // Inject tab-bound system tools (ephemeral, created per-call with tabId)
     for (const [name, factory] of this.tabBoundFactories) {
       tools[name] = factory(tabId);
-      debug.push(`${name}:factory`);
     }
 
-    log.info(`[ToolRegistry] Providing ${debug.length} tools for tab ${tabId}:`, debug);
     return tools;
   }
 

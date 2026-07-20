@@ -229,31 +229,39 @@ export class TabManager {
    * Resolves with the final URL after onCompleted fires (main frame).
    * Rejects on navigation error or timeout.
    */
-  async waitForNavigation(tabId: number, timeoutMs: number = 30000): Promise<{ url: string }> {
+  async waitForNavigation(
+    tabId: number,
+    timeoutMs: number = 30000,
+    signal?: AbortSignal
+  ): Promise<{ url: string }> {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         chrome.webNavigation.onCompleted.removeListener(onCompleted);
         chrome.webNavigation.onErrorOccurred.removeListener(onError);
       };
-
+      const onAbort = () => {
+        cleanup();
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
       const timer = setTimeout(() => {
         cleanup();
         reject(new Error(`Navigation timeout after ${timeoutMs}ms for tab ${tabId}`));
       }, timeoutMs);
-
       const onCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
         if (details.tabId !== tabId || details.frameId !== 0) return;
         cleanup();
         resolve({ url: details.url });
       };
-
       const onError = (details: chrome.webNavigation.WebNavigationFramedErrorCallbackDetails) => {
         if (details.tabId !== tabId || details.frameId !== 0) return;
         cleanup();
         reject(new Error(`Navigation failed for tab ${tabId}: ${details.url}`));
       };
 
+      signal?.addEventListener('abort', onAbort, { once: true });
       chrome.webNavigation.onCompleted.addListener(onCompleted);
       chrome.webNavigation.onErrorOccurred.addListener(onError);
     });
@@ -279,11 +287,8 @@ export class TabManager {
       const promise = this.takePendingPromise(payload.id);
       if (promise) {
         if ('error' in payload && payload.error) {
-          // Preserve structured error data from the page for debugging
-          const err: Error & { data?: unknown; code?: number } = new Error(payload.error.message);
-          if (payload.error.data) err.data = payload.error.data;
-          if (payload.error.code) err.code = payload.error.code;
-          promise.reject(err);
+          // Page messages are forgeable; never trust their diagnostic text or data.
+          promise.reject(new Error('WebMCP tool execution failed'));
         } else if ('result' in payload) {
           promise.resolve(payload.result);
         }

@@ -612,13 +612,13 @@ describe('TabManager', () => {
             id: requestId,
             error: {
               code: -32000,
-              message: 'Tool execution failed',
+              message: 'secret page-controlled failure',
             },
           },
         });
       }
 
-      await expect(promise).rejects.toThrow('Tool execution failed');
+      await expect(promise).rejects.toThrow('WebMCP tool execution failed');
     });
 
     it('should forward an AI cancellation signal to the page', async () => {
@@ -1134,6 +1134,21 @@ describe('TabManager', () => {
       await expect(promise).rejects.toThrow('Navigation failed for tab 123');
     });
 
+    it('should remove navigation listeners when the stream is cancelled', async () => {
+      const onCompleted = { addListener: vi.fn(), removeListener: vi.fn() };
+      const onErrorOccurred = { addListener: vi.fn(), removeListener: vi.fn() };
+      (mockChrome.webNavigation as any).onCompleted = onCompleted;
+      (mockChrome.webNavigation as any).onErrorOccurred = onErrorOccurred;
+      const controller = new AbortController();
+      const promise = lifecycle.waitForNavigation(123, 30000, controller.signal);
+
+      controller.abort();
+
+      await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(onCompleted.removeListener).toHaveBeenCalledOnce();
+      expect(onErrorOccurred.removeListener).toHaveBeenCalledOnce();
+    });
+
     it('should timeout after specified duration', async () => {
       vi.useFakeTimers();
 
@@ -1268,10 +1283,6 @@ describe('TabManager', () => {
     });
 
     it('should handle injection errors gracefully', async () => {
-      // Spy on log.error instead of console.error
-      const { default: log } = await import('../src/lib/logger');
-      const logSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
-
       mockChrome.tabs.get.mockResolvedValue({
         id: 123,
         url: 'https://example.com',
@@ -1279,14 +1290,8 @@ describe('TabManager', () => {
 
       mockChrome.scripting.executeScript.mockRejectedValue(new Error('Cannot access tab'));
 
-      await lifecycle.injectScripts(123);
-
-      expect(logSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to inject scripts'),
-        expect.any(Error)
-      );
-
-      logSpy.mockRestore();
+      await expect(lifecycle.injectScripts(123)).resolves.toBeUndefined();
+      expect(mockChrome.scripting.executeScript).toHaveBeenCalled();
     });
   });
 });

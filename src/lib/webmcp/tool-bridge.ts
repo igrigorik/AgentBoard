@@ -165,9 +165,9 @@ export function convertWebMCPToAISDKTool(
         const result = await tabManager.callTool(tabId, webmcpTool.name, args ?? {}, abortSignal);
         log.debug(`[WebMCP Tool Bridge] Tool executed successfully:`, result);
         return result;
-      } catch (error) {
-        log.error(`[WebMCP Tool Bridge] Error executing tool ${webmcpTool.name}:`, error);
-        throw error;
+      } catch {
+        log.error('[WebMCP Tool Bridge] Tool execution failed');
+        throw new Error('WebMCP tool execution failed');
       }
     },
   };

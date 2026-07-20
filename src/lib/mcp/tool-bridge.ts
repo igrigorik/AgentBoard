@@ -37,7 +37,10 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
   const toolDefinition = {
     description: mcpTool.description || `Tool: ${mcpTool.name}`,
     inputSchema: zodSchema,
-    execute: async (args: z.infer<typeof zodSchema>) => {
+    execute: async (
+      args: z.infer<typeof zodSchema>,
+      { abortSignal }: { abortSignal?: AbortSignal } = {}
+    ) => {
       const remoteMCPManager = getRemoteMCPManager();
 
       // MCP protocol expects an object for arguments, even if empty
@@ -52,7 +55,12 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
           toolName: mcpTool.name,
           serverName,
           input: processedArgs,
+          signal: abortSignal,
         });
+
+        // MCP uses a resolved isError result for semantic tool failures. Treat it
+        // like a thrown failure before any server-supplied diagnostic can escape.
+        if (result.isError) throw new Error('MCP tool execution failed');
 
         // Extract content from MCP result
         // Prefer structuredContent (typed data) over content (text summary)
@@ -79,9 +87,9 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
         }
 
         return result;
-      } catch (error) {
-        log.error(`Error executing MCP tool ${mcpTool.name}:`, error);
-        throw error;
+      } catch {
+        log.error('MCP tool execution failed');
+        throw new Error('MCP tool execution failed');
       }
     },
   };

@@ -365,7 +365,7 @@ describe('WebMCP Tool Execution Integration', () => {
         });
       }
 
-      await expect(toolCallPromise).rejects.toThrow('Tool execution failed: Something went wrong');
+      await expect(toolCallPromise).rejects.toThrow('WebMCP tool execution failed');
     });
 
     it('should handle validation errors', async () => {
@@ -394,9 +394,7 @@ describe('WebMCP Tool Execution Integration', () => {
         });
       }
 
-      await expect(toolCallPromise).rejects.toThrow(
-        'Invalid params: Missing required field "requiredField"'
-      );
+      await expect(toolCallPromise).rejects.toThrow('WebMCP tool execution failed');
     });
 
     it('should handle tool not found errors', async () => {
@@ -423,7 +421,7 @@ describe('WebMCP Tool Execution Integration', () => {
         });
       }
 
-      await expect(toolCallPromise).rejects.toThrow('Tool not found: nonexistent-tool');
+      await expect(toolCallPromise).rejects.toThrow('WebMCP tool execution failed');
     });
 
     it('should handle timeout errors', async () => {
@@ -542,7 +540,7 @@ describe('WebMCP Tool Execution Integration', () => {
 
       // Check results
       expect(await promise1).toBe('success1');
-      await expect(promise2).rejects.toThrow('Failed tool2');
+      await expect(promise2).rejects.toThrow('WebMCP tool execution failed');
       expect(await promise3).toBe('success3');
     });
   });

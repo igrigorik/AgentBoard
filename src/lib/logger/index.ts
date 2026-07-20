@@ -1,10 +1,12 @@
 /**
- * Centralized logging module using loglevel.
- * Configuration is applied only after the complete AgentBoard record validates;
- * malformed/future records must not enable verbose logging as a side effect.
+ * Privacy-preserving application logger.
+ *
+ * Callers may supply diagnostic context, but this boundary deliberately discards
+ * it before reaching the browser console. Provider traffic, browser content,
+ * credentials, configuration values, and arbitrary errors must never be logged.
  */
 
-import log from 'loglevel';
+import baseLogger from 'loglevel';
 import { parseStorageConfig, type LogLevel, type StorageConfig } from '../storage/config';
 
 const isTestEnvironment =
@@ -13,17 +15,17 @@ const isTestEnvironment =
 const DEFAULT_LOG_LEVEL: LogLevel = isTestEnvironment ? 'silent' : 'warn';
 
 function applyLogLevel(config: StorageConfig): void {
-  log.setLevel(config.logLevel ?? DEFAULT_LOG_LEVEL);
+  baseLogger.setLevel(config.logLevel ?? DEFAULT_LOG_LEVEL);
 }
 
 function rejectLogLevel(): void {
-  log.setLevel(DEFAULT_LOG_LEVEL);
-  console.error('[Logger] Ignoring invalid stored configuration');
+  baseLogger.setLevel(DEFAULT_LOG_LEVEL);
+  console.error('[AgentBoard] Invalid logging configuration ignored');
 }
 
 function applyStoredConfig(value: unknown): void {
   if (value === undefined) {
-    log.setLevel(DEFAULT_LOG_LEVEL);
+    baseLogger.setLevel(DEFAULT_LOG_LEVEL);
     return;
   }
   try {
@@ -36,16 +38,42 @@ function applyStoredConfig(value: unknown): void {
   }
 }
 
-log.setLevel(DEFAULT_LOG_LEVEL);
+baseLogger.setLevel(DEFAULT_LOG_LEVEL);
+let configChangeObserved = false;
 
 if (typeof chrome !== 'undefined' && chrome.storage?.local?.get) {
-  chrome.storage.local.get(['config'], (result) => applyStoredConfig(result.config));
+  chrome.storage.local.get(['config'], (result) => {
+    if (!configChangeObserved) applyStoredConfig(result.config);
+  });
 }
 
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.config) applyStoredConfig(changes.config.newValue);
+    if (area === 'local' && changes.config) {
+      configChangeObserved = true;
+      applyStoredConfig(changes.config.newValue);
+    }
   });
 }
+
+type SafeLogMethod = (...discardedContext: unknown[]) => void;
+
+/**
+ * Fixed messages preserve severity and event counts without allowing call-site
+ * values to escape into extension/page consoles.
+ */
+const log: Readonly<{
+  trace: SafeLogMethod;
+  debug: SafeLogMethod;
+  info: SafeLogMethod;
+  warn: SafeLogMethod;
+  error: SafeLogMethod;
+}> = Object.freeze({
+  trace: () => baseLogger.trace('[AgentBoard] Trace event'),
+  debug: () => baseLogger.debug('[AgentBoard] Debug event'),
+  info: () => baseLogger.info('[AgentBoard] Information event'),
+  warn: () => baseLogger.warn('[AgentBoard] Warning event'),
+  error: () => baseLogger.error('[AgentBoard] Operation failed'),
+});
 
 export default log;

@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   fetchUrlTool,
   executeFetchUrl,
+  FETCH_URL_METADATA,
   FETCH_URL_TOOL_NAME,
 } from '../src/lib/webmcp/tools/fetch/fetch-url';
 
@@ -48,7 +49,7 @@ describe('agentboard_fetch_url system tool', () => {
       expect(global.fetch).toHaveBeenCalledWith(
         'https://example.com',
         expect.objectContaining({
-          credentials: 'include', // default
+          credentials: 'omit', // privacy-preserving default
           headers: expect.objectContaining({
             'User-Agent': 'AgentBoard/0.1.0',
           }),
@@ -72,22 +73,49 @@ describe('agentboard_fetch_url system tool', () => {
       expect(() => JSON.parse(result)).not.toThrow();
     });
 
-    it('respects includeCredentials=false', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        text: async () => 'content',
-      });
+    it('does not expose a model-controlled credential mode', () => {
+      expect(FETCH_URL_METADATA.inputSchema.properties).not.toHaveProperty('includeCredentials');
+    });
 
-      await executeFetchUrl({
-        url: 'https://example.com',
-        includeCredentials: false,
-      });
+    it('rechecks enablement before a captured tool can fetch', async () => {
+      vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({
+        config: {
+          schemaVersion: 2,
+          agents: [],
+          builtinScripts: [{ id: FETCH_URL_TOOL_NAME, enabled: false }],
+        },
+      } as never);
+      global.fetch = vi.fn();
 
+      await expect(executeFetchUrl({ url: 'https://example.com' })).rejects.toThrow(
+        'URL fetch failed'
+      );
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('forwards stream cancellation to fetch', async () => {
+      let requestSignal: AbortSignal | undefined;
+      global.fetch = vi.fn((_url, options): Promise<Response> => {
+        const signal = options?.signal as AbortSignal;
+        requestSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      });
+      const controller = new AbortController();
+
+      const request = executeFetchUrl(
+        { url: 'https://example.com' },
+        { abortSignal: controller.signal }
+      );
+      await vi.waitFor(() => expect(global.fetch).toHaveBeenCalledOnce());
+      controller.abort();
+
+      await expect(request).rejects.toThrow('URL fetch failed');
+      expect(requestSignal).toBe(controller.signal);
       expect(global.fetch).toHaveBeenCalledWith(
         'https://example.com',
-        expect.objectContaining({
-          credentials: 'omit',
-        })
+        expect.objectContaining({ credentials: 'omit', signal: controller.signal })
       );
     });
 
@@ -99,7 +127,7 @@ describe('agentboard_fetch_url system tool', () => {
       });
 
       await expect(executeFetchUrl({ url: 'https://example.com/missing' })).rejects.toThrow(
-        'HTTP 404: Not Found'
+        'URL fetch failed'
       );
     });
 
@@ -107,7 +135,7 @@ describe('agentboard_fetch_url system tool', () => {
       global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       await expect(executeFetchUrl({ url: 'https://example.com' })).rejects.toThrow(
-        'Failed to fetch'
+        'URL fetch failed'
       );
     });
 
@@ -174,13 +202,13 @@ describe('agentboard_fetch_url system tool', () => {
   });
 
   describe('URL validation', () => {
-    it('accepts http URLs', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        text: async () => 'content',
-      });
+    it('rejects HTTP origins outside localhost before fetching', async () => {
+      global.fetch = vi.fn();
 
-      await expect(executeFetchUrl({ url: 'http://example.com' })).resolves.toBeDefined();
+      await expect(executeFetchUrl({ url: 'http://example.com' })).rejects.toThrow(
+        'URL fetch failed'
+      );
+      expect(global.fetch).not.toHaveBeenCalled();
     });
 
     it('accepts https URLs', async () => {
@@ -201,13 +229,13 @@ describe('agentboard_fetch_url system tool', () => {
       await expect(executeFetchUrl({ url: 'http://localhost:3000' })).resolves.toBeDefined();
     });
 
-    it('accepts private IP URLs', async () => {
+    it('accepts private IP URLs over HTTPS', async () => {
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
         text: async () => 'content',
       });
 
-      await expect(executeFetchUrl({ url: 'http://192.168.1.1' })).resolves.toBeDefined();
+      await expect(executeFetchUrl({ url: 'https://192.168.1.1' })).resolves.toBeDefined();
     });
   });
 });

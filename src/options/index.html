@@ -103,21 +103,21 @@
         <div class="form-group">
           <label for="log-level">Log Level</label>
           <select id="log-level">
-            <option value="trace">TRACE - Fine-grained debugging (all logs)</option>
-            <option value="debug">DEBUG - Detailed operational info</option>
-            <option value="info">INFO - Significant events</option>
-            <option value="warn" selected>WARN - Unexpected but handled (default)</option>
-            <option value="error">ERROR - Errors only</option>
-            <option value="silent">SILENT - No logs</option>
+            <option value="trace">TRACE - All application events</option>
+            <option value="debug">DEBUG - Debug application events</option>
+            <option value="info">INFO - Information events</option>
+            <option value="warn" selected>WARN - Warning events (default)</option>
+            <option value="error">ERROR - Failure events</option>
+            <option value="silent">SILENT - No application or relay logs</option>
           </select>
-          <span class="field-hint">Controls log verbosity across all extension surfaces. Change to DEBUG for detailed troubleshooting.</span>
+          <span class="field-hint">Controls value-free application and relay diagnostics; page bootstrap emits fixed lifecycle events independently. AgentBoard never includes request, response, configuration, page, or tool values in its logs.</span>
         </div>
 
         <!-- Backup & Restore -->
         <div class="settings-subsection">
           <h3>Backup & Restore</h3>
           <p class="section-description">
-            Backup files contain your API keys and authentication tokens. Store them securely.
+            Backup files are plaintext and can contain API keys, authentication tokens, endpoints, model IDs, system prompts, executable user scripts, and commands. Store them as secrets.
           </p>
           
           <div class="backup-actions">

@@ -10,12 +10,14 @@ const mockGetInstructions = vi.fn<() => string | undefined>();
 const mockConnect = vi.fn();
 const mockClose = vi.fn();
 const mockListTools = vi.fn();
+const mockCallTool = vi.fn();
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: vi.fn().mockImplementation(() => ({
     connect: mockConnect,
     close: mockClose,
     listTools: mockListTools.mockResolvedValue({ tools: [] }),
+    callTool: mockCallTool,
     getInstructions: mockGetInstructions,
   })),
 }));
@@ -52,6 +54,47 @@ describe('MCP Server Instructions', () => {
           capabilities: {},
           jsonSchemaValidator: expect.any(CfWorkerJsonSchemaValidator),
         }
+      );
+    });
+
+    it('closes and resets a partially connected client when initial discovery fails', async () => {
+      mockListTools.mockRejectedValueOnce(new Error('secret discovery failure'));
+      const client = new MCPClientService();
+
+      const status = await client.connect(
+        { url: 'http://localhost:3000/mcp', transport: 'http' as const },
+        'test-server'
+      );
+
+      expect(status).toEqual({
+        connected: false,
+        serverName: 'test-server',
+        error: 'Connection failed',
+      });
+      expect(mockClose).toHaveBeenCalledTimes(1);
+      expect(client.isConnected()).toBe(false);
+      expect(client.getServerConfig()).toBeNull();
+      expect(JSON.stringify(status)).not.toContain('secret discovery failure');
+    });
+
+    it('forwards an abort signal to MCP SDK tool calls', async () => {
+      mockCallTool.mockResolvedValue({
+        isError: false,
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const client = new MCPClientService();
+      await client.connect(
+        { url: 'http://localhost:3000/mcp', transport: 'http' as const },
+        'test-server'
+      );
+      const controller = new AbortController();
+
+      await client.callTool('query', { value: 1 }, controller.signal);
+
+      expect(mockCallTool).toHaveBeenCalledWith(
+        { name: 'query', arguments: { value: 1 } },
+        undefined,
+        { signal: controller.signal }
       );
     });
 
@@ -108,6 +151,33 @@ describe('MCP Server Instructions', () => {
 
     afterEach(async () => {
       await manager.disconnectAll();
+    });
+
+    it('forwards stream cancellation through the manager to MCP SDK tool calls', async () => {
+      mockListTools.mockResolvedValue({ tools: [{ name: 'query', description: 'Query data' }] });
+      mockCallTool.mockResolvedValue({
+        isError: false,
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      await manager.loadConfig({
+        mcpServers: {
+          'data-api': { url: 'http://localhost:3000/mcp', transport: 'http' as const },
+        },
+      });
+      const controller = new AbortController();
+
+      await manager.executeTool({
+        toolName: 'query',
+        serverName: 'data-api',
+        input: { value: 1 },
+        signal: controller.signal,
+      });
+
+      expect(mockCallTool).toHaveBeenCalledWith(
+        { name: 'query', arguments: { value: 1 } },
+        undefined,
+        { signal: controller.signal }
+      );
     });
 
     it('should surface instructions in server status', async () => {

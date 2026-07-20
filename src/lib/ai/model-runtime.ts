@@ -5,6 +5,9 @@ import type { JSONValue, LanguageModel } from 'ai';
 import type { AgentConfig } from '../storage/config';
 import type { ApiProtocol } from './protocol';
 
+// AI SDK warnings bypass AgentBoard's logger and may interpolate model or tool values.
+globalThis.AI_SDK_LOG_WARNINGS = false;
+
 export type ProviderOptions = Record<string, Record<string, JSONValue>>;
 
 export interface ModelRuntime {

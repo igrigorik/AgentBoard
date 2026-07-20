@@ -16,6 +16,7 @@ import { CommandRegistry, CommandProcessor, createBuiltinCommands } from '../lib
 // Streaming session interface to encapsulate all streaming state
 interface StreamingSession {
   port: chrome.runtime.Port;
+  cancel: () => void;
   currentReasoningBox?: ReasoningBox; // Currently streaming reasoning box
   reasoningBoxes: ReasoningBox[]; // All reasoning boxes in chronological order
   currentTextBox?: TextBox; // Currently streaming text box
@@ -37,6 +38,7 @@ let connectionRetries = 0;
 const MAX_RETRIES = 3;
 let messageHistory: ChatMessage[] = [];
 let currentSession: StreamingSession | null = null;
+let currentStreamPreparation: AbortController | null = null;
 const configStorage = ConfigStorage.getInstance();
 
 // Auto-continuation: when tools change mid-stream (e.g., navigation),
@@ -203,6 +205,28 @@ const attachedTabId = (() => {
 })();
 
 log.info('[Sidebar] Initialized for tab:', attachedTabId);
+
+function raceWithAbort<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
 
 /**
  * Get current page context (URL, title) for the attached tab.
@@ -661,20 +685,6 @@ async function streamAIResponse() {
     throw new Error('No agent selected');
   }
 
-  // Create connection for streaming - include tabId for isolation
-  const connectionId = `ai-stream-${attachedTabId || 'unknown'}-${Date.now()}`;
-  log.debug('[Sidebar] Creating port connection:', connectionId, 'for tab:', attachedTabId);
-  const port = chrome.runtime.connect({ name: connectionId });
-
-  // Initialize streaming session
-  currentSession = {
-    port,
-    currentReasoningBox: undefined,
-    reasoningBoxes: [],
-    currentTextBox: undefined,
-    toolCalls: new Map(),
-  };
-
   // Create assistant message placeholder (don't add to history yet)
   const assistantMsg: ChatMessage = {
     id: globalThis.crypto.randomUUID(),
@@ -684,25 +694,71 @@ async function streamAIResponse() {
     metadata: { agentId: currentAgentId, agentName: currentAgent.name },
   };
 
-  // Get page context and domain-specific tool hints to prepend to user messages
-  const pageContext = await getPageContext();
-  const siteToolHints = attachedTabId
-    ? (
-        await chrome.runtime.sendMessage({
-          type: 'GET_SITE_TOOL_HINTS',
-          tabId: attachedTabId,
-        })
-      )?.hints
-    : undefined;
+  // Page-context preparation is cancellable before a provider-owned port exists.
+  currentStreamPreparation?.abort();
+  const preparation = new AbortController();
+  currentStreamPreparation = preparation;
+  let pageContext: Awaited<ReturnType<typeof getPageContext>>;
+  let siteToolHints: Array<{ name: string; description: string }> | undefined;
+  try {
+    pageContext = await raceWithAbort(getPageContext(), preparation.signal);
+    siteToolHints = attachedTabId
+      ? (
+          await raceWithAbort(
+            chrome.runtime.sendMessage({
+              type: 'GET_SITE_TOOL_HINTS',
+              tabId: attachedTabId,
+            }),
+            preparation.signal
+          )
+        )?.hints
+      : undefined;
+  } catch (error) {
+    if (currentStreamPreparation === preparation) currentStreamPreparation = null;
+    if (preparation.signal.aborted) return;
+    throw error;
+  }
+  if (currentStreamPreparation !== preparation || preparation.signal.aborted) return;
+  currentStreamPreparation = null;
   const contextPrefix = pageContext ? buildPageContextXml(pageContext, siteToolHints) : '';
 
-  return new Promise<void>((resolve, reject) => {
-    if (!currentSession) {
-      reject(new Error('Session not created'));
-      return;
-    }
+  // Each request owns one collision-resistant port and its promise settlement.
+  const connectionId = `ai-stream-${attachedTabId || 'unknown'}-${globalThis.crypto.randomUUID()}`;
+  log.debug('[Sidebar] Creating port connection:', connectionId, 'for tab:', attachedTabId);
+  const port = chrome.runtime.connect({ name: connectionId });
+  const session: StreamingSession = {
+    port,
+    cancel: () => undefined,
+    currentReasoningBox: undefined,
+    reasoningBoxes: [],
+    currentTextBox: undefined,
+    toolCalls: new Map(),
+  };
+  currentSession = session;
 
-    currentSession.port.onMessage.addListener((msg) => {
+  return new Promise<void>((resolve, reject) => {
+    let expectedDisconnect = false;
+    let settled = false;
+    const resolveOnce = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    session.cancel = () => {
+      if (settled) return;
+      expectedDisconnect = true;
+      if (currentSession === session) currentSession = null;
+      session.port.disconnect();
+      resolveOnce();
+    };
+
+    session.port.onMessage.addListener((msg) => {
+      if (currentSession !== session) return;
       log.debug('[Sidebar] Received message from port:', msg.type, msg);
       switch (msg.type) {
         case 'STREAM_REASONING_START': {
@@ -889,10 +945,9 @@ async function streamAIResponse() {
           messageHistory.push(assistantMsg);
 
           // Session cleanup (TextBox handles its own cleanup)
-          if (currentSession) {
-            currentSession.port.disconnect();
-            currentSession = null;
-          }
+          expectedDisconnect = true;
+          currentSession = null;
+          session.port.disconnect();
 
           // Auto-continue if tools changed mid-stream (e.g., after navigation).
           // The AI needs to restart with fresh tools to continue the task.
@@ -929,7 +984,7 @@ async function streamAIResponse() {
             messageHistory.push(contMsg);
 
             // Chain the continuation — don't reset isLoading
-            streamAIResponse().then(resolve).catch(reject);
+            streamAIResponse().then(resolveOnce).catch(rejectOnce);
             break;
           }
 
@@ -957,13 +1012,13 @@ async function streamAIResponse() {
             messageHistory.push(contMsg);
 
             // Chain continuation — model should respond with text summary
-            streamAIResponse().then(resolve).catch(reject);
+            streamAIResponse().then(resolveOnce).catch(rejectOnce);
             break;
           }
 
           isLoading = false;
           updateSendButton();
-          resolve();
+          resolveOnce();
           break;
         }
 
@@ -972,18 +1027,16 @@ async function streamAIResponse() {
           log.error('[Sidebar] Stream error:', msg.error);
 
           // Clean up session components
-          if (currentSession) {
-            // Clean up any active text box
-            if (currentSession.currentTextBox) {
-              currentSession.currentTextBox.destroy();
-            }
-            // Clean up reasoning box if streaming
-            if (currentSession.currentReasoningBox?.isStreamingActive()) {
-              currentSession.currentReasoningBox.finishStreaming();
-            }
-            currentSession.port.disconnect();
-            currentSession = null;
+          // Clean up this request without mutating a replacement session.
+          if (session.currentTextBox) {
+            session.currentTextBox.destroy();
           }
+          if (session.currentReasoningBox?.isStreamingActive()) {
+            session.currentReasoningBox.finishStreaming();
+          }
+          expectedDisconnect = true;
+          currentSession = null;
+          session.port.disconnect();
 
           // Enhanced error messages for multi-modal issues
           let errorMessage = msg.error || 'Streaming failed';
@@ -1010,20 +1063,19 @@ async function streamAIResponse() {
           // Don't pop from history since we didn't add it yet
           isLoading = false;
           updateSendButton();
-          reject(new Error(msg.error));
+          rejectOnce(new Error(msg.error));
           break;
         }
       }
     });
 
-    currentSession.port.onDisconnect.addListener(() => {
-      // Handle unexpected disconnection
-      if (currentSession) {
-        // Clean up any active text box
-        if (currentSession.currentTextBox) {
-          currentSession.currentTextBox.finishStreaming();
-        }
+    session.port.onDisconnect.addListener(() => {
+      if (currentSession === session) {
+        session.currentTextBox?.finishStreaming();
         currentSession = null;
+      }
+      if (!expectedDisconnect) {
+        rejectOnce(new Error('AI stream connection closed unexpectedly.'));
       }
     });
 
@@ -1070,17 +1122,23 @@ async function streamAIResponse() {
       messages: messagesToSend,
     });
 
-    if (!currentSession) {
-      reject(new Error('Session not available'));
+    if (currentSession !== session) {
+      rejectOnce(new Error('AI stream session is no longer active.'));
       return;
     }
 
-    currentSession.port.postMessage({
-      type: 'STREAM_CHAT',
-      agentId: currentAgentId,
-      tabId: attachedTabId || undefined, // Pass the attached tab ID for tool scoping
-      messages: messagesToSend,
-    });
+    try {
+      session.port.postMessage({
+        type: 'STREAM_CHAT',
+        agentId: currentAgentId,
+        tabId: attachedTabId || undefined, // Pass the attached tab ID for tool scoping
+        messages: messagesToSend,
+      });
+    } catch {
+      currentSession = null;
+      expectedDisconnect = true;
+      rejectOnce(new Error('AI stream connection failed.'));
+    }
   });
 }
 
@@ -1151,10 +1209,9 @@ function displayConversationNotice(content: string): void {
 function clearConversation() {
   messageHistory = [];
   messagesContainer.innerHTML = '';
-  // Clean up any active session
-  if (currentSession) {
-    currentSession.port.disconnect();
-    currentSession = null;
+  // Clean up any active or preparing request.
+  if (currentSession || currentStreamPreparation) {
+    cancelCurrentStream();
   }
 
   // Reset scroll state - we're back at the top/beginning
@@ -1173,21 +1230,29 @@ document.addEventListener('keydown', (e) => {
 
 // Cancel current stream
 function cancelCurrentStream() {
+  if (currentStreamPreparation) {
+    const preparation = currentStreamPreparation;
+    currentStreamPreparation = null;
+    preparation.abort();
+    isLoading = false;
+    updateSendButton();
+    return;
+  }
+
   if (currentSession) {
-    chrome.runtime.sendMessage({
-      type: 'CANCEL_STREAM',
-      connectionId: currentSession.port.name,
-    } as const);
+    const session = currentSession;
+    // Settle the owning promise and disconnect first. The background owns this exact
+    // port, so cancellation cannot target any replacement session.
+    session.cancel();
 
     // Clean up session components
-    if (currentSession.currentTextBox) {
-      currentSession.currentTextBox.destroy();
+    if (session.currentTextBox) {
+      session.currentTextBox.destroy();
     }
-    if (currentSession.currentReasoningBox?.isStreamingActive()) {
-      currentSession.currentReasoningBox.finishStreaming();
+    if (session.currentReasoningBox?.isStreamingActive()) {
+      session.currentReasoningBox.finishStreaming();
     }
 
-    currentSession.port.disconnect();
     currentSession = null;
     isLoading = false;
     updateSendButton();
@@ -1197,8 +1262,8 @@ function cancelCurrentStream() {
 // Cancel current stream on Escape OR clear attachments
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    // Priority 1: Cancel active stream
-    if (currentSession) {
+    // Priority 1: Cancel active or preparing stream
+    if (currentSession || currentStreamPreparation) {
       cancelCurrentStream();
     }
     // Priority 2: Clear pending attachments

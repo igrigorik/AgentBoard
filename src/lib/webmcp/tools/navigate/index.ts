@@ -18,6 +18,7 @@
  */
 
 import log from '../../../logger';
+import { ConfigStorage } from '../../../storage/config';
 import { getTabManager } from '../../lifecycle';
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -36,6 +37,29 @@ const navigateSchema = z.object({
   url: z.string().describe(PARAM_DESCRIPTIONS.url),
 });
 
+function raceWithAbort<T>(promise: PromiseLike<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return Promise.resolve(promise);
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
 /**
  * Create a navigate tool bound to a specific tab.
  * Returns an AI SDK tool with the tabId captured in its execute closure.
@@ -44,9 +68,15 @@ export function createNavigateTool(tabId: number) {
   return tool({
     description: TOOL_DESCRIPTION,
     inputSchema: navigateSchema,
-    execute: async (args) => {
+    execute: async (args, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       const { url } = args;
       log.info(`[navigate] Navigating tab ${tabId} to ${url}`);
+
+      const isEnabled = await raceWithAbort(
+        ConfigStorage.getInstance().isBuiltinToolEnabled(NAVIGATE_TOOL_NAME),
+        abortSignal
+      );
+      if (!isEnabled) throw new Error('Tool disabled');
 
       // Validate URL — only allow http/https to prevent dangerous schemes
       // (javascript:, data:, file://, chrome-extension:// etc.)
@@ -61,16 +91,17 @@ export function createNavigateTool(tabId: number) {
       // onCompleted can fire before the next microtask — registering after
       // would miss the event entirely.
       const tabManager = getTabManager();
-      const navigationPromise = tabManager.waitForNavigation(tabId);
+      const navigationPromise = tabManager.waitForNavigation(tabId, 30000, abortSignal);
 
-      // Initiate navigation — triggers onBeforeNavigate (clears old tools)
-      await chrome.tabs.update(tabId, { url });
-
-      // Wait for navigation to complete (onCompleted for main frame)
-      const result = await navigationPromise;
+      // Initiate navigation and observe both operations so cancellation cannot leave
+      // a rejected navigation waiter or a hanging tab update behind.
+      const [, result] = await Promise.all([
+        raceWithAbort(chrome.tabs.update(tabId, { url }), abortSignal),
+        navigationPromise,
+      ]);
 
       // Get page title after load
-      const tab = await chrome.tabs.get(tabId);
+      const tab = await raceWithAbort(chrome.tabs.get(tabId), abortSignal);
 
       const summary = `Navigated to ${result.url}${tab.title ? ` — "${tab.title}"` : ''}`;
       log.info(`[navigate] ${summary}`);

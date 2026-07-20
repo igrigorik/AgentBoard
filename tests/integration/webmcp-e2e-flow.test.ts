@@ -405,8 +405,8 @@ describe('WebMCP E2E Message Flow', () => {
         });
       }
 
-      // Verify error propagates
-      await expect(executePromise).rejects.toThrow('Execution failed: Database connection error');
+      // Page-controlled diagnostic text must stop at the extension boundary.
+      await expect(executePromise).rejects.toThrow('WebMCP tool execution failed');
     });
   });
 

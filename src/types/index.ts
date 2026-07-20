@@ -33,11 +33,6 @@ interface StreamChatMessage {
   conversationId?: string;
 }
 
-interface CancelStreamMessage {
-  type: 'CANCEL_STREAM';
-  connectionId: string;
-}
-
 interface ContextSelectionMessage {
   type: 'CONTEXT_SELECTION';
   text: string;
@@ -133,7 +128,6 @@ export type ExtensionMessage =
   | TestNewConnectionMessage
   | PingMessage
   | StreamChatMessage
-  | CancelStreamMessage
   | ContextSelectionMessage
   | StreamChunkMessage
   | StreamCompleteMessage

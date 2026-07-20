@@ -58,27 +58,36 @@ interface MockPort {
   disconnect: ReturnType<typeof vi.fn>;
   onMessage: { addListener: (listener: (message: unknown) => void) => void };
   onDisconnect: { addListener: (listener: () => void) => void };
+  emitMessage(message: unknown): void;
+  emitDisconnect(): void;
 }
 
-function createPort(name: string): MockPort {
+function createPort(name: string, autoComplete = true): MockPort {
   const messageListeners: Array<(message: unknown) => void> = [];
+  const disconnectListeners: Array<() => void> = [];
+  const emitMessage = (message: unknown) => {
+    for (const listener of messageListeners) listener(message);
+  };
+  const emitDisconnect = () => {
+    for (const listener of disconnectListeners) listener();
+  };
 
   return {
     name,
     postMessage: vi.fn(() => {
-      queueMicrotask(() => {
-        for (const listener of messageListeners) {
-          listener({ type: 'STREAM_COMPLETE', fullResponse: '' });
-        }
-      });
+      if (autoComplete) {
+        queueMicrotask(() => emitMessage({ type: 'STREAM_COMPLETE', fullResponse: '' }));
+      }
     }),
-    disconnect: vi.fn(),
+    disconnect: vi.fn(() => queueMicrotask(emitDisconnect)),
     onMessage: {
       addListener: (listener) => messageListeners.push(listener),
     },
     onDisconnect: {
-      addListener: vi.fn(),
+      addListener: (listener) => disconnectListeners.push(listener),
     },
+    emitMessage,
+    emitDisconnect,
   };
 }
 
@@ -89,6 +98,23 @@ function sendMessage(text: string): void {
   input.dispatchEvent(new Event('input', { bubbles: true }));
   expect(sendButton.disabled).toBe(false);
   sendButton.click();
+}
+
+function configureChrome(ports: MockPort[], autoComplete: boolean): void {
+  chrome.runtime.connect = vi.fn(({ name }) => {
+    const port = createPort(name, autoComplete);
+    ports.push(port);
+    return port as unknown as chrome.runtime.Port;
+  });
+  chrome.runtime.sendMessage = vi.fn(async (message) => {
+    if (message.type === 'GET_SITE_TOOL_HINTS') return { hints: [] };
+    return { pong: true };
+  });
+  chrome.tabs.get = vi.fn().mockResolvedValue({
+    id: 123,
+    url: 'https://example.com/current',
+    title: 'Current page',
+  });
 }
 
 describe('sidebar model history', () => {
@@ -117,20 +143,7 @@ describe('sidebar model history', () => {
 
   it('renders sidebar notices without sending them as assistant turns', async () => {
     const ports: MockPort[] = [];
-    chrome.runtime.connect = vi.fn(({ name }) => {
-      const port = createPort(name);
-      ports.push(port);
-      return port as unknown as chrome.runtime.Port;
-    });
-    chrome.runtime.sendMessage = vi.fn(async (message) => {
-      if (message.type === 'GET_SITE_TOOL_HINTS') return { hints: [] };
-      return { pong: true };
-    });
-    chrome.tabs.get = vi.fn().mockResolvedValue({
-      id: 123,
-      url: 'https://example.com/current',
-      title: 'Current page',
-    });
+    configureChrome(ports, true);
 
     await import('../src/sidebar/index');
     document.dispatchEvent(new Event('DOMContentLoaded'));

@@ -177,19 +177,17 @@ describe('Tab-Scoped Side Panel', () => {
   });
 
   describe('Port Connection Names', () => {
-    it('should include tabId in streaming port name', () => {
+    it('should include tabId and a collision-resistant ID in streaming port name', () => {
       const tabId = 777;
-      const timestamp = Date.now();
-      const connectionId = `ai-stream-${tabId}-${timestamp}`;
+      const connectionId = `ai-stream-${tabId}-${globalThis.crypto.randomUUID()}`;
 
-      expect(connectionId).toMatch(/ai-stream-\d+-\d+/);
+      expect(connectionId).toMatch(/ai-stream-\d+-[0-9a-f-]{36}/);
       expect(connectionId).toContain(`-${tabId}-`);
     });
 
     it('should use "unknown" for null tabId in port name', () => {
       const tabId = null;
-      const timestamp = Date.now();
-      const connectionId = `ai-stream-${tabId || 'unknown'}-${timestamp}`;
+      const connectionId = `ai-stream-${tabId || 'unknown'}-${globalThis.crypto.randomUUID()}`;
 
       expect(connectionId).toContain('ai-stream-unknown-');
     });

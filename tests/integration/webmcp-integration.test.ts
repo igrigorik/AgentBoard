@@ -300,7 +300,7 @@ describe('WebMCP Integration - Sidebar ↔ Tab Communication', () => {
       }
 
       // The promise should reject with an error
-      await expect(responsePromise).rejects.toThrow('Tool execution failed: Invalid input');
+      await expect(responsePromise).rejects.toThrow('WebMCP tool execution failed');
     });
   });
 
