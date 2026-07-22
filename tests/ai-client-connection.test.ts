@@ -58,6 +58,27 @@ function successfulTextStream() {
   return textStream(async () => ({ done: false, value: 'OK' }));
 }
 
+function storeAgent(agentId: string): void {
+  vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    config: {
+      schemaVersion: 2,
+      agents: [
+        {
+          id: agentId,
+          name: 'Private Agent',
+          provider: 'openai',
+          apiProtocol: 'openai-responses',
+          apiKey: 'secret-key',
+          model: 'secret-model',
+          endpoint: 'https://secret.example.test/v1',
+          systemPrompt: '',
+          temperature: 0.7,
+        },
+      ],
+    },
+  } as never);
+}
+
 function deferredAsyncTextStream() {
   let resolve!: (value: IteratorResult<string>) => void;
   let reject!: (error: unknown) => void;
@@ -141,7 +162,6 @@ describe('AIClient connection testing', () => {
             endpoint: 'https://example.test/v1',
             systemPrompt: '',
             temperature: 0.7,
-            maxTokens: 1000,
           },
         ],
       },
@@ -243,7 +263,6 @@ describe('AIClient connection testing', () => {
           model: 'test-model',
           systemPrompt: '',
           temperature: 0.7,
-          maxTokens: 1000,
         })),
       },
     } as never);
@@ -329,7 +348,6 @@ describe('AIClient connection testing', () => {
       model: 'test-model',
       systemPrompt: '',
       temperature: 0.7,
-      maxTokens: 1000,
     };
     const getAgent = vi
       .spyOn(configStorage, 'getAgent')
@@ -424,7 +442,6 @@ describe('AIClient connection testing', () => {
         model: 'test-model',
         systemPrompt: '',
         temperature: 0.7,
-        maxTokens: 1000,
       });
       await Promise.resolve();
 
@@ -450,7 +467,6 @@ describe('AIClient connection testing', () => {
             model: 'test-model',
             systemPrompt: '',
             temperature: 0.7,
-            maxTokens: 1000,
           },
         ],
       },
@@ -506,7 +522,6 @@ describe('AIClient connection testing', () => {
             model: 'test-model',
             systemPrompt: '',
             temperature: 0.7,
-            maxTokens: 1000,
           },
         ],
       },
@@ -563,7 +578,6 @@ describe('AIClient connection testing', () => {
             endpoint: 'https://secret.example.test/v1',
             systemPrompt: '',
             temperature: 0.7,
-            maxTokens: 1000,
           },
         ],
       },
@@ -595,6 +609,114 @@ describe('AIClient connection testing', () => {
     expect(publicError).not.toBe(providerFailure);
     expect(publicError).not.toHaveProperty('responseBody');
     expect(publicError.message).not.toContain('raw prompt and response');
+  });
+
+  it('owns and sanitizes full-stream SDK error parts without finishing', async () => {
+    storeAgent('full-stream-error-agent');
+    vi.mocked(getToolRegistry).mockReturnValue({
+      getAllTools: () => ({ private_tool: {} }),
+      getToolsForTab: () => ({ private_tool: {} }),
+      onTabToolsChanged: () => () => undefined,
+    } as never);
+    const providerFailure = new DOMException('secret full-stream provider failure', 'AbortError');
+    mocks.streamText.mockImplementation(
+      (options: { onError?: (event: { error: unknown }) => void }) => {
+        options.onError?.({ error: providerFailure });
+        return {
+          textStream: undefined,
+          fullStream: {
+            async *[Symbol.asyncIterator]() {
+              yield { type: 'error', error: providerFailure };
+            },
+          },
+        };
+      }
+    );
+    const onFinish = vi.fn();
+    const onError = vi.fn();
+    const onAbort = vi.fn();
+
+    await AIClient.getInstance().streamChat('full-stream-error-agent', [], undefined, {
+      onFinish,
+      onError,
+      onAbort,
+    });
+
+    expect(mocks.streamText).toHaveBeenCalledWith(
+      expect.objectContaining({ onError: expect.any(Function) })
+    );
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(onAbort).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      message: 'AI request failed. Verify the Connection API, endpoint, model, and credentials.',
+    });
+    expect(JSON.stringify(onError.mock.calls)).not.toContain(providerFailure.message);
+    expect(vi.mocked(console.error).mock.calls.flat().map(String).join('\n')).not.toContain(
+      providerFailure.message
+    );
+  });
+
+  it('owns text-stream SDK errors that are not exposed as stream parts', async () => {
+    storeAgent('text-stream-error-agent');
+    const providerFailure = new DOMException('secret text-stream provider failure', 'AbortError');
+    mocks.streamText.mockImplementation(
+      (options: { onError?: (event: { error: unknown }) => void }) => ({
+        fullStream: undefined,
+        textStream: {
+          async *[Symbol.asyncIterator]() {
+            yield 'partial';
+            options.onError?.({ error: providerFailure });
+          },
+        },
+      })
+    );
+    const onFinish = vi.fn();
+    const onError = vi.fn();
+    const onAbort = vi.fn();
+
+    await AIClient.getInstance().streamChat('text-stream-error-agent', [], undefined, {
+      onFinish,
+      onError,
+      onAbort,
+    });
+
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(onAbort).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      message: 'AI request failed. Verify the Connection API, endpoint, model, and credentials.',
+    });
+    expect(JSON.stringify(onError.mock.calls)).not.toContain(providerFailure.message);
+    expect(vi.mocked(console.error).mock.calls.flat().map(String).join('\n')).not.toContain(
+      providerFailure.message
+    );
+  });
+
+  it('owns and sanitizes connection-probe SDK errors', async () => {
+    const providerFailure = new DOMException('secret probe provider failure', 'AbortError');
+    mocks.streamText.mockImplementation(
+      (options: { onError?: (event: { error: unknown }) => void }) => {
+        options.onError?.({ error: providerFailure });
+        return { textStream: successfulTextStream() };
+      }
+    );
+
+    const result = await AIClient.getInstance().testConnectionWithDetails({
+      apiProtocol: 'openai-responses',
+      apiKey: 'secret-key',
+      model: 'secret-model',
+      endpoint: 'https://secret.example.test/v1',
+    });
+
+    expect(result).toEqual({
+      success: false,
+      message: 'AI request failed. Verify the Connection API, endpoint, model, and credentials.',
+    });
+    expect(JSON.stringify(result)).not.toContain(providerFailure.message);
+    expect(vi.mocked(console.error).mock.calls.flat().map(String).join('\n')).not.toContain(
+      providerFailure.message
+    );
   });
 
   it('aborts the provider request when the connection test times out', async () => {

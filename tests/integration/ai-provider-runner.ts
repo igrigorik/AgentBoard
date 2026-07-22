@@ -183,7 +183,6 @@ async function executeAIIntegrationTarget(
     apiProtocol: target.apiProtocol,
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 32,
   };
   const runtime = createModelRuntime(agent);
   let streamFailure: AIIntegrationFailure | undefined;

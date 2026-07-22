@@ -4,6 +4,7 @@
  */
 
 import log from '../lib/logger';
+import { raceWithAbort } from '../lib/abort';
 import './styles.css';
 import type { ChatMessage, ToolCall, MessageContent, MessagePart } from '../types';
 import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
@@ -205,28 +206,6 @@ const attachedTabId = (() => {
 })();
 
 log.info('[Sidebar] Initialized for tab:', attachedTabId);
-
-function raceWithAbort<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    Promise.resolve(promise).then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      }
-    );
-  });
-}
 
 /**
  * Get current page context (URL, title) for the attached tab.
@@ -519,7 +498,7 @@ function setupEventListeners() {
         currentAgentId = selectedAgentId;
         currentAgent = agent;
 
-        addMessage('system', `Switched to ${agent.name} (${agent.provider.toUpperCase()})`);
+        addMessage('system', `Switched to ${agent.name}`);
       }
     } catch (error) {
       addMessage('error', 'Failed to switch agent');

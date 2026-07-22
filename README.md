@@ -156,11 +156,15 @@ export async function execute() {
 
 Save in Settings → My Tools. The AI can now call it when you ask about prices on example.com. See [examples/](examples/) for more complete tool implementations.
 
-**Built-in WebMCP tools:**
+**Built-in page/WebMCP tools:**
 
 - `agentboard_read_page` - Read the rendered page as article markdown, visible application text, or metadata context
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
-- `agentboard_fetch_url` - Fetch external URLs with optional markdown conversion
+
+**Built-in system tools:**
+
+- `agentboard_fetch_url` - Fetch external URLs without browser credentials, with optional markdown conversion
+- `agentboard_navigate` - Navigate the attached tab in its normal browser context; enabled by default and uses that tab's authenticated session
 
 ## Commands
 
@@ -180,7 +184,7 @@ Fast interactions with expansion templates.
 
 AgentBoard has no operated telemetry or AI proxy, but configured features are not local-only. When you send a chat, the AI endpoint receives the conversation plus the attached tab's full URL and title; URLs may contain sensitive paths, query parameters, fragments, document identifiers, or tokens. AI endpoints can also receive attachments, tool definitions, tool arguments, and tool results. Remote MCP servers receive MCP protocol traffic and authorization tokens. Credential-free URL fetches contact the requested website. The built-in YouTube transcript tool contacts YouTube Innertube and caption endpoints; its same-origin Innertube request and explicit caption request can include browser YouTube/Google session credentials. User WebMCP scripts run with page-level capabilities defined by their source.
 
-Settings are stored in `chrome.storage.local`. Conversation traffic is kept in memory rather than extension storage, and extension diagnostics discard caller-supplied values before reaching browser consoles. Settings exports are plaintext and can contain AI credentials, MCP tokens, endpoint URLs, system prompts, and executable user scripts; treat every backup as a secret.
+Settings are stored in `chrome.storage.local`. Conversation traffic is kept in memory rather than extension storage. AgentBoard's application logger and relay diagnostics discard caller-supplied values; generated page-tool registration wrappers and browser/provider code log independently and may include their own errors. Settings exports are plaintext and can contain AI credentials, MCP tokens, endpoint URLs, system prompts, and executable user scripts; treat every backup as a secret.
 
 OpenAI Responses requests include `store: false`, but that does not guarantee Zero Data Retention or disable provider/proxy logging, abuse monitoring, retention, or prompt caching. See [PRIVACY.md](PRIVACY.md) for the complete boundary and deletion guidance.
 

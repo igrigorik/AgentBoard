@@ -4,6 +4,7 @@
  */
 
 import log from '../lib/logger';
+import { raceWithAbort } from '../lib/abort';
 import { AIClient, type StreamCallbacks } from '../lib/ai/client';
 import {
   ConfigStorage,
@@ -32,28 +33,6 @@ interface StreamingConnection {
 const aiClient = AIClient.getInstance();
 const configStorage = ConfigStorage.getInstance();
 const activeStreams = new Map<string, StreamingConnection>();
-
-function raceWithAbort<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    Promise.resolve(promise).then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      }
-    );
-  });
-}
 
 // WebMCP tab management
 const webmcp = getTabManager();
@@ -327,6 +306,13 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
   log.debug('Background received message:', request.type);
 
   switch (request.type) {
+    case 'GET_LOG_LEVEL':
+      configStorage
+        .get()
+        .then(({ logLevel }) => sendResponse({ logLevel }))
+        .catch(() => sendResponse({ error: 'CONFIGURATION_UNAVAILABLE' }));
+      return true; // Keep channel open for async response
+
     case 'GET_CONFIG':
       configStorage
         .get()
@@ -878,6 +864,7 @@ chrome.runtime.onConnect.addListener((port) => {
 // Listen for config changes from Options page
 configStorage.onChange(
   async (newConfig: StorageConfig) => {
+    webmcp.setRelayLogLevel(newConfig.logLevel);
     log.debug(
       '[Background] Config updated - available agents:',
       newConfig.agents.map((agent) => `${agent.name} (${agent.provider})`)

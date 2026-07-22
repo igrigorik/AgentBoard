@@ -6,6 +6,7 @@
  */
 
 import { streamText, CoreMessage } from 'ai';
+import { raceWithAbort } from '../abort';
 import type { AgentConfig } from '../storage/config';
 import type { ToolCall } from '../../types';
 import {
@@ -32,32 +33,6 @@ function getErrorStatus(error: unknown): number | undefined {
     : typeof candidate.status === 'number'
       ? candidate.status
       : undefined;
-}
-
-function isAbortError(error: unknown): boolean {
-  return !!error && typeof error === 'object' && 'name' in error && error.name === 'AbortError';
-}
-
-function raceWithAbort<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    Promise.resolve(promise).then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      }
-    );
-  });
 }
 
 async function* abortableAsyncIterable<T>(
@@ -180,15 +155,6 @@ export class AIClient {
   }
 
   /**
-   * Check if an agent is configured and ready
-   */
-  async isAgentAvailable(agentId: string): Promise<boolean> {
-    const agent = await this.configStorage.getAgent(agentId);
-    // Agent is available if it has an API key OR a custom endpoint
-    return agent !== null && (!!agent.apiKey || !!agent.endpoint);
-  }
-
-  /**
    * List all configured agents
    */
   async getAvailableAgents(): Promise<AgentConfig[]> {
@@ -293,6 +259,8 @@ export class AIClient {
         const allTools = tabId ? toolRegistry.getToolsForTab(tabId) : toolRegistry.getAllTools();
 
         const hasTools = Object.keys(allTools).length > 0;
+        let streamFailed = false;
+        let streamFailure: unknown;
 
         const streamParams: Parameters<typeof streamText>[0] = {
           model: runtime.model,
@@ -301,6 +269,11 @@ export class AIClient {
           ...(agent.reasoning?.enabled ? {} : { temperature: agent.temperature }),
           maxRetries: 2,
           abortSignal: abortController.signal,
+          // AI SDK's default handler logs raw provider errors to the console.
+          onError: ({ error }) => {
+            streamFailed = true;
+            streamFailure = error;
+          },
           ...(hasTools && {
             tools: allTools,
             // Stop after current step if tools changed (navigation, etc.)
@@ -429,7 +402,7 @@ export class AIClient {
             if (part.type === 'text-start') {
               // For non-OpenAI providers, end reasoning if it's still active
               // OpenAI sends explicit reasoning-end events, so we don't need this
-              if (isReasoning && !isOpenAIProtocol(runtime.apiProtocol)) {
+              if (isReasoning && !isOpenAIProtocol(agent.apiProtocol)) {
                 callbacks.onReasoningEnd?.(reasoningTokens ? { reasoningTokens } : undefined);
                 isReasoning = false;
                 currentReasoningId = undefined;
@@ -501,6 +474,8 @@ export class AIClient {
                 status: 'error',
                 error: 'Tool execution failed',
               });
+            } else if (part.type === 'error') {
+              throw part.error;
             } else if (part.type === 'finish') {
               // Handle finish event with usage data
               // The finish event has totalUsage property according to SDK types
@@ -524,6 +499,9 @@ export class AIClient {
           }
         }
 
+        // textStream omits non-text parts, so its SDK error callback is the only
+        // signal that a provider failure occurred.
+        if (streamFailed) throw streamFailure;
         callbacks.onFinish(_fullText, { toolsChanged: toolsInvalidated, stepsExhausted });
       } finally {
         // Always clean up the tool-change subscription to prevent leaks
@@ -535,8 +513,7 @@ export class AIClient {
       if (
         requestSequence < this.latestAcceptedStreamSequence ||
         pendingStream.controller.signal.aborted ||
-        abortController?.signal.aborted ||
-        isAbortError(error)
+        abortController?.signal.aborted
       ) {
         notifyAbort();
         return;
@@ -595,7 +572,6 @@ export class AIClient {
         endpoint: details.endpoint,
         systemPrompt: '',
         temperature: 0.7,
-        maxTokens: 1000,
       };
 
       const runtime = createModelRuntime(tempAgent);
@@ -608,6 +584,8 @@ export class AIClient {
       // with a fresh controller so every exit path also stops any remaining generation/billing.
       const testAbortController = new AbortController();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      let streamFailed = false;
+      let streamFailure: unknown;
 
       try {
         const result = await streamText({
@@ -616,6 +594,10 @@ export class AIClient {
           temperature: 0.7,
           maxRetries: 0,
           abortSignal: testAbortController.signal,
+          onError: ({ error }) => {
+            streamFailed = true;
+            streamFailure = error;
+          },
           ...(runtime.providerOptions && { providerOptions: runtime.providerOptions }),
         });
 
@@ -641,6 +623,7 @@ export class AIClient {
 
         const receivedData = await Promise.race([streamPromise, timeoutPromise]);
 
+        if (streamFailed) throw streamFailure;
         if (!receivedData) {
           return {
             success: false,
@@ -657,13 +640,6 @@ export class AIClient {
         testAbortController.abort();
       }
     } catch (error) {
-      if (isAbortError(error)) {
-        return {
-          success: false,
-          message: 'Connection test was cancelled. Try again.',
-        };
-      }
-
       return {
         success: false,
         message: publicAIRequestError(error).message,

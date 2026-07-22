@@ -52,7 +52,7 @@ describe('agentboard_navigate cancellation', () => {
     expect(chrome.tabs.update).not.toHaveBeenCalled();
   });
 
-  it('forwards the stream signal through navigation completion and tab APIs', async () => {
+  it('links stream cancellation into an operation-owned navigation waiter', async () => {
     const controller = new AbortController();
     mocks.waitForNavigation.mockResolvedValue({ url: 'https://example.com/final' });
     chrome.tabs.update = vi.fn().mockResolvedValue({ id: 42 });
@@ -63,10 +63,39 @@ describe('agentboard_navigate cancellation', () => {
       navigate.execute({ url: 'https://example.com/start' }, { abortSignal: controller.signal })
     ).resolves.toBe('Navigated to https://example.com/final — "Final page"');
 
-    expect(mocks.waitForNavigation).toHaveBeenCalledWith(42, 30000, controller.signal);
+    expect(mocks.waitForNavigation).toHaveBeenCalledWith(42, 30000, expect.any(AbortSignal));
+    const navigationSignal = mocks.waitForNavigation.mock.calls[0][2] as AbortSignal;
+    expect(navigationSignal).not.toBe(controller.signal);
+    expect(navigationSignal.aborted).toBe(true);
+    expect(controller.signal.aborted).toBe(false);
     expect(chrome.tabs.update).toHaveBeenCalledWith(42, {
       url: 'https://example.com/start',
     });
+  });
+
+  it('immediately cancels the navigation waiter when tabs.update rejects', async () => {
+    let navigationSignal: AbortSignal | undefined;
+    mocks.waitForNavigation.mockImplementation(
+      (_tabId: number, _timeout: number, signal: AbortSignal) => {
+        navigationSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true }
+          );
+        });
+      }
+    );
+    chrome.tabs.update = vi.fn().mockRejectedValue(new Error('Update failed'));
+    const navigate = createNavigateTool(42) as unknown as NavigateTool;
+
+    await expect(navigate.execute({ url: 'https://example.com' }, {})).rejects.toThrow(
+      'Update failed'
+    );
+
+    expect(navigationSignal?.aborted).toBe(true);
+    expect(chrome.tabs.get).not.toHaveBeenCalled();
   });
 
   it('settles promptly when tab operations ignore cancellation', async () => {

@@ -14,7 +14,7 @@ import {
 import { getToolRegistry } from './tool-registry';
 import { COMPILED_TOOLS } from './tools/index';
 import { matchesUrl } from './script-parser';
-import { ConfigStorage } from '../storage/config';
+import { ConfigStorage, type LogLevel } from '../storage/config';
 
 const JSONRPC = '2.0';
 
@@ -60,6 +60,17 @@ export class TabManager {
     this.setupPortHandler();
     this.setupNavigationMonitor();
     this.setupTabCleanup();
+  }
+
+  /** Send only the validated logging preference into isolated relay worlds. */
+  setRelayLogLevel(logLevel: LogLevel | undefined): void {
+    for (const port of this.contentPorts.values()) {
+      try {
+        port.postMessage({ type: 'RELAY_LOG_LEVEL', logLevel: logLevel ?? 'warn' });
+      } catch {
+        log.warn('[WebMCP Lifecycle] Failed to update relay log level');
+      }
+    }
   }
 
   /**
@@ -291,7 +302,7 @@ export class TabManager {
     if (isResponse) {
       const promise = this.takePendingPromise(payload.id);
       if (promise) {
-        if ('error' in payload && payload.error) {
+        if ('error' in payload) {
           // Page messages are forgeable; never trust their diagnostic text or data.
           promise.reject(new Error('WebMCP tool execution failed'));
         } else if ('result' in payload) {

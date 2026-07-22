@@ -9,6 +9,10 @@ interface GetConfigMessage {
   type: 'GET_CONFIG';
 }
 
+interface GetLogLevelMessage {
+  type: 'GET_LOG_LEVEL';
+}
+
 interface TestConnectionMessage {
   type: 'TEST_CONNECTION';
   agentId: string;
@@ -124,6 +128,7 @@ export interface GetSiteToolHintsMessage {
 // Union type for all possible extension messages
 export type ExtensionMessage =
   | GetConfigMessage
+  | GetLogLevelMessage
   | TestConnectionMessage
   | TestNewConnectionMessage
   | PingMessage

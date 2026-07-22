@@ -18,10 +18,19 @@ function legacy(overrides: LegacyAgent = {}): LegacyAgent {
 
 describe('migrateAgentToV2', () => {
   it.each([
-    [{ openaiCompatible: true }, 'openai-chat-completions'],
+    [{ openaiCompatible: true }, 'openai-responses'],
     [{ openaiCompatible: false }, 'openai-responses'],
+    [{ provider: 'anthropic', openaiCompatible: true }, 'anthropic-messages'],
     [{ provider: 'anthropic', openaiCompatible: false }, 'anthropic-messages'],
+    [{ provider: 'google', openaiCompatible: true }, 'google-generative-ai'],
     [{ provider: 'google', openaiCompatible: false }, 'google-generative-ai'],
+    [{ endpoint: '', openaiCompatible: true }, 'openai-responses'],
+    [{ provider: 'anthropic', endpoint: '', openaiCompatible: true }, 'anthropic-messages'],
+    [{ provider: 'google', endpoint: '', openaiCompatible: true }, 'google-generative-ai'],
+    [{ endpoint: '   ', openaiCompatible: true }, 'openai-responses'],
+    [{ provider: 'anthropic', endpoint: '   ', openaiCompatible: true }, 'anthropic-messages'],
+    [{ provider: 'google', endpoint: '   ', openaiCompatible: true }, 'google-generative-ai'],
+    [{ endpoint: 'https://proxy.test/v1', openaiCompatible: true }, 'openai-chat-completions'],
     [{ endpoint: 'https://proxy.test/v1' }, 'openai-chat-completions'],
     [
       { provider: 'anthropic', endpoint: 'https://api.anthropic.com/v1' },
@@ -35,11 +44,13 @@ describe('migrateAgentToV2', () => {
     [{ provider: 'google' }, 'google-generative-ai'],
   ] as const)('maps %j to %s', (overrides, expected) => {
     const input = legacy(overrides);
-    expect(migrateAgentToV2(input)).toEqual({
-      ...input,
-      openaiCompatible: undefined,
-      apiProtocol: expected,
-    });
+    const expectedAgent: LegacyAgent = { ...input, apiProtocol: expected };
+    delete expectedAgent.openaiCompatible;
+    if (typeof input.endpoint === 'string' && input.endpoint.trim() === '') {
+      delete expectedAgent.endpoint;
+    }
+
+    expect(migrateAgentToV2(input)).toEqual(expectedAgent);
     expect(migrateAgentToV2(input)).not.toHaveProperty('openaiCompatible');
   });
 

@@ -39,7 +39,6 @@ export interface AgentConfig {
   apiProtocol: ApiProtocol;
   systemPrompt: string;
   temperature: number;
-  maxTokens: number;
   maxSteps?: number; // Tool call steps per turn (1-50, default 10)
   isDefault?: boolean;
   reasoning?: ReasoningConfig;
@@ -139,7 +138,6 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     model: 'gpt-5',
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 4000,
     maxSteps: 10,
     isDefault: true,
     reasoning: {
@@ -157,7 +155,6 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     model: 'claude-opus-4-20250514',
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 4096,
     maxSteps: 10,
     reasoning: {
       enabled: true,
@@ -174,7 +171,6 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     model: 'gemini-2.5-flash',
     systemPrompt: '',
     temperature: 0.8,
-    maxTokens: 2048,
     maxSteps: 10,
     reasoning: {
       enabled: true,
@@ -313,9 +309,6 @@ function validateAgent(value: unknown): asserts value is AgentConfig {
   if (agent.temperature < 0 || agent.temperature > 2) {
     throw new ConfigValidationError('INVALID_AGENT');
   }
-  finiteNumber(agent.maxTokens, 'INVALID_AGENT');
-  if (agent.maxTokens <= 0 || !Number.isInteger(agent.maxTokens))
-    throw new ConfigValidationError('INVALID_AGENT');
   if (agent.maxSteps !== undefined) {
     finiteNumber(agent.maxSteps, 'INVALID_AGENT');
     if (!Number.isInteger(agent.maxSteps) || agent.maxSteps < 1 || agent.maxSteps > 50)
@@ -375,11 +368,22 @@ function freshDefaultConfig(): StorageConfig {
   return globalThis.structuredClone(DEFAULT_CONFIG);
 }
 
+function canonicalAgent(agent: AgentConfig): AgentConfig {
+  const canonical = { ...agent } as AgentConfig & { maxTokens?: unknown };
+  delete canonical.maxTokens;
+  if (canonical.endpoint?.trim() === '') delete canonical.endpoint;
+  return canonical;
+}
+
 function canonicalConfig(config: StorageConfig): StorageConfig {
+  const cloned = globalThis.structuredClone(config);
   return validateStorageConfigV2({
     ...freshDefaultConfig(),
-    ...globalThis.structuredClone(config),
+    ...cloned,
     schemaVersion: CONFIG_SCHEMA_VERSION,
+    // Retired v2 fields remain accepted at storage/import boundaries, then are
+    // removed from runtime state and future exports without forcing a rewrite.
+    agents: cloned.agents.map(canonicalAgent),
   });
 }
 
@@ -438,7 +442,7 @@ export class ConfigStorage {
     return this.serialize(async () => {
       const config = globalThis.structuredClone(await this.load());
       const result = mutator(config);
-      const validated = validateStorageConfigV2(config);
+      const validated = canonicalConfig(config);
       await chrome.storage.local.set({ config: validated });
       return result;
     });

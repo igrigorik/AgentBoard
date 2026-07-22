@@ -5,8 +5,8 @@
  * Waits for full page load (onCompleted) before returning.
  *
  * Design: Factory pattern because the tool needs a tabId that's only known
- * at stream time, not at global registry initialization. The tool is injected
- * into allTools per-stream in client.ts, not registered in ToolRegistryManager.
+ * at stream time. ToolRegistry registers the factory globally and materializes
+ * a tab-bound tool for each stream.
  *
  * Lifecycle sequence:
  * 1. chrome.tabs.update(tabId, { url })
@@ -17,6 +17,7 @@
  * 6. Sidebar auto-continues with fresh tools from new page
  */
 
+import { raceWithAbort } from '../../../abort';
 import log from '../../../logger';
 import { ConfigStorage } from '../../../storage/config';
 import { getTabManager } from '../../lifecycle';
@@ -36,29 +37,6 @@ const PARAM_DESCRIPTIONS = {
 const navigateSchema = z.object({
   url: z.string().describe(PARAM_DESCRIPTIONS.url),
 });
-
-function raceWithAbort<T>(promise: PromiseLike<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return Promise.resolve(promise);
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    Promise.resolve(promise).then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      }
-    );
-  });
-}
 
 /**
  * Create a navigate tool bound to a specific tab.
@@ -91,21 +69,32 @@ export function createNavigateTool(tabId: number) {
       // onCompleted can fire before the next microtask — registering after
       // would miss the event entirely.
       const tabManager = getTabManager();
-      const navigationPromise = tabManager.waitForNavigation(tabId, 30000, abortSignal);
+      const navigationController = new AbortController();
+      const abortNavigation = () => navigationController.abort();
+      if (abortSignal?.aborted) abortNavigation();
+      else abortSignal?.addEventListener('abort', abortNavigation, { once: true });
 
-      // Initiate navigation and observe both operations so cancellation cannot leave
-      // a rejected navigation waiter or a hanging tab update behind.
-      const [, result] = await Promise.all([
-        raceWithAbort(chrome.tabs.update(tabId, { url }), abortSignal),
-        navigationPromise,
-      ]);
+      try {
+        const navigationPromise = tabManager.waitForNavigation(
+          tabId,
+          30000,
+          navigationController.signal
+        );
 
-      // Get page title after load
-      const tab = await raceWithAbort(chrome.tabs.get(tabId), abortSignal);
+        const [, result] = await Promise.all([
+          raceWithAbort(chrome.tabs.update(tabId, { url }), abortSignal),
+          navigationPromise,
+        ]);
 
-      const summary = `Navigated to ${result.url}${tab.title ? ` — "${tab.title}"` : ''}`;
-      log.info(`[navigate] ${summary}`);
-      return summary;
+        const tab = await raceWithAbort(chrome.tabs.get(tabId), abortSignal);
+        const summary = `Navigated to ${result.url}${tab.title ? ` — "${tab.title}"` : ''}`;
+        log.info(`[navigate] ${summary}`);
+        return summary;
+      } finally {
+        abortSignal?.removeEventListener('abort', abortNavigation);
+        // A failed tabs.update must not leave the navigation timer/listeners alive.
+        abortNavigation();
+      }
     },
   });
 }

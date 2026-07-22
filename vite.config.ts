@@ -52,6 +52,10 @@ export default defineConfig({
         assetFileNames: 'assets/[name]-[hash].[ext]',
       },
     },
+    // The service-worker registry intentionally keeps provider and MCP adapters in
+    // one graph; warn on growth beyond its reviewed release baseline instead of
+    // Vite's web-page-oriented 500 kB default.
+    chunkSizeWarningLimit: 650,
     // Chrome extensions have stricter CSP, can't use inline scripts
     // Only minify for release builds (use RELEASE=1 pnpm run build for production)
     minify: process.env.RELEASE ? 'terser' : false,

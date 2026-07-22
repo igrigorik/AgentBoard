@@ -297,6 +297,7 @@ async function main() {
     );
     assert.equal(migrated.agents[0].apiProtocol, 'openai-chat-completions');
     assert.equal(Object.hasOwn(migrated.agents[0], 'openaiCompatible'), false);
+    assert.equal(Object.hasOwn(migrated.agents[0], 'maxTokens'), false);
     console.log('✓ migrated one schema-v1 config write to schema v2');
 
     await reloadOptions();
@@ -333,10 +334,13 @@ async function main() {
       /not the model vendor/i
     );
     assert.equal(
-      await evaluate(`document.querySelector('#agent-connection-api')?.getAttribute('aria-describedby')`),
+      await evaluate(
+        `document.querySelector('#agent-connection-api')?.getAttribute('aria-describedby')`
+      ),
       'agent-connection-api-hint'
     );
     assert.equal(await evaluate(`document.querySelector('#agent-api-key')?.required`), false);
+    assert.equal(await evaluate(`document.querySelector('#agent-max-tokens')`), null);
     assert.equal(
       await evaluate(`document.querySelector('#agent-api-key')?.getAttribute('aria-describedby')`),
       'agent-api-key-hint'

@@ -67,6 +67,10 @@ export function migrateAgentToV2(agent: unknown): Record<string, unknown> {
     throw new Error('Invalid legacy OpenAI compatibility setting');
   }
 
+  const customEndpoint =
+    typeof record.endpoint === 'string' && record.endpoint.trim().length > 0
+      ? record.endpoint
+      : undefined;
   let apiProtocol: ApiProtocol;
 
   if (record.apiProtocol !== undefined) {
@@ -77,17 +81,22 @@ export function migrateAgentToV2(agent: unknown): Record<string, unknown> {
       throw new Error('Agent configuration contains conflicting protocol settings');
     }
     apiProtocol = record.apiProtocol;
-  } else if (record.openaiCompatible === true) {
-    apiProtocol = 'openai-chat-completions';
-  } else if (record.openaiCompatible === false) {
-    apiProtocol = nativeProtocol(record.provider);
-  } else if (record.endpoint) {
-    apiProtocol = inferLegacyEndpointProtocol(record.endpoint, record.provider);
+  } else if (customEndpoint) {
+    // Schema v1 only consulted this flag for custom endpoints. Applying a stale
+    // flag to a direct agent could reroute its provider credential elsewhere.
+    if (record.openaiCompatible === true) {
+      apiProtocol = 'openai-chat-completions';
+    } else if (record.openaiCompatible === false) {
+      apiProtocol = nativeProtocol(record.provider);
+    } else {
+      apiProtocol = inferLegacyEndpointProtocol(customEndpoint, record.provider);
+    }
   } else {
     apiProtocol = nativeProtocol(record.provider);
   }
 
   const migrated: Record<string, unknown> = { ...record, apiProtocol };
   delete migrated.openaiCompatible;
+  if (!customEndpoint) delete migrated.endpoint;
   return migrated;
 }

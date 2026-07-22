@@ -3,7 +3,6 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { JSONValue, LanguageModel } from 'ai';
 import type { AgentConfig } from '../storage/config';
-import type { ApiProtocol } from './protocol';
 
 // AI SDK warnings bypass AgentBoard's logger and may interpolate model or tool values.
 globalThis.AI_SDK_LOG_WARNINGS = false;
@@ -11,7 +10,6 @@ globalThis.AI_SDK_LOG_WARNINGS = false;
 export type ProviderOptions = Record<string, Record<string, JSONValue>>;
 
 export interface ModelRuntime {
-  apiProtocol: ApiProtocol;
   model: LanguageModel;
   providerOptions?: ProviderOptions;
 }
@@ -100,7 +98,6 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
         ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
-        apiProtocol: agent.apiProtocol,
         model: openai.responses(agent.model),
         providerOptions: buildOpenAIResponsesOptions(agent),
       };
@@ -114,7 +111,6 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
         ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
-        apiProtocol: agent.apiProtocol,
         model: openai.chat(agent.model),
         providerOptions: buildOpenAIChatOptions(agent),
       };
@@ -146,7 +142,6 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
 
       const anthropic = createAnthropic(anthropicConfig);
       return {
-        apiProtocol: agent.apiProtocol,
         model: anthropic(agent.model),
         providerOptions: buildAnthropicOptions(agent),
       };
@@ -160,7 +155,6 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
         ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
-        apiProtocol: agent.apiProtocol,
         model: google(agent.model),
         providerOptions: buildGoogleOptions(agent),
       };

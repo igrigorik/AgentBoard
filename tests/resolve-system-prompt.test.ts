@@ -21,7 +21,6 @@ function makeAgent(systemPrompt: string): AgentConfig {
     model: 'gpt-4',
     systemPrompt,
     temperature: 0.7,
-    maxTokens: 2000,
   };
 }
 

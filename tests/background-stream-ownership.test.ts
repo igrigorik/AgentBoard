@@ -3,7 +3,6 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   aiClient: {
     getAvailableAgents: vi.fn(),
-    isAgentAvailable: vi.fn(),
     streamChat: vi.fn(),
     cancelStream: vi.fn(),
   },
@@ -108,7 +107,6 @@ function createPort(name: string): MockPort {
 
 beforeAll(async () => {
   mocks.aiClient.getAvailableAgents.mockResolvedValue([]);
-  mocks.aiClient.isAgentAvailable.mockResolvedValue(true);
   mocks.toolRegistry.registerSystemTools.mockResolvedValue(undefined);
   mocks.toolRegistry.loadRemoteTools.mockReturnValue(remoteToolsReady);
   mocks.tabManager.getAllRegistries.mockReturnValue(new Map());

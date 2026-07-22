@@ -32,7 +32,6 @@ function currentAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     model: 'opaque-model',
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 1000,
     ...overrides,
   };
 }
@@ -84,9 +83,10 @@ describe('backup schema boundary', () => {
     expect(prepared.config).toMatchObject({
       schemaVersion: 2,
       defaultAgentId: 'agent-1',
-      agents: [expect.objectContaining({ apiProtocol: 'openai-chat-completions' })],
+      agents: [expect.objectContaining({ apiProtocol: 'openai-responses' })],
     });
     expect(prepared.config.agents[0]).not.toHaveProperty('openaiCompatible');
+    expect(prepared.config.agents[0]).not.toHaveProperty('maxTokens');
     expect(prepared.commands).toEqual(commands);
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
     expect(chrome.storage.local.clear).not.toHaveBeenCalled();
@@ -121,6 +121,26 @@ describe('backup schema boundary', () => {
       name: 'Agent',
       apiProtocol: 'openai-chat-completions',
     });
+  });
+
+  it('accepts retired maxTokens in a v2 backup and strips it before import', async () => {
+    const prepared = prepareBackupImport(
+      backup('2.0', {
+        schemaVersion: 2,
+        agents: [{ ...currentAgent(), maxTokens: 1000 }],
+      })
+    );
+
+    expect(prepared.config.agents[0]).not.toHaveProperty('maxTokens');
+
+    await applyPreparedBackup(prepared);
+
+    const written = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as {
+      config: StorageConfig;
+    };
+    expect(written.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
+    expect(chrome.storage.local.clear).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -296,12 +316,12 @@ describe('backup schema boundary', () => {
     expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
   });
 
-  it('exports only a current v2 envelope', async () => {
-    const config: StorageConfig = {
+  it('exports only a canonical current v2 envelope', async () => {
+    const config = {
       schemaVersion: 2,
-      agents: [currentAgent()],
+      agents: [{ ...currentAgent(), maxTokens: 1000 }],
       logLevel: 'warn',
-    };
+    } as unknown as StorageConfig;
     vi.mocked(chrome.storage.local.get).mockImplementation((keys, callback) => {
       const requested = keys as unknown;
       const result =
@@ -316,9 +336,14 @@ describe('backup schema boundary', () => {
     const exported = await gatherBackupData();
 
     expect(exported.version).toBe(BACKUP_VERSION);
-    expect(exported.config).toEqual(config);
+    expect(exported.config).toEqual({
+      schemaVersion: 2,
+      agents: [currentAgent()],
+      logLevel: 'warn',
+    });
     expect(exported.commands).toEqual(commands);
     expect(exported.config.agents[0]).not.toHaveProperty('openaiCompatible');
+    expect(exported.config.agents[0]).not.toHaveProperty('maxTokens');
     expect(chrome.storage.local.get).toHaveBeenCalledWith(['config', 'slashCommands']);
   });
 });

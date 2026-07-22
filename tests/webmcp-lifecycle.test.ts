@@ -133,6 +133,28 @@ describe('TabManager', () => {
       expect(mockPort.onDisconnect.addListener).toHaveBeenCalled();
     });
 
+    it('pushes only the validated log level to connected relays', () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+      mockPort.postMessage.mockClear();
+
+      lifecycle.setRelayLogLevel('debug');
+
+      expect(mockPort.postMessage).toHaveBeenCalledWith({
+        type: 'RELAY_LOG_LEVEL',
+        logLevel: 'debug',
+      });
+      expect(JSON.stringify(mockPort.postMessage.mock.calls)).not.toContain('agents');
+      expect(JSON.stringify(mockPort.postMessage.mock.calls)).not.toContain('apiKey');
+    });
+
     it('should ignore non-WebMCP port connections', () => {
       const mockPort = {
         name: 'other-port',
@@ -571,55 +593,55 @@ describe('TabManager', () => {
       expect(result).toEqual({ success: true });
     });
 
-    it('should reject tool call on error response', async () => {
-      const mockPort = {
-        name: 'webmcp-content-script',
-        sender: {
-          tab: { id: 123 },
-        },
-        onMessage: {
-          addListener: vi.fn(),
-        },
-        onDisconnect: {
-          addListener: vi.fn(),
-        },
-        postMessage: vi.fn(),
-      };
-
-      let messageHandler: Function | null = null;
-      mockPort.onMessage.addListener = vi.fn((handler) => {
-        messageHandler = handler;
-      });
-
-      portHandlers.onConnect(mockPort);
-
-      const promise = lifecycle.callTool(123, 'failing-tool', {});
-
-      // Find the tools/call request (not the tools/list request)
-      const toolCallRequest = mockPort.postMessage.mock.calls.find(
-        (call) => call[0]?.payload?.method === 'tools/call'
-      );
-
-      expect(toolCallRequest).toBeDefined();
-      const requestId = toolCallRequest![0].payload.id;
-
-      // Send error response
-      if (messageHandler) {
-        (messageHandler as Function)({
-          type: 'webmcp',
-          payload: {
-            jsonrpc: '2.0',
-            id: requestId,
-            error: {
-              code: -32000,
-              message: 'secret page-controlled failure',
-            },
+    it.each([{ code: -32000, message: 'secret page-controlled failure' }, null, false, 0])(
+      'should reject every response containing an error member',
+      async (responseError) => {
+        const mockPort = {
+          name: 'webmcp-content-script',
+          sender: {
+            tab: { id: 123 },
           },
-        });
-      }
+          onMessage: {
+            addListener: vi.fn(),
+          },
+          onDisconnect: {
+            addListener: vi.fn(),
+          },
+          postMessage: vi.fn(),
+        };
 
-      await expect(promise).rejects.toThrow('WebMCP tool execution failed');
-    });
+        let messageHandler: Function | null = null;
+        mockPort.onMessage.addListener = vi.fn((handler) => {
+          messageHandler = handler;
+        });
+
+        portHandlers.onConnect(mockPort);
+
+        const promise = lifecycle.callTool(123, 'failing-tool', {});
+
+        // Find the tools/call request (not the tools/list request)
+        const toolCallRequest = mockPort.postMessage.mock.calls.find(
+          (call) => call[0]?.payload?.method === 'tools/call'
+        );
+
+        expect(toolCallRequest).toBeDefined();
+        const requestId = toolCallRequest![0].payload.id;
+
+        // Send error response
+        if (messageHandler) {
+          (messageHandler as Function)({
+            type: 'webmcp',
+            payload: {
+              jsonrpc: '2.0',
+              id: requestId,
+              error: responseError,
+            },
+          });
+        }
+
+        await expect(promise).rejects.toThrow('WebMCP tool execution failed');
+      }
+    );
 
     it('should forward an AI cancellation signal to the page', async () => {
       const mockPort = {

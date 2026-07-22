@@ -6,6 +6,11 @@
 (function () {
   'use strict';
 
+  // Duplicate injections in one document must be side-effect free. A shut-down
+  // relay is replaceable after an extension reload or context invalidation.
+  const existingRelay = window.__webmcpRelayBridge;
+  if (existingRelay && !existingRelay.isShutdown) return;
+
   /**
    * Inline logger that respects user's log level configuration
    *
@@ -17,41 +22,27 @@
     const levels = { silent: 0, error: 1, warn: 2, info: 3, debug: 4, trace: 5 };
     let currentLevel = levels.warn; // Default: warn
 
+    const setLevel = (level) => {
+      const nextLevel = levels[level];
+      currentLevel = nextLevel === undefined ? levels.warn : nextLevel;
+    };
     const refreshLevel = () => {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-      chrome.runtime.sendMessage({ type: 'GET_CONFIG' }, (config) => {
+      chrome.runtime.sendMessage({ type: 'GET_LOG_LEVEL' }, (response) => {
         if (chrome.runtime.lastError) return;
-        const nextLevel = levels[config?.logLevel];
-        currentLevel = nextLevel === undefined ? levels.warn : nextLevel;
+        setLevel(response?.logLevel);
       });
     };
 
-    refreshLevel();
-    if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
-      chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local' && changes.config) refreshLevel();
-      });
-    }
-
     // Never forward caller values: relay messages and errors can contain page data.
     return {
+      refresh: refreshLevel,
+      setLevel,
       log: () => currentLevel >= levels.info && console.log('[AgentBoard] Relay event'),
       warn: () => currentLevel >= levels.warn && console.warn('[AgentBoard] Relay warning'),
       error: () => currentLevel >= levels.error && console.error('[AgentBoard] Relay failure'),
     };
   })();
-
-  // Guard against double injection - but allow replacing dead relays
-  if (window.__webmcpRelayBridge) {
-    // Check if the existing relay is shut down (extension was reloaded)
-    if (window.__webmcpRelayBridge.isShutdown) {
-      logger.log('[WebMCP Relay] Replacing shut down relay instance');
-      // Continue to create new instance
-    } else {
-      // Existing relay is still active, don't create duplicate
-      return;
-    }
-  }
 
   const JSONRPC = '2.0';
 
@@ -63,19 +54,28 @@
       this.port = null;
       this.pendingMessages = [];
       this.reconnectAttempt = 0;
+      this.reconnectTimer = null;
       this.maxReconnectDelay = 30000; // 30 seconds max
       this.initialDelay = 100; // Start with 100ms
       this.isShutdown = false; // Track if we've permanently shut down
+      this.onPageMessage = this.onPageMessage.bind(this);
 
-      this.connect();
+      // Install the listener first so synchronous connection failure can dispose it.
       this.setupMessageRelay();
+      this.connect();
     }
 
     /**
      * Permanently shut down this relay instance
      */
     shutdown() {
+      if (this.isShutdown) return;
       this.isShutdown = true;
+      window.removeEventListener('message', this.onPageMessage);
+      if (this.reconnectTimer !== null) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
       if (this.port) {
         try {
           this.port.disconnect();
@@ -96,6 +96,7 @@
       if (this.isShutdown) return;
 
       try {
+        logger.refresh();
         // Connect with a named port for identification
         this.port = chrome.runtime.connect({ name: 'webmcp-content-script' });
 
@@ -104,6 +105,10 @@
 
         // Handle messages from background (to be forwarded to MAIN world)
         this.port.onMessage.addListener((msg) => {
+          if (msg?.type === 'RELAY_LOG_LEVEL') {
+            logger.setLevel(msg.logLevel);
+            return;
+          }
           if (msg?.type === 'webmcp' && msg?.payload) {
             // Forward to MAIN world via postMessage
             window.postMessage(
@@ -160,8 +165,8 @@
      * Reconnect with exponential backoff
      */
     reconnectWithBackoff() {
-      // Don't reconnect if we've been shut down
-      if (this.isShutdown) return;
+      // Don't reconnect if we've been shut down or a retry is already scheduled.
+      if (this.isShutdown || this.reconnectTimer !== null) return;
 
       this.reconnectAttempt++;
 
@@ -173,7 +178,8 @@
 
       logger.log(`[WebMCP Relay] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
 
-      setTimeout(() => {
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
         if (this.isShutdown || this.port) return; // Don't reconnect if shut down or already connected
         this.connect();
       }, delay);
@@ -241,38 +247,38 @@
       }
     }
 
+    onPageMessage(event) {
+      // Only accept messages from same window
+      if (event.source !== window) return;
+
+      // Check for our protocol from page bridge
+      if (!event.data || event.data.source !== 'webmcp-main') return;
+      if (event.data.jsonrpc !== JSONRPC) return;
+
+      // Remove the source field before forwarding
+      const { source: _source, ...payload } = event.data;
+
+      // Wrap in our protocol and send to background
+      const msg = {
+        type: 'webmcp',
+        payload: payload,
+        tabUrl: window.location.href,
+        timestamp: Date.now(),
+      };
+
+      this.sendToBackground(msg);
+
+      logger.log(
+        '[WebMCP Relay] Forwarded to background:',
+        payload.method || `response ${payload.id || '(no id)'}`
+      );
+    }
+
     /**
      * Setup relay between MAIN world and background
      */
     setupMessageRelay() {
-      // Listen to messages from MAIN world
-      window.addEventListener('message', (event) => {
-        // Only accept messages from same window
-        if (event.source !== window) return;
-
-        // Check for our protocol from page bridge
-        if (!event.data || event.data.source !== 'webmcp-main') return;
-        if (event.data.jsonrpc !== JSONRPC) return;
-
-        // Remove the source field before forwarding
-        const { source: _source, ...payload } = event.data;
-
-        // Wrap in our protocol and send to background
-        const msg = {
-          type: 'webmcp',
-          payload: payload,
-          tabUrl: window.location.href,
-          timestamp: Date.now(),
-        };
-
-        this.sendToBackground(msg);
-
-        logger.log(
-          '[WebMCP Relay] Forwarded to background:',
-          payload.method || `response ${payload.id || '(no id)'}`
-        );
-      });
-
+      window.addEventListener('message', this.onPageMessage);
       logger.log('[WebMCP Relay] Message relay initialized');
     }
   }

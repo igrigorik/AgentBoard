@@ -114,7 +114,6 @@ function createAgentCard(agent: AgentConfig): HTMLElement {
   const details: Detail[] = [
     { label: 'Model:', value: agent.model, valueClassName: 'monospace' },
     { label: 'Temperature:', value: agent.temperature.toString() },
-    { label: 'Max Tokens:', value: agent.maxTokens.toString() },
   ];
 
   // Add endpoint info if present
@@ -263,8 +262,6 @@ async function populateForm(agentId: string) {
     agent.systemPrompt || '';
   (document.getElementById('agent-temperature') as HTMLInputElement).value =
     agent.temperature.toString();
-  (document.getElementById('agent-max-tokens') as HTMLInputElement).value =
-    agent.maxTokens.toString();
   (document.getElementById('agent-max-steps') as HTMLInputElement).value = (
     agent.maxSteps ?? 10
   ).toString();
@@ -290,12 +287,6 @@ function setDefaultFormValues() {
   const temperatureEl = document.getElementById('agent-temperature') as HTMLInputElement;
   if (temperatureEl) {
     temperatureEl.value = '0.7';
-  }
-
-  // Set default max tokens
-  const maxTokensEl = document.getElementById('agent-max-tokens') as HTMLInputElement;
-  if (maxTokensEl) {
-    maxTokensEl.value = '4000';
   }
 
   // Set default max steps
@@ -394,10 +385,6 @@ async function saveAgent() {
       systemPrompt: (document.getElementById('agent-system-prompt') as HTMLTextAreaElement).value,
       temperature: parseFloat(
         (document.getElementById('agent-temperature') as HTMLInputElement).value
-      ),
-      maxTokens: parseInt(
-        (document.getElementById('agent-max-tokens') as HTMLInputElement).value,
-        10
       ),
       maxSteps: parseInt(
         (document.getElementById('agent-max-steps') as HTMLInputElement).value,

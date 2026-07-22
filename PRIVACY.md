@@ -21,7 +21,7 @@ AgentBoard also keeps tab-binding identifiers and timestamps in `chrome.storage.
 
 Conversation messages, attachments, reasoning, tool arguments, tool results, provider requests, provider responses, and provider errors are not written to extension storage by AgentBoard. They remain in memory for the active extension session and are lost when that context is destroyed.
 
-Browser console diagnostics are value-free events. AgentBoard discards caller-supplied context before logging so credentials, endpoint and model values, page data, prompts, responses, reasoning, tool arguments, tool results, and arbitrary errors are not emitted by the extension logger.
+AgentBoard's application logger and isolated-world relay diagnostics emit fixed event labels and discard caller-supplied context. Generated MAIN-world page-tool registration wrappers run outside that logger boundary and may include a browser- or page-thrown registration error in DevTools. Browser, provider SDK, website, and user-script code can also emit their own console output. AgentBoard does not transmit these console logs to an AgentBoard-operated service, but DevTools output should not be treated as a secret store.
 
 ## Data sent to configured AI endpoints
 
@@ -44,7 +44,11 @@ Your endpoint operator's terms, retention, abuse-monitoring, caching, and privac
 
 When remote MCP is enabled, AgentBoard connects directly to each configured MCP URL and may send its authorization token, protocol messages, tool names, and tool arguments. MCP responses and server instructions may subsequently be included in requests to the selected AI endpoint.
 
-The built-in URL-fetch tool makes direct requests to URLs selected through tool use. It always omits browser cookies and authentication state; authenticated URL fetching is not supported. Websites still receive ordinary network information such as your IP address and request headers. The page-reading and WebMCP tools can read content from the active page; tool output may be shown in the sidebar and sent to the configured AI endpoint as part of the active request.
+The built-in URL-fetch tool makes direct requests to URLs selected through tool use. It always omits browser cookies and authentication state; authenticated URL fetching is not supported. Websites still receive ordinary network information such as your IP address and request headers.
+
+The default-enabled navigation system tool can navigate the attached tab. This is an ordinary browser navigation in that tab's existing context, so the destination can receive cookies, authentication state, referrer information, and other data the browser normally sends for that session. This differs from the credential-free URL-fetch tool.
+
+The page-reading and WebMCP tools can read content from the active page; tool output may be shown in the sidebar and sent to the configured AI endpoint as part of the active request.
 
 The built-in YouTube transcript tool sends the current video ID and a YouTube API key extracted from the page to YouTube's Innertube endpoint. Because that request runs on YouTube, it can include same-origin YouTube session credentials; the subsequent caption request explicitly includes the browser's YouTube/Google session credentials. YouTube and its caption-serving domains receive those requests under their own privacy and retention policies.
 

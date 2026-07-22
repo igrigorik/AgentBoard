@@ -7,6 +7,7 @@
  * Pre-converted to AI SDK format for direct use in tool registry.
  */
 
+import { raceWithAbort } from '../../../abort';
 import log from '../../../logger';
 import { ConfigStorage } from '../../../storage/config';
 import { convertToMarkdown } from './content-extractor';
@@ -34,29 +35,6 @@ const fetchUrlSchema = z.object({
   url: z.string().describe(PARAM_DESCRIPTIONS.url),
   convertToMarkdown: z.boolean().optional().describe(PARAM_DESCRIPTIONS.convertToMarkdown),
 });
-
-function raceWithAbort<T>(promise: PromiseLike<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return Promise.resolve(promise);
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    Promise.resolve(promise).then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      }
-    );
-  });
-}
 
 /**
  * Execute fetch URL operation

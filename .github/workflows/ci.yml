@@ -43,9 +43,22 @@ jobs:
       - name: Build extension
         run: pnpm run build
 
-      - name: Run headless browser tests
+      - name: Run read-page browser tests
         if: matrix.node-version == '22.x'
         run: pnpm run test:browser:built
+
+      - name: Setup Chrome for Testing
+        if: matrix.node-version == '22.x'
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Run MV3 config migration browser tests
+        if: matrix.node-version == '22.x'
+        run: pnpm run test:browser:config:built
+        env:
+          CHROME_FOR_TESTING_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 
       # Optional: Upload build artifacts for debugging
       - name: Upload build artifacts

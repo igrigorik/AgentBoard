@@ -46,7 +46,6 @@ function createAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     apiProtocol: 'openai-responses',
     systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 1000,
     ...overrides,
   };
 }
@@ -76,7 +75,6 @@ describe('createModelRuntime', () => {
     expect(mocks.openAIProvider.responses).toHaveBeenCalledWith('opaque-model');
     expect(mocks.openAIProvider.chat).not.toHaveBeenCalled();
     expect(runtime).toEqual({
-      apiProtocol: 'openai-responses',
       model: mocks.responsesModel,
       providerOptions: {
         openai: {
@@ -111,7 +109,6 @@ describe('createModelRuntime', () => {
     expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('opaque-model');
     expect(mocks.openAIProvider.responses).not.toHaveBeenCalled();
     expect(runtime).toEqual({
-      apiProtocol: 'openai-chat-completions',
       model: mocks.chatModel,
       providerOptions: { openai: { reasoningEffort: 'low' } },
     });
@@ -135,7 +132,6 @@ describe('createModelRuntime', () => {
     });
     expect(mocks.anthropicProvider).toHaveBeenCalledWith('opaque-model');
     expect(runtime).toEqual({
-      apiProtocol: 'anthropic-messages',
       model: mocks.anthropicModel,
       providerOptions: {
         anthropic: {
@@ -181,7 +177,6 @@ describe('createModelRuntime', () => {
     });
     expect(mocks.googleProvider).toHaveBeenCalledWith('opaque-model');
     expect(runtime).toEqual({
-      apiProtocol: 'google-generative-ai',
       model: mocks.googleModel,
       providerOptions: {
         google: {
