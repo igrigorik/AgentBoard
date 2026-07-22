@@ -170,17 +170,17 @@
 
           <div class="form-group" id="openai-api-mode-group">
             <label for="agent-openai-api-mode">OpenAI API mode <span class="field-label-qualifier">Advanced</span></label>
-            <select id="agent-openai-api-mode">
+            <select id="agent-openai-api-mode" aria-describedby="agent-openai-api-mode-hint">
               <option value="openai-responses">Responses (recommended)</option>
               <option value="openai-chat-completions">Chat Completions (legacy compatibility)</option>
             </select>
-            <span class="field-hint">Use legacy Chat only when the endpoint does not support Responses. AgentBoard never falls back automatically.</span>
+            <span class="field-hint" id="agent-openai-api-mode-hint">Use legacy Chat only when the endpoint does not support Responses. AgentBoard never falls back automatically.</span>
           </div>
 
           <div class="form-group">
             <label for="agent-model">Model *</label>
-            <input type="text" id="agent-model" placeholder="Enter the exact model ID" required>
-            <span class="field-hint">Passed unchanged to the selected Connection API</span>
+            <input type="text" id="agent-model" aria-describedby="agent-model-hint" placeholder="Enter the exact model ID" required>
+            <span class="field-hint" id="agent-model-hint">Passed unchanged to the selected Connection API</span>
           </div>
 
           <!-- Reasoning Configuration -->

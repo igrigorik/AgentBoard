@@ -670,7 +670,7 @@ async function testMCPConfig() {
 
       try {
         const url = new URL(serverConfig.url);
-        if (!url.protocol.startsWith('http')) {
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
           showStatus(`Server "${serverName}": URL must use http or https protocol`, 'error');
           return;
         }
@@ -769,7 +769,7 @@ async function saveMCPConfigWithValidation() {
 
       try {
         const url = new URL(serverConfig.url);
-        if (!url.protocol.startsWith('http')) {
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
           throw new Error('URL must use http or https protocol');
         }
       } catch (urlError) {

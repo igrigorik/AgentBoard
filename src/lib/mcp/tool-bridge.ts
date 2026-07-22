@@ -9,14 +9,7 @@ import { z } from 'zod';
 import { jsonSchemaToZod } from '../schema/jsonschema-to-zod';
 import type { Tool as MCPTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { getRemoteMCPManager } from './manager';
-import { ConfigStorage } from '../storage/config';
 import type { JSONSchema7 } from 'json-schema';
-
-/**
- * Convert JSON Schema to Zod schema
- * This is a simplified converter that handles common cases
- */
-// Use shared converter for consistency
 
 /**
  * Convert an MCP tool to AI SDK tool format
@@ -95,72 +88,4 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
   };
 
   return tool(toolDefinition);
-}
-
-/**
- * Get all available MCP tools converted to AI SDK format
- */
-export async function getMCPToolsForAISDK() {
-  const remoteMCPManager = getRemoteMCPManager();
-  const mcpTools = remoteMCPManager.getAvailableTools();
-  const aiTools: Record<string, ReturnType<typeof convertMCPToAISDKTool>> = {};
-
-  // Get server names for each tool
-  // This is a simplified approach - in production you might want to track this better
-  const serverStatuses = remoteMCPManager.getServerStatuses();
-
-  for (const mcpTool of mcpTools) {
-    // Find which server has this tool
-    let serverName = '';
-    for (const status of serverStatuses) {
-      if (status.tools.some((t) => t.name === mcpTool.name)) {
-        serverName = status.name;
-        break;
-      }
-    }
-
-    if (serverName) {
-      // Use tool name as key to avoid duplicates
-      aiTools[mcpTool.name] = convertMCPToAISDKTool(mcpTool, serverName);
-    }
-  }
-
-  return aiTools;
-}
-
-/**
- * Load MCP configuration and initialize tools
- */
-export async function initializeMCPTools() {
-  try {
-    log.info('[Tool Bridge] Initializing MCP tools...');
-
-    const config = await ConfigStorage.getInstance().get();
-    const servers = config.mcpConfig?.mcpServers;
-    const serverNames = servers ? Object.keys(servers) : [];
-
-    log.info('[Tool Bridge] Retrieved config:', {
-      hasMcpConfig: !!config.mcpConfig,
-      serverCount: serverNames.length,
-    });
-
-    if (config.mcpConfig && serverNames.length > 0) {
-      log.info('[Tool Bridge] Loading MCP servers:', serverNames);
-
-      const remoteMCPManager = getRemoteMCPManager();
-      const statuses = await remoteMCPManager.loadConfig(config.mcpConfig);
-
-      log.info('[Tool Bridge] Server connection statuses:', statuses);
-
-      const tools = await getMCPToolsForAISDK();
-      log.info('[Tool Bridge] Available tools after initialization:', Object.keys(tools));
-
-      return tools;
-    }
-
-    return {};
-  } catch (error) {
-    log.error('[Tool Bridge] Error initializing MCP tools:', error);
-    return {};
-  }
 }

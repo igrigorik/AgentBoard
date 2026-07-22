@@ -36,6 +36,39 @@ describe('modal focus management', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it('prefers a visible enabled form control over an earlier close button', () => {
+    document.body.innerHTML = `
+      <button id="trigger">Open</button>
+      <div id="test-modal" class="modal hidden">
+        <button id="close-control">Close</button>
+        <textarea id="disabled-control" disabled></textarea>
+        <fieldset disabled><input id="fieldset-disabled-control"></fieldset>
+        <div class="hidden"><input id="hidden-control"></div>
+        <input id="first-enabled-form-control">
+      </div>
+    `;
+
+    openModal('test-modal');
+
+    expect(document.activeElement).toBe(document.getElementById('first-enabled-form-control'));
+  });
+
+  it('falls back to an enabled button for a read-only dialog', () => {
+    document.body.innerHTML = `
+      <button id="trigger">Open</button>
+      <div id="test-modal" class="modal hidden">
+        <button id="close-control">Close</button>
+        <textarea id="disabled-control" disabled></textarea>
+        <fieldset disabled><input id="fieldset-disabled-control"></fieldset>
+        <div class="hidden"><input id="hidden-control"></div>
+      </div>
+    `;
+
+    openModal('test-modal');
+
+    expect(document.activeElement).toBe(document.getElementById('close-control'));
+  });
+
   it('closes on Escape and invokes cleanup once', () => {
     renderModal();
     const onClose = vi.fn();

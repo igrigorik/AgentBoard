@@ -194,10 +194,11 @@ OpenAI Responses requests include `store: false`, but that does not guarantee Ze
 
 ```bash
 pnpm install      # Install dependencies
-pnpm run dev      # Start with hot reload
-pnpm run build    # Production build
-pnpm test         # Run tests
-pnpm run check    # Type check + lint + test
+pnpm run dev            # Start with hot reload
+pnpm run build          # Development build with source maps
+pnpm run build:release  # Minified release build without source maps
+pnpm test               # Run tests
+pnpm run check          # Type check + lint + test
 ```
 
 Load `dist/` folder in `chrome://extensions` (Developer Mode). Chromium derives an unpacked extension's identity from its absolute path, so loading `dist/` from a different checkout creates a separate installation with separate `chrome.storage.local` settings. Rebuild and reload the same unpacked path when testing an upgrade, or use an export to move settings between installations.

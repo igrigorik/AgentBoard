@@ -152,6 +152,25 @@ describe('backup schema boundary', () => {
       agents: [{ ...currentAgent(), apiProtocol: 'unknown' }],
     }),
     backup('2.0', { schemaVersion: 2, agents: [] }, { userCommands: [null] }),
+    ...['sse', 'ftp', 'malformed'].map((kind) =>
+      backup('2.0', {
+        schemaVersion: 2,
+        agents: [],
+        mcpConfig: {
+          mcpServers: {
+            invalid: {
+              transport: kind === 'sse' ? 'sse' : 'http',
+              url:
+                kind === 'ftp'
+                  ? 'ftp://mcp.example.test'
+                  : kind === 'malformed'
+                    ? 'not a URL'
+                    : 'https://mcp.example.test',
+            },
+          },
+        },
+      })
+    ),
     backup(
       '2.0',
       { schemaVersion: 2, agents: [] },

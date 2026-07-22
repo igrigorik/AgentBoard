@@ -329,9 +329,9 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           log.debug('[Background] Hot reload completed');
           sendResponse({ success: true });
         })
-        .catch((error) => {
-          log.error('[Background] Hot reload failed:', error);
-          sendResponse({ success: false, error: error.message });
+        .catch(() => {
+          log.error('[Background] Hot reload failed');
+          sendResponse({ success: false, error: 'WebMCP script refresh failed' });
         });
       return true; // Keep channel open for async response
 

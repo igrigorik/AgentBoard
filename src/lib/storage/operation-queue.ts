@@ -15,10 +15,7 @@ async function runWithCrossContextLock<T>(operation: () => Promise<T>): Promise<
 }
 
 export function runStorageOperation<T>(operation: () => Promise<T>): Promise<T> {
-  const result = operations.then(
-    () => runWithCrossContextLock(operation),
-    () => runWithCrossContextLock(operation)
-  );
+  const result = operations.then(() => runWithCrossContextLock(operation));
   operations = result.then(
     () => undefined,
     () => undefined

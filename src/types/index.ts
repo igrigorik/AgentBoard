@@ -204,16 +204,6 @@ export interface ChatMessage {
   };
 }
 
-// Provider types
-export type AIProvider = 'openai' | 'anthropic' | 'google';
-
-export interface ProviderConfig {
-  provider: AIProvider;
-  apiKey: string;
-  model: string;
-  endpoint?: string;
-}
-
 // Tool types (for MCP integration)
 export interface ToolDefinition {
   name: string;

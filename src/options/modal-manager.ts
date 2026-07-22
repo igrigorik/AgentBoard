@@ -26,9 +26,9 @@ interface ModalState {
 function focusableElements(modal: HTMLElement): HTMLElement[] {
   return Array.from(
     modal.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
     )
-  ).filter((element) => !element.closest('.hidden'));
+  ).filter((element) => !element.matches(':disabled') && !element.closest('.hidden'));
 }
 
 // Track currently open modal
@@ -81,8 +81,11 @@ export function openModal(modalId: string, onClose?: ModalCallback): void {
   modal.classList.remove('hidden');
 
   currentModal = { modalId, onClose, keyHandler, previouslyFocused };
-  const firstFormControl = modal.querySelector<HTMLElement>('input, select, textarea');
-  (firstFormControl ?? focusableElements(modal)[0])?.focus();
+  const focusable = focusableElements(modal);
+  const firstEnabledFormControl = focusable.find((element) =>
+    element.matches('input, select, textarea')
+  );
+  (firstEnabledFormControl ?? focusable[0])?.focus();
 }
 
 /**

@@ -19,8 +19,16 @@ const mocks = vi.hoisted(() => ({
     getToolRegistry: vi.fn(),
     callTool: vi.fn(),
     requestToolsAndWait: vi.fn(),
+    reinjectAllScripts: vi.fn(),
   },
   onConnect: undefined as ((port: chrome.runtime.Port) => void) | undefined,
+  onMessage: undefined as
+    | ((
+        request: unknown,
+        sender: chrome.runtime.MessageSender,
+        sendResponse: (response?: unknown) => void
+      ) => boolean | undefined)
+    | undefined,
 }));
 
 let resolveRemoteTools!: () => void;
@@ -118,6 +126,11 @@ beforeAll(async () => {
         mocks.onConnect = listener;
       }),
     },
+    onMessage: {
+      addListener: vi.fn((listener) => {
+        mocks.onMessage = listener;
+      }),
+    },
   });
   Object.assign(chrome.tabs, {
     get: vi.fn(),
@@ -145,6 +158,28 @@ beforeAll(async () => {
 
   await import('../src/background/index');
   expect(mocks.onConnect).toBeTypeOf('function');
+  expect(mocks.onMessage).toBeTypeOf('function');
+});
+
+describe('background response privacy', () => {
+  it('replaces WebMCP refresh failures with a fixed response', async () => {
+    const rawError = 'confidential reinjection failure';
+    mocks.tabManager.reinjectAllScripts.mockRejectedValueOnce(new Error(rawError));
+    const sendResponse = vi.fn();
+
+    const keepChannelOpen = mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+
+    expect(keepChannelOpen).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledTimes(1));
+    expect(sendResponse).toHaveBeenCalledWith({
+      success: false,
+      error: 'WebMCP script refresh failed',
+    });
+  });
 });
 
 describe('background stream ownership', () => {

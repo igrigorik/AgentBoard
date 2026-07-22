@@ -61,7 +61,7 @@ export interface MCPConfig {
 }
 
 export interface MCPServerConfig {
-  transport: 'http' | 'sse';
+  transport: 'http'; // Streamable HTTP is the only supported MCP transport.
   url: string;
   authToken?: string;
 }
@@ -228,6 +228,17 @@ function requiredString(value: unknown, code: ConfigValidationErrorCode): assert
   if (typeof value !== 'string' || value.length === 0) throw new ConfigValidationError(code);
 }
 
+function requiredHttpUrl(value: unknown, code: ConfigValidationErrorCode): void {
+  requiredString(value, code);
+  let protocol: string;
+  try {
+    protocol = new URL(value).protocol;
+  } catch {
+    throw new ConfigValidationError(code);
+  }
+  if (protocol !== 'http:' && protocol !== 'https:') throw new ConfigValidationError(code);
+}
+
 function optionalString(value: unknown, code: ConfigValidationErrorCode): void {
   if (value !== undefined && typeof value !== 'string') throw new ConfigValidationError(code);
 }
@@ -334,9 +345,8 @@ export function validateStorageConfigV2(value: unknown): StorageConfig {
     const servers = record(mcp.mcpServers, 'INVALID_MCP_CONFIG');
     for (const serverValue of Object.values(servers)) {
       const server = record(serverValue, 'INVALID_MCP_CONFIG');
-      if (server.transport !== 'http' && server.transport !== 'sse')
-        throw new ConfigValidationError('INVALID_MCP_CONFIG');
-      requiredString(server.url, 'INVALID_MCP_CONFIG');
+      if (server.transport !== 'http') throw new ConfigValidationError('INVALID_MCP_CONFIG');
+      requiredHttpUrl(server.url, 'INVALID_MCP_CONFIG');
       optionalString(server.authToken, 'INVALID_MCP_CONFIG');
     }
   }

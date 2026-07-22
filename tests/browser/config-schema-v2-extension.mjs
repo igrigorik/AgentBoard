@@ -342,6 +342,16 @@ async function main() {
     assert.equal(await evaluate(`document.querySelector('#agent-api-key')?.required`), false);
     assert.equal(await evaluate(`document.querySelector('#agent-max-tokens')`), null);
     assert.equal(
+      await evaluate(
+        `document.querySelector('#agent-openai-api-mode')?.getAttribute('aria-describedby')`
+      ),
+      'agent-openai-api-mode-hint'
+    );
+    assert.equal(
+      await evaluate(`document.querySelector('#agent-model')?.getAttribute('aria-describedby')`),
+      'agent-model-hint'
+    );
+    assert.equal(
       await evaluate(`document.querySelector('#agent-api-key')?.getAttribute('aria-describedby')`),
       'agent-api-key-hint'
     );

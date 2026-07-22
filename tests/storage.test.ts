@@ -128,11 +128,36 @@ describe('schema-v2 parser', () => {
     current({ agents: [agent(), agent()] }),
     current({ defaultAgentId: 'missing' }),
     current({ mcpConfig: { mcpServers: { a: { transport: 'stdio', url: 'secret' } } } }),
+    current({
+      mcpConfig: { mcpServers: { a: { transport: 'sse', url: 'https://mcp.example.test' } } },
+    }),
+    current({
+      mcpConfig: { mcpServers: { a: { transport: 'http', url: 'ftp://mcp.example.test' } } },
+    }),
+    current({
+      mcpConfig: { mcpServers: { a: { transport: 'http', url: 'httpx://mcp.example.test' } } },
+    }),
+    current({ mcpConfig: { mcpServers: { a: { transport: 'http', url: 'not a URL' } } } }),
     current({ userScripts: [{ id: 'x', code: 4, enabled: true }] }),
     current({ builtinScripts: [{ id: 'x', enabled: 'yes' }] }),
     current({ logLevel: 'verbose' }),
   ])('rejects malformed/future config without exposing values', (value) => {
     expect(() => parseStorageConfig(value)).toThrowError(/^[A-Z_]+$/);
+  });
+
+  it('accepts HTTP and HTTPS MCP endpoints', () => {
+    expect(() =>
+      parseStorageConfig(
+        current({
+          mcpConfig: {
+            mcpServers: {
+              local: { transport: 'http', url: 'http://localhost:3000/mcp' },
+              remote: { transport: 'http', url: 'https://mcp.example.test' },
+            },
+          },
+        })
+      )
+    ).not.toThrow();
   });
 
   it('isolates validated output from the untrusted input object', () => {
