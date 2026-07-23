@@ -3,6 +3,7 @@ import {
   applyPreparedBackup,
   BACKUP_VERSION,
   gatherBackupData,
+  initializeBackupRestore,
   prepareBackupImport,
 } from '../src/options/backup-restore';
 import { ConfigStorage, type AgentConfig, type StorageConfig } from '../src/lib/storage/config';
@@ -73,6 +74,23 @@ describe('backup schema boundary', () => {
       callback?.();
       return Promise.resolve();
     });
+  });
+
+  it('wires recovery controls without reading configuration', async () => {
+    document.body.innerHTML = `
+      <button id="export-settings">Export</button>
+      <button id="import-settings">Import</button>
+      <input id="import-file-input" type="file">
+      <div id="status-message"></div>
+    `;
+    const fileInput = document.getElementById('import-file-input') as HTMLInputElement;
+    const openPicker = vi.spyOn(fileInput, 'click').mockImplementation(() => undefined);
+
+    await initializeBackupRestore();
+    document.getElementById('import-settings')?.click();
+
+    expect(openPicker).toHaveBeenCalledTimes(1);
+    expect(chrome.storage.local.get).not.toHaveBeenCalled();
   });
 
   it('migrates a complete v1 backup in memory', () => {

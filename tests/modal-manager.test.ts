@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { closeModal, openModal } from '../src/options/modal-manager';
+import { closeModal, openModal, setupBackdropHandler } from '../src/options/modal-manager';
+
+function installDialogMethods(): HTMLDialogElement {
+  const dialog = document.getElementById('test-modal');
+  if (!(dialog instanceof HTMLDialogElement)) throw new Error('Test dialog missing');
+  dialog.showModal = vi.fn(() => dialog.setAttribute('open', ''));
+  dialog.close = vi.fn(() => dialog.removeAttribute('open'));
+  return dialog;
+}
 
 afterEach(() => {
   closeModal('test-modal');
@@ -7,46 +15,48 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderModal(): void {
+function renderModal(): HTMLDialogElement {
   document.body.innerHTML = `
     <button id="trigger">Open</button>
-    <div id="test-modal" class="modal hidden">
+    <dialog id="test-modal" class="modal hidden">
       <input id="first-control">
       <button id="last-control">Done</button>
-    </div>
+    </dialog>
   `;
+  return installDialogMethods();
 }
 
-describe('modal focus management', () => {
-  it('focuses the first form control, traps Tab, and restores prior focus', () => {
-    renderModal();
+describe('native modal lifecycle', () => {
+  it('opens natively, focuses the first form control, and restores prior focus', () => {
+    const dialog = renderModal();
     const trigger = document.getElementById('trigger') as HTMLButtonElement;
     const first = document.getElementById('first-control') as HTMLInputElement;
-    const last = document.getElementById('last-control') as HTMLButtonElement;
     trigger.focus();
 
     openModal('test-modal');
-    expect(document.activeElement).toBe(first);
 
-    last.focus();
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' }));
+    expect(dialog.showModal).toHaveBeenCalledTimes(1);
+    expect(dialog.open).toBe(true);
     expect(document.activeElement).toBe(first);
 
     closeModal('test-modal');
+    expect(dialog.close).toHaveBeenCalledTimes(1);
+    expect(dialog.open).toBe(false);
     expect(document.activeElement).toBe(trigger);
   });
 
   it('prefers a visible enabled form control over an earlier close button', () => {
     document.body.innerHTML = `
       <button id="trigger">Open</button>
-      <div id="test-modal" class="modal hidden">
+      <dialog id="test-modal" class="modal hidden">
         <button id="close-control">Close</button>
         <textarea id="disabled-control" disabled></textarea>
         <fieldset disabled><input id="fieldset-disabled-control"></fieldset>
         <div class="hidden"><input id="hidden-control"></div>
         <input id="first-enabled-form-control">
-      </div>
+      </dialog>
     `;
+    installDialogMethods();
 
     openModal('test-modal');
 
@@ -56,27 +66,39 @@ describe('modal focus management', () => {
   it('falls back to an enabled button for a read-only dialog', () => {
     document.body.innerHTML = `
       <button id="trigger">Open</button>
-      <div id="test-modal" class="modal hidden">
+      <dialog id="test-modal" class="modal hidden">
         <button id="close-control">Close</button>
         <textarea id="disabled-control" disabled></textarea>
         <fieldset disabled><input id="fieldset-disabled-control"></fieldset>
         <div class="hidden"><input id="hidden-control"></div>
-      </div>
+      </dialog>
     `;
+    installDialogMethods();
 
     openModal('test-modal');
 
     expect(document.activeElement).toBe(document.getElementById('close-control'));
   });
 
-  it('closes on Escape and invokes cleanup once', () => {
-    renderModal();
+  it('routes native Escape cancellation through cleanup exactly once', () => {
+    const dialog = renderModal();
     const onClose = vi.fn();
     openModal('test-modal', onClose);
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
 
-    expect(document.getElementById('test-modal')?.classList.contains('hidden')).toBe(true);
+    expect(dialog.open).toBe(false);
+    expect(dialog.classList.contains('hidden')).toBe(true);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes when the native backdrop surface is clicked', () => {
+    const dialog = renderModal();
+    setupBackdropHandler('test-modal');
+    openModal('test-modal');
+
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(dialog.open).toBe(false);
   });
 });

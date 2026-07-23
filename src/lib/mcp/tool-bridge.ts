@@ -7,14 +7,19 @@ import log from '../logger';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { jsonSchemaToZod } from '../schema/jsonschema-to-zod';
-import type { Tool as MCPTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { getRemoteMCPManager } from './manager';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { RemoteMCPSession, RemoteMCPToolCapability } from './manager';
 import type { JSONSchema7 } from 'json-schema';
 
 /**
  * Convert an MCP tool to AI SDK tool format
  */
-export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
+export function convertMCPToAISDKTool(
+  session: RemoteMCPSession,
+  capability: RemoteMCPToolCapability
+) {
+  const { tool: mcpTool } = capability;
+
   // Convert the input schema
   let zodSchema;
   try {
@@ -34,22 +39,11 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
       args: z.infer<typeof zodSchema>,
       { abortSignal }: { abortSignal?: AbortSignal } = {}
     ) => {
-      const remoteMCPManager = getRemoteMCPManager();
-
-      // MCP protocol expects an object for arguments, even if empty
-      // Convert undefined/null to empty object
-      const processedArgs =
-        args === undefined || args === null
-          ? {} // Use empty object instead of undefined/null
-          : args;
+      // MCP protocol expects an object for arguments, even if empty.
+      const processedArgs = args === undefined || args === null ? {} : args;
 
       try {
-        const result = await remoteMCPManager.executeTool({
-          toolName: mcpTool.name,
-          serverName,
-          input: processedArgs,
-          signal: abortSignal,
-        });
+        const result = await session.executeTool(capability, processedArgs, abortSignal);
 
         // MCP uses a resolved isError result for semantic tool failures. Treat it
         // like a thrown failure before any server-supplied diagnostic can escape.

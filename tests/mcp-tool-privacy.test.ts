@@ -1,21 +1,31 @@
 import type { Tool as MCPTool } from '@modelcontextprotocol/sdk/types.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({
-  executeTool: vi.fn(),
-}));
-
-vi.mock('../src/lib/mcp/manager', () => ({
-  getRemoteMCPManager: () => ({ executeTool: mocks.executeTool }),
-}));
-
 import { convertMCPToAISDKTool } from '../src/lib/mcp/tool-bridge';
+import type { RemoteMCPSession, RemoteMCPToolCapability } from '../src/lib/mcp/manager';
+
+const executeTool = vi.fn();
 
 const mcpTool = {
   name: 'private_tool',
   description: 'Private tool',
   inputSchema: { type: 'object', properties: {} },
 } as MCPTool;
+
+const capability: RemoteMCPToolCapability = {
+  serverName: 'private-server',
+  tool: mcpTool,
+};
+const session = { executeTool } as unknown as RemoteMCPSession;
+
+function convertedTool() {
+  return convertMCPToAISDKTool(session, capability) as unknown as {
+    execute: (
+      input: Record<string, never>,
+      context?: { abortSignal?: AbortSignal }
+    ) => Promise<unknown>;
+  };
+}
 
 describe('MCP tool privacy boundary', () => {
   beforeEach(() => {
@@ -24,13 +34,11 @@ describe('MCP tool privacy boundary', () => {
 
   it('converts protocol isError results into a fixed tool failure', async () => {
     const secret = 'secret MCP backend diagnostic';
-    mocks.executeTool.mockResolvedValue({
+    executeTool.mockResolvedValue({
       isError: true,
       content: [{ type: 'text', text: secret }],
     });
-    const converted = convertMCPToAISDKTool(mcpTool, 'private-server') as unknown as {
-      execute: (input: Record<string, never>) => Promise<unknown>;
-    };
+    const converted = convertedTool();
 
     let failure: unknown;
     try {
@@ -45,33 +53,24 @@ describe('MCP tool privacy boundary', () => {
   });
 
   it('forwards AI stream cancellation to the remote MCP manager', async () => {
-    mocks.executeTool.mockResolvedValue({
+    executeTool.mockResolvedValue({
       isError: false,
       content: [{ type: 'text', text: 'successful result' }],
     });
-    const converted = convertMCPToAISDKTool(mcpTool, 'private-server') as unknown as {
-      execute: (
-        input: Record<string, never>,
-        context: { abortSignal?: AbortSignal }
-      ) => Promise<unknown>;
-    };
+    const converted = convertedTool();
     const controller = new AbortController();
 
     await converted.execute({}, { abortSignal: controller.signal });
 
-    expect(mocks.executeTool).toHaveBeenCalledWith(
-      expect.objectContaining({ signal: controller.signal })
-    );
+    expect(executeTool).toHaveBeenCalledWith(capability, {}, controller.signal);
   });
 
   it('preserves successful MCP content as tool output', async () => {
-    mocks.executeTool.mockResolvedValue({
+    executeTool.mockResolvedValue({
       isError: false,
       content: [{ type: 'text', text: 'successful result' }],
     });
-    const converted = convertMCPToAISDKTool(mcpTool, 'private-server') as unknown as {
-      execute: (input: Record<string, never>) => Promise<unknown>;
-    };
+    const converted = convertedTool();
 
     await expect(converted.execute({})).resolves.toBe('successful result');
   });

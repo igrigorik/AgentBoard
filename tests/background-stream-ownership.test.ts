@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   toolRegistry: {
     registerSystemTools: vi.fn(),
     loadRemoteTools: vi.fn(),
+    revokeRemoteTools: vi.fn(),
   },
   tabManager: {
     ensureContentScriptReady: vi.fn(),
@@ -162,6 +163,15 @@ beforeAll(async () => {
 });
 
 describe('background response privacy', () => {
+  it('revokes remote MCP authority when changed configuration is invalid', () => {
+    const onChangeCall = mocks.configStorage.onChange.mock.calls[0];
+    const onError = onChangeCall?.[1] as ((error: { code: string }) => void) | undefined;
+
+    onError?.({ code: 'FUTURE_SCHEMA' });
+
+    expect(mocks.toolRegistry.revokeRemoteTools).toHaveBeenCalledTimes(1);
+  });
+
   it('replaces WebMCP refresh failures with a fixed response', async () => {
     const rawError = 'confidential reinjection failure';
     mocks.tabManager.reinjectAllScripts.mockRejectedValueOnce(new Error(rawError));
@@ -300,6 +310,39 @@ describe('background stream ownership', () => {
     resolveFirst();
     resolveSecond();
     await Promise.all([firstRequest, secondRequest]);
+  });
+
+  it('reports remote tool revocation without closing the sidebar port', async () => {
+    let callbacks: Record<string, (...args: any[]) => void> | undefined;
+    let resolveStream!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      resolveStream = resolve;
+    });
+    mocks.aiClient.streamChat.mockImplementationOnce((_agent, _messages, _tab, handlers) => {
+      callbacks = handlers;
+      return pending;
+    });
+
+    const port = createPort('ai-stream-remote-revocation');
+    mocks.onConnect!(port.port);
+    const request = port.send({
+      type: 'STREAM_CHAT',
+      agentId: 'agent',
+      tabId: 1,
+      messages: [],
+    });
+    await vi.waitFor(() => expect(mocks.aiClient.streamChat).toHaveBeenCalledTimes(1));
+
+    callbacks?.onAbort?.('remote-tools-changed');
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'STREAM_ERROR',
+      error: 'Remote tools changed. Send the request again.',
+    });
+    expect(port.backgroundDisconnect).not.toHaveBeenCalled();
+    port.disconnect();
+    resolveStream();
+    await request;
   });
 
   it('ignores an overlapping request on the same one-request port', async () => {

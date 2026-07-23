@@ -810,11 +810,14 @@ chrome.runtime.onConnect.addListener((port) => {
                 finishCurrentStream();
               }
             },
-            onAbort: () => {
+            onAbort: (reason) => {
               if (!isCurrentStream()) return;
               port.postMessage({
                 type: 'STREAM_ERROR',
-                error: 'AI request was replaced by a newer request.',
+                error:
+                  reason === 'remote-tools-changed'
+                    ? 'Remote tools changed. Send the request again.'
+                    : 'AI request was replaced by a newer request.',
               });
               finishCurrentStream();
             },
@@ -861,9 +864,21 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+// Local system tools are sufficient for page hints; remote MCP startup must not
+// block the sidebar from constructing a cancellable request.
+const systemToolsReady = getToolRegistry().registerSystemTools();
+let systemToolRefreshes = systemToolsReady;
+
+// Handlers that send the full catalog wait for configured remote MCP tools too.
+const toolsReady = (async () => {
+  await systemToolsReady;
+  await getToolRegistry().loadRemoteTools();
+  log.debug('[Background] Tool registry initialized');
+})();
+
 // Listen for config changes from Options page
 configStorage.onChange(
-  async (newConfig: StorageConfig) => {
+  (newConfig: StorageConfig) => {
     webmcp.setRelayLogLevel(newConfig.logLevel);
     log.debug(
       '[Background] Config updated - available agents:',
@@ -872,35 +887,22 @@ configStorage.onChange(
 
     const toolRegistry = getToolRegistry();
 
-    // Re-register system tools if builtin script states changed
-    // This handles enable/disable of fetch_url tool
+    // Keep the storage callback non-blocking: the remote reconciler synchronously
+    // revokes stale authority and independently fences superseded candidates.
     if (newConfig.builtinScripts !== undefined) {
-      log.debug('[Background] Re-registering system tools after builtin config change');
-      await toolRegistry.registerSystemTools();
+      systemToolRefreshes = systemToolRefreshes
+        .catch(() => undefined)
+        .then(() => toolRegistry.registerSystemTools())
+        .catch(() => {
+          log.error('[Background] System tool refresh failed');
+        });
     }
-
-    // Reload remote MCP tools after initial startup has finished. System-tool
-    // revocation above remains immediate even if a remote MCP connection is slow.
-    await toolsReady;
-    log.debug('[Background] Reloading MCP tools after config change');
-    await toolRegistry.loadRemoteTools(newConfig);
+    void toolRegistry.loadRemoteTools(newConfig);
   },
   (error) => {
-    log.error('[Background] Ignoring invalid stored configuration:', error.code);
+    getToolRegistry().revokeRemoteTools();
+    log.error('[Background] Invalid configuration revoked remote MCP tools:', error.code);
   }
 );
-
-// Local system tools are sufficient for page hints; remote MCP startup must not
-// block the sidebar from constructing a cancellable request.
-const systemToolsReady = (async () => {
-  await getToolRegistry().registerSystemTools();
-})();
-
-// Handlers that send the full catalog wait for configured remote MCP tools too.
-const toolsReady = (async () => {
-  await systemToolsReady;
-  await getToolRegistry().loadRemoteTools();
-  log.debug('[Background] Tool registry initialized');
-})();
 
 export {};

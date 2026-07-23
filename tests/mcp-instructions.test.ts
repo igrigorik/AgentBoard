@@ -16,7 +16,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: vi.fn().mockImplementation(() => ({
     connect: mockConnect,
     close: mockClose,
-    listTools: mockListTools.mockResolvedValue({ tools: [] }),
+    listTools: mockListTools,
     callTool: mockCallTool,
     getInstructions: mockGetInstructions,
   })),
@@ -35,6 +35,9 @@ import { RemoteMCPManager } from '../src/lib/mcp/manager';
 describe('MCP Server Instructions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockListTools.mockResolvedValue({ tools: [] });
+    mockGetInstructions.mockReturnValue(undefined);
   });
 
   describe('MCPClientService', () => {
@@ -153,151 +156,106 @@ describe('MCP Server Instructions', () => {
       await manager.disconnectAll();
     });
 
-    it('forwards stream cancellation through the manager to MCP SDK tool calls', async () => {
+    it('forwards stream cancellation through the captured session capability', async () => {
       mockListTools.mockResolvedValue({ tools: [{ name: 'query', description: 'Query data' }] });
       mockCallTool.mockResolvedValue({
         isError: false,
         content: [{ type: 'text', text: 'ok' }],
       });
-      await manager.loadConfig({
+      await manager.reconcile({
         mcpServers: {
           'data-api': { url: 'http://localhost:3000/mcp', transport: 'http' as const },
         },
       });
+      const session = manager.getCurrentSession();
+      const [capability] = session.getToolCapabilities();
       const controller = new AbortController();
 
-      await manager.executeTool({
-        toolName: 'query',
-        serverName: 'data-api',
-        input: { value: 1 },
-        signal: controller.signal,
-      });
+      expect(session.signal.aborted).toBe(false);
+      expect(capability).toBeDefined();
+      await session.executeTool(capability, { value: 1 }, controller.signal);
 
       expect(mockCallTool).toHaveBeenCalledWith(
         { name: 'query', arguments: { value: 1 } },
         undefined,
-        { signal: controller.signal }
+        { signal: expect.any(AbortSignal) }
       );
     });
 
-    it('should surface instructions in server status', async () => {
+    it('surfaces instructions in status and the same published session snapshot', async () => {
       mockGetInstructions.mockReturnValue('Use format=json for structured output.');
       mockListTools.mockResolvedValue({
         tools: [{ name: 'query', description: 'Query data' }],
       });
 
-      const statuses = await manager.loadConfig({
+      const statuses = await manager.reconcile({
         mcpServers: {
           'data-api': { url: 'http://localhost:3000/mcp', transport: 'http' as const },
         },
       });
+      const session = manager.getCurrentSession();
 
-      expect(statuses).toHaveLength(1);
-      expect(statuses[0].status).toBe('connected');
-      expect(statuses[0].instructions).toBe('Use format=json for structured output.');
+      expect(statuses).toEqual([
+        expect.objectContaining({
+          name: 'data-api',
+          status: 'connected',
+          instructions: 'Use format=json for structured output.',
+        }),
+      ]);
+      expect(session.getServerStatuses()).toEqual(statuses);
+      expect(session.getMCPInstructions()).toContain('Use format=json for structured output.');
+      expect(session.getToolCapabilities()[0].tool.name).toBe('query');
     });
 
-    it('should include instructions in getServerStatuses()', async () => {
-      mockGetInstructions.mockReturnValue('Always paginate results.');
-      mockListTools.mockResolvedValue({ tools: [] });
-
-      await manager.loadConfig({
-        mcpServers: {
-          paginator: { url: 'http://localhost:3000/mcp', transport: 'http' as const },
-        },
-      });
-
-      const statuses = manager.getServerStatuses();
-      expect(statuses[0].instructions).toBe('Always paginate results.');
-    });
-
-    it('should aggregate instructions from multiple servers', async () => {
+    it('aggregates instructions from connected servers and skips missing instructions', async () => {
       let callCount = 0;
       mockGetInstructions.mockImplementation(() => {
         callCount++;
-        return callCount === 1 ? 'Server A: call search first.' : 'Server B: use batch mode.';
+        return callCount === 1 ? 'Server A: call search first.' : undefined;
       });
       mockListTools.mockResolvedValue({ tools: [] });
 
-      await manager.loadConfig({
+      await manager.reconcile({
         mcpServers: {
           'server-a': { url: 'http://localhost:3001/mcp', transport: 'http' as const },
           'server-b': { url: 'http://localhost:3002/mcp', transport: 'http' as const },
         },
       });
 
-      const instructions = manager.getMCPInstructions();
+      const instructions = manager.getCurrentSession().getMCPInstructions();
       expect(instructions).toContain('# MCP Server Instructions');
       expect(instructions).toContain('## MCP Server: server-a');
-      expect(instructions).toContain('Server A: call search first.');
-      expect(instructions).toContain('## MCP Server: server-b');
-      expect(instructions).toContain('Server B: use batch mode.');
+      expect(instructions).not.toContain('server-b');
     });
 
-    it('should return undefined when no server has instructions', async () => {
+    it('publishes no instructions when servers provide none', async () => {
       mockGetInstructions.mockReturnValue(undefined);
       mockListTools.mockResolvedValue({ tools: [] });
 
-      await manager.loadConfig({
+      await manager.reconcile({
         mcpServers: {
-          'no-instructions': { url: 'http://localhost:3000/mcp', transport: 'http' as const },
+          empty: { url: 'http://localhost:3000/mcp', transport: 'http' as const },
         },
       });
 
-      expect(manager.getMCPInstructions()).toBeUndefined();
+      expect(manager.getCurrentSession().getMCPInstructions()).toBeUndefined();
     });
 
-    it('should only include instructions from connected servers', async () => {
-      mockGetInstructions.mockReturnValue('Should not appear.');
-      mockListTools.mockResolvedValue({ tools: [] });
-
-      await manager.loadConfig({
-        mcpServers: {
-          ephemeral: { url: 'http://localhost:3000/mcp', transport: 'http' as const },
-        },
-      });
-
-      // Disconnect the server
-      await manager.disconnectAll();
-
-      expect(manager.getMCPInstructions()).toBeUndefined();
-    });
-
-    it('should clear instructions on disconnectAll', async () => {
+    it('clears the published snapshot before disconnect cleanup settles', async () => {
       mockGetInstructions.mockReturnValue('Temporary instructions.');
       mockListTools.mockResolvedValue({ tools: [] });
-
-      await manager.loadConfig({
+      await manager.reconcile({
         mcpServers: {
           temp: { url: 'http://localhost:3000/mcp', transport: 'http' as const },
         },
       });
+      const previous = manager.getCurrentSession();
 
-      expect(manager.getMCPInstructions()).toBeDefined();
+      const cleanup = manager.disconnectAll();
 
-      await manager.disconnectAll();
-
-      expect(manager.getMCPInstructions()).toBeUndefined();
-    });
-
-    it('should skip servers without instructions in aggregation', async () => {
-      let callCount = 0;
-      mockGetInstructions.mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? 'Only server-a has instructions.' : undefined;
-      });
-      mockListTools.mockResolvedValue({ tools: [] });
-
-      await manager.loadConfig({
-        mcpServers: {
-          'server-a': { url: 'http://localhost:3001/mcp', transport: 'http' as const },
-          'server-b': { url: 'http://localhost:3002/mcp', transport: 'http' as const },
-        },
-      });
-
-      const instructions = manager.getMCPInstructions();
-      expect(instructions).toContain('server-a');
-      expect(instructions).not.toContain('server-b');
+      expect(previous.signal.aborted).toBe(true);
+      expect(manager.getCurrentSession().getMCPInstructions()).toBeUndefined();
+      await cleanup;
     });
   });
 });

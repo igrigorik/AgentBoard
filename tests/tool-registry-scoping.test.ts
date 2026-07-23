@@ -24,13 +24,17 @@ vi.mock('../src/lib/logger', () => ({
   },
 }));
 
-vi.mock('../src/lib/mcp/manager', () => ({
-  getRemoteMCPManager: vi.fn(() => ({
-    loadConfig: vi.fn(),
-    getAvailableTools: vi.fn(() => []),
-    getServerStatuses: vi.fn(() => []),
-  })),
-}));
+vi.mock('../src/lib/mcp/manager', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/mcp/manager')>();
+  return {
+    ...actual,
+    getRemoteMCPManager: vi.fn(() => ({
+      reconcile: vi.fn(),
+      getCurrentSession: vi.fn(() => actual.EMPTY_REMOTE_MCP_SESSION),
+      revoke: vi.fn(),
+    })),
+  };
+});
 
 vi.mock('../src/lib/storage/config', () => ({
   ConfigStorage: {

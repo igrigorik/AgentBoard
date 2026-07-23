@@ -37,12 +37,7 @@ vi.mock('../src/lib/webmcp/tool-registry', () => ({
   getToolRegistry: vi.fn(),
 }));
 
-vi.mock('../src/lib/mcp/manager', () => ({
-  getRemoteMCPManager: vi.fn(),
-}));
-
 import { AIClient } from '../src/lib/ai/client';
-import { getRemoteMCPManager } from '../src/lib/mcp/manager';
 import { getToolRegistry } from '../src/lib/webmcp/tool-registry';
 
 function textStream(read: () => Promise<ReadableStreamReadResult<string>>) {
@@ -56,6 +51,28 @@ function textStream(read: () => Promise<ReadableStreamReadResult<string>>) {
 
 function successfulTextStream() {
   return textStream(async () => ({ done: false, value: 'OK' }));
+}
+
+function remoteSession(hasContext = false) {
+  return {
+    hasContext,
+    signal: new AbortController().signal,
+  };
+}
+
+function revocableRemoteSession() {
+  const controller = new AbortController();
+  return {
+    controller,
+    session: { hasContext: true, signal: controller.signal },
+  };
+}
+
+function toolRegistry(tools: Record<string, unknown> = {}, session = remoteSession()) {
+  return {
+    captureToolSnapshot: () => ({ tools, remoteSession: session }),
+    onTabToolsChanged: () => () => undefined,
+  };
 }
 
 function storeAgent(agentId: string): void {
@@ -101,12 +118,7 @@ describe('AIClient connection testing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(chrome.storage.local.get).mockResolvedValue({} as never);
-    vi.mocked(getRemoteMCPManager).mockReturnValue({ getMCPInstructions: () => '' } as never);
-    vi.mocked(getToolRegistry).mockReturnValue({
-      getAllTools: () => ({}),
-      getToolsForTab: () => ({}),
-      onTabToolsChanged: () => () => undefined,
-    } as never);
+    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry() as never);
     mocks.streamText.mockReturnValue({ textStream: successfulTextStream() });
   });
 
@@ -453,6 +465,38 @@ describe('AIClient connection testing', () => {
     }
   });
 
+  it('aborts exactly once when the captured remote MCP session is revoked', async () => {
+    storeAgent('remote-session-agent');
+    const remote = revocableRemoteSession();
+    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({}, remote.session) as never);
+    const active = deferredAsyncTextStream();
+    let providerSignal: AbortSignal | undefined;
+    mocks.streamText.mockImplementation((options: { abortSignal?: AbortSignal }) => {
+      providerSignal = options.abortSignal;
+      return { textStream: active.stream, fullStream: undefined };
+    });
+    const onAbort = vi.fn();
+    const onError = vi.fn();
+    const onFinish = vi.fn();
+    const request = AIClient.getInstance().streamChat(
+      'remote-session-agent',
+      [],
+      undefined,
+      { onFinish, onError, onAbort },
+      'remote-session-stream'
+    );
+    await vi.waitFor(() => expect(mocks.streamText).toHaveBeenCalledTimes(1));
+
+    remote.controller.abort();
+    await request;
+
+    expect(providerSignal?.aborted).toBe(true);
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    expect(onAbort).toHaveBeenCalledWith('remote-tools-changed');
+    expect(onError).not.toHaveBeenCalled();
+    expect(onFinish).not.toHaveBeenCalled();
+  });
+
   it('does not cancel a valid active stream when a newer request is invalid', async () => {
     vi.mocked(chrome.storage.local.get).mockResolvedValue({
       config: {
@@ -526,11 +570,7 @@ describe('AIClient connection testing', () => {
         ],
       },
     } as never);
-    vi.mocked(getToolRegistry).mockReturnValue({
-      getAllTools: () => ({ private_tool: {} }),
-      getToolsForTab: () => ({ private_tool: {} }),
-      onTabToolsChanged: () => () => undefined,
-    } as never);
+    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({ private_tool: {} }) as never);
     const secret = 'secret tool backend failure';
     mocks.streamText.mockReturnValue({
       textStream: undefined,
@@ -613,11 +653,7 @@ describe('AIClient connection testing', () => {
 
   it('owns and sanitizes full-stream SDK error parts without finishing', async () => {
     storeAgent('full-stream-error-agent');
-    vi.mocked(getToolRegistry).mockReturnValue({
-      getAllTools: () => ({ private_tool: {} }),
-      getToolsForTab: () => ({ private_tool: {} }),
-      onTabToolsChanged: () => () => undefined,
-    } as never);
+    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({ private_tool: {} }) as never);
     const providerFailure = new DOMException('secret full-stream provider failure', 'AbortError');
     mocks.streamText.mockImplementation(
       (options: { onError?: (event: { error: unknown }) => void }) => {

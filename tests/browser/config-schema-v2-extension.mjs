@@ -280,6 +280,17 @@ async function main() {
             openai: { reasoningEffort: 'medium', reasoningSummary: 'detailed' },
           },
         },
+        {
+          id: 'native-anthropic',
+          name: 'Native Anthropic',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          model: 'native-model',
+          systemPrompt: '',
+          temperature: 0.7,
+          maxSteps: 10,
+          isDefault: false,
+        },
       ],
       defaultAgentId: 'legacy-chat',
       logLevel: 'warn',
@@ -315,6 +326,11 @@ async function main() {
       () => evaluate(`!document.querySelector('#agent-modal')?.classList.contains('hidden')`),
       'agent editor'
     );
+    assert.equal(
+      await evaluate(`document.querySelector('#agent-modal') instanceof HTMLDialogElement`),
+      true
+    );
+    assert.equal(await evaluate(`document.querySelector('#agent-modal')?.open`), true);
     assert.equal(
       await evaluate(`document.querySelector('#agent-connection-api')?.value`),
       'openai'
@@ -361,10 +377,40 @@ async function main() {
     );
     console.log('✓ rendered migrated legacy Chat as an explicit Connection API choice');
 
+    await evaluate(`document.querySelector('#modal-close')?.click()`);
+    await evaluate(`document.querySelector('[data-card-id="native-anthropic"]')?.click()`);
+    await waitFor(
+      () => evaluate(`document.querySelector('#agent-connection-api')?.value === 'anthropic'`),
+      'native Anthropic editor'
+    );
+    assert.equal(
+      await evaluate(`document.querySelector('#agent-openai-api-mode')?.value`),
+      'openai-responses'
+    );
+    await evaluate(`(() => {
+      const api = document.querySelector('#agent-connection-api');
+      api.value = 'openai';
+      api.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    assert.equal(
+      await evaluate(`document.querySelector('#agent-openai-api-mode')?.value`),
+      'openai-responses'
+    );
+    await evaluate(`document.querySelector('#modal-close')?.click()`);
+    await evaluate(`document.querySelector('[data-card-id="legacy-chat"]')?.click()`);
+    await waitFor(
+      () =>
+        evaluate(
+          `document.querySelector('#agent-openai-api-mode')?.value === 'openai-chat-completions'`
+        ),
+      'legacy Chat editor reopened'
+    );
+    console.log('✓ reset hidden protocol state between sequential native dialog edits');
+
     await observeConfig();
     await evaluate(`(() => {
       const description = document.querySelector('#agent-description');
-      description.value = 'Edited after migration';
+      description.value = '';
       description.dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('.modal-test-btn')?.click();
     })()`);
@@ -380,14 +426,18 @@ async function main() {
     await evaluate(`document.querySelector('.modal-save-btn')?.click()`);
     const saved = await waitFor(async () => {
       const config = await getConfig();
-      return config?.agents?.[0]?.description === 'Edited after migration' ? config : false;
-    }, 'saved v2 agent');
+      return config?.agents?.[0] && !Object.hasOwn(config.agents[0], 'description')
+        ? config
+        : false;
+    }, 'saved v2 agent with cleared optional field');
     assert.equal(saved.agents[0].apiProtocol, 'openai-chat-completions');
     assert.equal(saved.agents[0].provider, 'anthropic');
     assert.equal(Object.hasOwn(saved.agents[0], 'openaiCompatible'), false);
     assert.equal(Object.hasOwn(saved.agents[0].reasoning.openai, 'reasoningSummary'), false);
     assert.equal((await configEvents()).length, 1, 'save should issue one config write');
-    console.log('✓ tested and saved legacy Chat through the production options flow');
+    console.log(
+      '✓ tested, cleared, and saved an optional field through the production options flow'
+    );
 
     const configWritesBeforeRestart = (await configEvents()).length;
     const { success: workerClosed } = await cdp.send('Target.closeTarget', {
@@ -506,6 +556,49 @@ async function main() {
       false
     );
 
+    const recoveryBackup = {
+      version: '2.0',
+      extensionVersion: '0.7.3',
+      timestamp: Date.now(),
+      exportedBy: 'AgentBoard',
+      config: saved,
+      commands: { userCommands: [] },
+    };
+    assert.equal(
+      await evaluate(`(() => {
+        const button = document.querySelector('#import-settings');
+        const input = document.querySelector('#import-file-input');
+        if (!(button instanceof HTMLButtonElement) || !(input instanceof HTMLInputElement)) {
+          return false;
+        }
+        globalThis.__recoveryPickerOpened = false;
+        input.click = () => { globalThis.__recoveryPickerOpened = true; };
+        button.click();
+        if (!globalThis.__recoveryPickerOpened) return false;
+
+        const transfer = new DataTransfer();
+        transfer.items.add(new File(
+          [${JSON.stringify(JSON.stringify(recoveryBackup))}],
+          'agentboard-recovery.json',
+          { type: 'application/json' }
+        ));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`),
+      true
+    );
+    await waitFor(async () => (await getConfig()).schemaVersion === 2, 'backup recovery write');
+    await waitFor(
+      () =>
+        evaluate(
+          `document.readyState === 'complete' && !!document.querySelector('#agents-list .card') && !document.querySelector('#status-message')?.textContent.includes('unsupported AgentBoard version')`
+        ),
+      'post-recovery options reload'
+    );
+    assert.equal(wire.requests.length, requestCountBeforeInvalidConfig);
+    console.log('✓ recovered future config through the still-operable backup import');
+
     const malformedSentinel = 'MALFORMED_CONFIG_SECRET_SENTINEL';
     const malformedConfig = {
       ...saved,
@@ -550,7 +643,7 @@ async function main() {
 
 try {
   await main();
-  console.log('\n6 MV3 schema-v2 Chromium scenarios passed');
+  console.log('\n8 MV3 schema-v2 Chromium scenarios passed');
 } finally {
   rmSync(profileDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }

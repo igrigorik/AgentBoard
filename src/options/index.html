@@ -1,83 +1,98 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentBoard: settings</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
 
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AgentBoard: settings</title>
-  <link rel="stylesheet" href="./styles.css">
-</head>
-
-<body>
-  <div class="container">
-    <main>
-      <section class="agents-section">
-        <div class="agents-header">
-          <h2>AI Agents</h2>
-          <button id="create-agent" class="button button-primary">+ New Agent</button>
-        </div>
-
-        <div id="agents-list" class="agents-list">
-          <!-- Agent cards will be populated dynamically -->
-        </div>
-
-        <div id="no-agents" class="no-agents hidden">
-          <div class="no-agents-content">
-            <h3>No agents configured</h3>
-            <p>Create your first AI agent to get started. Each agent can be configured with a different provider, model, and personality.</p>
+  <body>
+    <div class="container">
+      <main>
+        <section class="agents-section">
+          <div class="agents-header">
+            <h2>AI Agents</h2>
+            <button id="create-agent" class="button button-primary">+ New Agent</button>
           </div>
-        </div>
-      </section>
 
-      <!-- Commands Section -->
-      <section class="commands-section">
-        <div class="commands-header">
-          <h2>Commands</h2>
-          <button id="create-command" class="button button-primary">+ New Command</button>
-        </div>
-
-        <div id="commands-list" class="commands-list">
-          <!-- Command cards will be populated dynamically -->
-        </div>
-
-        <div id="no-commands" class="no-commands hidden">
-          <div class="no-commands-content">
-            <h3>No commands configured</h3>
-            <p>Create custom commands that expand into reusable prompt templates. Trigger them with <code>/name</code> in the chat. Use <code>$ARGUMENTS</code> to capture any text after the command.</p>
+          <div id="agents-list" class="agents-list">
+            <!-- Agent cards will be populated dynamically -->
           </div>
-        </div>
-      </section>
 
-      <!-- WebMCP Tools Section -->
-      <section class="webmcp-section">
-        <div class="webmcp-header">
-          <h2>WebMCP Tools</h2>
-          <div class="header-actions">
-            <button id="create-script" class="button button-primary">+ New Script</button>
+          <div id="no-agents" class="no-agents hidden">
+            <div class="no-agents-content">
+              <h3>No agents configured</h3>
+              <p>
+                Create your first AI agent to get started. Each agent can be configured with a
+                different provider, model, and personality.
+              </p>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div id="scripts-list" class="scripts-list">
-          <!-- Script cards will be populated dynamically -->
-        </div>
-
-        <div id="no-scripts" class="no-scripts hidden">
-          <div class="no-scripts-content">
-            <h3>No scripts configured</h3>
-            <p>Create custom WebMCP tools that interact with web pages. Scripts can extract data, manipulate DOM, or provide page-specific functionality to your AI assistant.</p>
+        <!-- Commands Section -->
+        <section class="commands-section">
+          <div class="commands-header">
+            <h2>Commands</h2>
+            <button id="create-command" class="button button-primary">+ New Command</button>
           </div>
-        </div>
-      </section>
 
-      <section class="mcp-section">
-        <div class="mcp-header">
-          <h2>MCP Servers</h2>
-          <button id="test-mcp-config" class="button button-primary">Test Connections</button>
-        </div>
-        
-        <div class="form-group">
-          <span class="field-hint">Enter your MCP server configuration in JSON format. Each server should have transport type (http), URL, and optional auth token.</span>
-          <textarea id="mcp-config" rows="10" placeholder='{
+          <div id="commands-list" class="commands-list">
+            <!-- Command cards will be populated dynamically -->
+          </div>
+
+          <div id="no-commands" class="no-commands hidden">
+            <div class="no-commands-content">
+              <h3>No commands configured</h3>
+              <p>
+                Create custom commands that expand into reusable prompt templates. Trigger them with
+                <code>/name</code> in the chat. Use <code>$ARGUMENTS</code> to capture any text
+                after the command.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- WebMCP Tools Section -->
+        <section class="webmcp-section">
+          <div class="webmcp-header">
+            <h2>WebMCP Tools</h2>
+            <div class="header-actions">
+              <button id="create-script" class="button button-primary">+ New Script</button>
+            </div>
+          </div>
+
+          <div id="scripts-list" class="scripts-list">
+            <!-- Script cards will be populated dynamically -->
+          </div>
+
+          <div id="no-scripts" class="no-scripts hidden">
+            <div class="no-scripts-content">
+              <h3>No scripts configured</h3>
+              <p>
+                Create custom WebMCP tools that interact with web pages. Scripts can extract data,
+                manipulate DOM, or provide page-specific functionality to your AI assistant.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="mcp-section">
+          <div class="mcp-header">
+            <h2>MCP Servers</h2>
+            <button id="test-mcp-config" class="button button-primary">Test Connections</button>
+          </div>
+
+          <div class="form-group">
+            <span class="field-hint"
+              >Enter your MCP server configuration in JSON format. Each server should have transport
+              type (http), URL, and optional auth token.</span
+            >
+            <textarea
+              id="mcp-config"
+              rows="10"
+              placeholder='{
   "mcpServers": {
     "filesystem": {
       "transport": "http",
@@ -85,334 +100,488 @@
       "authToken": "optional-bearer-token"
     }
   }
-}'></textarea>
-        </div>
-
-        <div id="mcp-status" class="mcp-status hidden">
-          <h3>Server Status</h3>
-          <div id="mcp-status-content" class="mcp-status-content">
-            <!-- Status will be populated dynamically -->
+}'
+            ></textarea>
           </div>
-        </div>
-      </section>
 
-      <!-- Settings Section -->
-      <section class="settings-section">
-        <h2>Settings</h2>
-        
-        <div class="form-group">
-          <label for="log-level">Log Level</label>
-          <select id="log-level">
-            <option value="trace">TRACE - All application events</option>
-            <option value="debug">DEBUG - Debug application events</option>
-            <option value="info">INFO - Information events</option>
-            <option value="warn" selected>WARN - Warning events (default)</option>
-            <option value="error">ERROR - Failure events</option>
-            <option value="silent">SILENT - No application or relay logs</option>
-          </select>
-          <span class="field-hint">Controls application and relay diagnostics, which discard caller values. Generated page-tool registration wrappers and browser/provider code log independently and may include their own errors.</span>
-        </div>
-
-        <!-- Backup & Restore -->
-        <div class="settings-subsection">
-          <h3>Backup & Restore</h3>
-          <p class="section-description">
-            Backup files are plaintext and can contain API keys, authentication tokens, endpoints, model IDs, system prompts, executable user scripts, and commands. Store them as secrets.
-          </p>
-          
-          <div class="backup-actions">
-            <button id="export-settings" class="button button-secondary">
-              📥 Export Settings
-            </button>
-            <button id="import-settings" class="button button-secondary">
-              📤 Import Settings
-            </button>
+          <div id="mcp-status" class="mcp-status hidden">
+            <h3>Server Status</h3>
+            <div id="mcp-status-content" class="mcp-status-content">
+              <!-- Status will be populated dynamically -->
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <div id="status-message" class="status-message"></div>
-    </main>
-
-    <!-- Agent Edit Modal -->
-    <div id="agent-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3 id="modal-title">Create Agent</h3>
-          <button id="modal-close" class="modal-close" aria-label="Close agent editor">&times;</button>
-        </div>
-        
-        <form id="agent-form" class="modal-body">
-          <div class="form-group">
-            <label for="agent-name">Agent Name *</label>
-            <input type="text" id="agent-name"
-                   placeholder="e.g., Code Assistant, Creative Writer"
-                   pattern="[A-Za-z0-9\s\-_\(\)]+"
-                   title="Use only letters, numbers, spaces, hyphens, underscores, and parentheses"
-                   required>
-          </div>
+        <!-- Settings Section -->
+        <section class="settings-section">
+          <h2>Settings</h2>
 
           <div class="form-group">
-            <label for="agent-description">Description (optional)</label>
-            <input type="text" id="agent-description" placeholder="Brief description of this agent's purpose">
-          </div>
-
-          <div class="form-group">
-            <label for="agent-connection-api">Connection API *</label>
-            <select id="agent-connection-api" aria-describedby="agent-connection-api-hint" required>
-              <option value="openai">OpenAI-style API</option>
-              <option value="anthropic">Anthropic Messages API</option>
-              <option value="google">Google Generative AI API</option>
+            <label for="log-level">Log Level</label>
+            <select id="log-level">
+              <option value="trace">TRACE - All application events</option>
+              <option value="debug">DEBUG - Debug application events</option>
+              <option value="info">INFO - Information events</option>
+              <option value="warn" selected>WARN - Warning events (default)</option>
+              <option value="error">ERROR - Failure events</option>
+              <option value="silent">SILENT - No application or relay logs</option>
             </select>
-            <span class="field-hint" id="agent-connection-api-hint">Choose the API contract implemented by the endpoint, not the model vendor. A Gemini model behind an OpenAI-compatible proxy uses OpenAI-style.</span>
+            <span class="field-hint"
+              >Controls application and relay diagnostics, which discard caller values. Generated
+              page-tool registration wrappers and browser/provider code log independently and may
+              include their own errors.</span
+            >
           </div>
 
-          <div class="form-group" id="openai-api-mode-group">
-            <label for="agent-openai-api-mode">OpenAI API mode <span class="field-label-qualifier">Advanced</span></label>
-            <select id="agent-openai-api-mode" aria-describedby="agent-openai-api-mode-hint">
-              <option value="openai-responses">Responses (recommended)</option>
-              <option value="openai-chat-completions">Chat Completions (legacy compatibility)</option>
-            </select>
-            <span class="field-hint" id="agent-openai-api-mode-hint">Use legacy Chat only when the endpoint does not support Responses. AgentBoard never falls back automatically.</span>
+          <!-- Backup & Restore -->
+          <div class="settings-subsection">
+            <h3>Backup & Restore</h3>
+            <p class="section-description">
+              Backup files are plaintext and can contain API keys, authentication tokens, endpoints,
+              model IDs, system prompts, executable user scripts, and commands. Store them as
+              secrets.
+            </p>
+
+            <div class="backup-actions">
+              <button id="export-settings" class="button button-secondary">
+                📥 Export Settings
+              </button>
+              <button id="import-settings" class="button button-secondary">
+                📤 Import Settings
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <div id="status-message" class="status-message"></div>
+      </main>
+
+      <!-- Agent Edit Modal -->
+      <dialog id="agent-modal" class="modal hidden" aria-labelledby="modal-title">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3 id="modal-title">Create Agent</h3>
+            <button id="modal-close" class="modal-close" aria-label="Close agent editor">
+              &times;
+            </button>
           </div>
 
-          <div class="form-group">
-            <label for="agent-model">Model *</label>
-            <input type="text" id="agent-model" aria-describedby="agent-model-hint" placeholder="Enter the exact model ID" required>
-            <span class="field-hint" id="agent-model-hint">Passed unchanged to the selected Connection API</span>
-          </div>
-
-          <!-- Reasoning Configuration -->
-          <div class="form-group">
-            <label class="checkbox-label">
-              <input type="checkbox" id="reasoning-enabled">
-              <span class="checkmark"></span>
-              Enable and show thinking process before responding
-            </label>
-          </div>
-
-          <div id="reasoning-settings" class="reasoning-settings hidden">
-            <!-- Provider-specific reasoning controls will be populated dynamically -->
-            <div id="reasoning-openai" class="provider-reasoning hidden">
-              <div class="form-group">
-                <label for="reasoning-effort">Reasoning Effort</label>
-                <select id="reasoning-effort">
-                  <option value="minimal">Minimal - Quick analysis</option>
-                  <option value="low">Low - Basic reasoning</option>
-                  <option value="medium" selected>Medium - Balanced thinking</option>
-                  <option value="high">High - Deep analysis</option>
-                </select>
-                <span class="field-hint">Higher effort uses more tokens but provides deeper insights</span>
-              </div>
-              <div class="form-group" id="reasoning-summary-group">
-                <label for="reasoning-summary">Reasoning Summary</label>
-                <select id="reasoning-summary">
-                  <option value="auto" selected>Auto - Model decides</option>
-                  <option value="detailed">Detailed - Full thinking trace</option>
-                </select>
-              </div>
+          <form id="agent-form" class="modal-body">
+            <div class="form-group">
+              <label for="agent-name">Agent Name *</label>
+              <input
+                type="text"
+                id="agent-name"
+                name="name"
+                placeholder="e.g., Code Assistant, Creative Writer"
+                pattern="[A-Za-z0-9\s\-_\(\)]+"
+                title="Use only letters, numbers, spaces, hyphens, underscores, and parentheses"
+                required
+              />
             </div>
 
-            <div id="reasoning-anthropic" class="provider-reasoning hidden">
-              <div class="form-group">
-                <label for="thinking-budget">Thinking Budget (tokens)</label>
-                <input type="number" id="thinking-budget" min="1000" max="20000" value="12000">
-                <span class="field-hint">Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span>
-              </div>
+            <div class="form-group">
+              <label for="agent-description">Description (optional)</label>
+              <input
+                type="text"
+                id="agent-description"
+                name="description"
+                placeholder="Brief description of this agent's purpose"
+              />
             </div>
 
-            <div id="reasoning-google" class="provider-reasoning hidden">
-              <div class="form-group">
-                <label for="thinking-budget-google">Thinking Budget</label>
-                <input type="number" id="thinking-budget-google" min="-1" max="24576" value="8192">
-                <span class="field-hint">Token budget (0-24576, -1 for dynamic). Flash models only</span>
+            <div class="form-group">
+              <label for="agent-connection-api">Connection API *</label>
+              <select
+                id="agent-connection-api"
+                name="connectionApi"
+                aria-describedby="agent-connection-api-hint"
+                required
+              >
+                <option value="openai">OpenAI-style API</option>
+                <option value="anthropic">Anthropic Messages API</option>
+                <option value="google">Google Generative AI API</option>
+              </select>
+              <span class="field-hint" id="agent-connection-api-hint"
+                >Choose the API contract implemented by the endpoint, not the model vendor. A Gemini
+                model behind an OpenAI-compatible proxy uses OpenAI-style.</span
+              >
+            </div>
+
+            <div class="form-group" id="openai-api-mode-group">
+              <label for="agent-openai-api-mode"
+                >OpenAI API mode <span class="field-label-qualifier">Advanced</span></label
+              >
+              <select
+                id="agent-openai-api-mode"
+                name="openAIProtocol"
+                aria-describedby="agent-openai-api-mode-hint"
+              >
+                <option value="openai-responses">Responses (recommended)</option>
+                <option value="openai-chat-completions">
+                  Chat Completions (legacy compatibility)
+                </option>
+              </select>
+              <span class="field-hint" id="agent-openai-api-mode-hint"
+                >Use legacy Chat only when the endpoint does not support Responses. AgentBoard never
+                falls back automatically.</span
+              >
+            </div>
+
+            <div class="form-group">
+              <label for="agent-model">Model *</label>
+              <input
+                type="text"
+                id="agent-model"
+                name="model"
+                aria-describedby="agent-model-hint"
+                placeholder="Enter the exact model ID"
+                required
+              />
+              <span class="field-hint" id="agent-model-hint"
+                >Passed unchanged to the selected Connection API</span
+              >
+            </div>
+
+            <!-- Reasoning Configuration -->
+            <div class="form-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="reasoning-enabled" name="reasoningEnabled" />
+                <span class="checkmark"></span>
+                Enable and show thinking process before responding
+              </label>
+            </div>
+
+            <div id="reasoning-settings" class="reasoning-settings hidden">
+              <!-- Provider-specific reasoning controls will be populated dynamically -->
+              <div id="reasoning-openai" class="provider-reasoning hidden">
+                <div class="form-group">
+                  <label for="reasoning-effort">Reasoning Effort</label>
+                  <select id="reasoning-effort" name="reasoningEffort">
+                    <option value="minimal">Minimal - Quick analysis</option>
+                    <option value="low">Low - Basic reasoning</option>
+                    <option value="medium" selected>Medium - Balanced thinking</option>
+                    <option value="high">High - Deep analysis</option>
+                  </select>
+                  <span class="field-hint"
+                    >Higher effort uses more tokens but provides deeper insights</span
+                  >
+                </div>
+                <div class="form-group" id="reasoning-summary-group">
+                  <label for="reasoning-summary">Reasoning Summary</label>
+                  <select id="reasoning-summary" name="reasoningSummary">
+                    <option value="auto" selected>Auto - Model decides</option>
+                    <option value="detailed">Detailed - Full thinking trace</option>
+                  </select>
+                </div>
               </div>
+
+              <div id="reasoning-anthropic" class="provider-reasoning hidden">
+                <div class="form-group">
+                  <label for="thinking-budget">Thinking Budget (tokens)</label>
+                  <input
+                    type="number"
+                    id="thinking-budget"
+                    name="anthropicThinkingBudget"
+                    min="1000"
+                    max="20000"
+                    value="12000"
+                  />
+                  <span class="field-hint"
+                    >Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span
+                  >
+                </div>
+              </div>
+
+              <div id="reasoning-google" class="provider-reasoning hidden">
+                <div class="form-group">
+                  <label for="thinking-budget-google">Thinking Budget</label>
+                  <input
+                    type="number"
+                    id="thinking-budget-google"
+                    name="googleThinkingBudget"
+                    min="-1"
+                    max="24576"
+                    value="8192"
+                  />
+                  <span class="field-hint"
+                    >Token budget (0-24576, -1 for dynamic). Flash models only</span
+                  >
+                </div>
+                <div class="form-group">
+                  <label class="checkbox-label">
+                    <input
+                      type="checkbox"
+                      id="include-thoughts"
+                      name="googleIncludeThoughts"
+                      checked
+                    />
+                    <span class="checkmark"></span>
+                    Include Thought Summaries
+                  </label>
+                </div>
+              </div>
+
               <div class="form-group">
                 <label class="checkbox-label">
-                  <input type="checkbox" id="include-thoughts" checked>
+                  <input
+                    type="checkbox"
+                    id="reasoning-auto-expand"
+                    name="reasoningAutoExpand"
+                    checked
+                  />
                   <span class="checkmark"></span>
-                  Include Thought Summaries
+                  Auto-expand reasoning when streaming
                 </label>
               </div>
             </div>
 
             <div class="form-group">
+              <label for="agent-endpoint">Custom provider endpoint / proxy (optional)</label>
+              <input
+                type="url"
+                id="agent-endpoint"
+                name="endpoint"
+                aria-describedby="agent-endpoint-hint"
+              />
+              <span class="field-hint" id="agent-endpoint-hint"
+                >Must implement the selected Connection API, including its authentication and
+                streaming format.</span
+              >
+            </div>
+
+            <div class="form-group">
+              <label for="agent-api-key">API Key <span id="agent-api-key-required">*</span></label>
+              <input
+                type="password"
+                id="agent-api-key"
+                name="apiKey"
+                aria-describedby="agent-api-key-hint"
+                placeholder="Your API key"
+              />
+              <span class="api-key-hint" id="agent-api-key-hint" aria-live="polite"></span>
+            </div>
+
+            <div class="form-group">
+              <label for="agent-system-prompt">Custom Instructions</label>
+              <span class="field-hint">Appended to the built-in system prompt.</span>
+              <textarea
+                id="agent-system-prompt"
+                name="systemPrompt"
+                rows="4"
+                placeholder="Add custom instructions here... (leave empty to use defaults)"
+              ></textarea>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="agent-temperature">Temperature</label>
+                <input
+                  type="number"
+                  id="agent-temperature"
+                  name="temperature"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  value="0.7"
+                  required
+                />
+                <span class="field-hint">0 = focused, 2 = creative</span>
+              </div>
+
+              <div class="form-group">
+                <label for="agent-max-steps">Max Steps</label>
+                <input
+                  type="number"
+                  id="agent-max-steps"
+                  name="maxSteps"
+                  min="1"
+                  max="50"
+                  value="10"
+                  required
+                />
+                <span class="field-hint">Tool calls per turn (1-50)</span>
+              </div>
+            </div>
+
+            <div class="form-group">
               <label class="checkbox-label">
-                <input type="checkbox" id="reasoning-auto-expand" checked>
+                <input type="checkbox" id="agent-is-default" name="isDefault" />
                 <span class="checkmark"></span>
-                Auto-expand reasoning when streaming
+                Set as default agent
               </label>
             </div>
+          </form>
+
+          <div
+            id="agent-modal-status"
+            class="modal-status hidden"
+            role="status"
+            aria-live="polite"
+          ></div>
+
+          <div class="modal-footer">
+            <!-- Footer buttons will be dynamically generated -->
+          </div>
+        </div>
+      </dialog>
+
+      <!-- WebMCP Script Editor Modal -->
+      <dialog id="script-modal" class="modal hidden" aria-labelledby="script-modal-title">
+        <div class="modal-content modal-large">
+          <div class="modal-header">
+            <h3 id="script-modal-title">Create WebMCP Script</h3>
+            <button id="script-modal-close" class="modal-close" aria-label="Close script editor">
+              &times;
+            </button>
           </div>
 
-          <div class="form-group">
-            <label for="agent-endpoint">Custom provider endpoint / proxy (optional)</label>
-            <input type="url" id="agent-endpoint" aria-describedby="agent-endpoint-hint">
-            <span class="field-hint" id="agent-endpoint-hint">Must implement the selected Connection API, including its authentication and streaming format.</span>
+          <form id="script-form" class="modal-body script-editor-body">
+            <!-- Built-in Tool Banner (hidden by default) -->
+            <div id="builtin-banner" class="builtin-banner hidden">
+              <strong>Built-in Tool:</strong> This is a precompiled system tool. The code is
+              read-only and cannot be modified.
+            </div>
+
+            <div class="editor-layout">
+              <!-- Code Editor Section -->
+              <div class="editor-section">
+                <div class="editor-toolbar">
+                  <label>Script Code</label>
+                  <div class="editor-actions">
+                    <button type="button" id="insert-template" class="button button-small">
+                      Insert Template
+                    </button>
+                    <button type="button" id="format-code" class="button button-small">
+                      Format
+                    </button>
+                  </div>
+                </div>
+                <div id="code-editor-container" class="code-editor-container">
+                  <!-- CodeMirror will be inserted here -->
+                  <textarea
+                    id="script-code"
+                    class="script-code-fallback"
+                    rows="20"
+                    placeholder="// Your WebMCP tool script here..."
+                  ></textarea>
+                </div>
+              </div>
+
+              <!-- Preview & Validation Section -->
+              <div class="preview-section">
+                <div class="preview-tabs">
+                  <button type="button" class="tab-button active" data-tab="metadata">
+                    Metadata
+                  </button>
+                  <button type="button" class="tab-button" data-tab="validation">Validation</button>
+                </div>
+
+                <div class="tab-content" id="metadata-tab">
+                  <h4>Parsed Metadata</h4>
+                  <div id="metadata-preview" class="metadata-preview">
+                    <div class="metadata-empty">Write a script to see metadata</div>
+                  </div>
+                </div>
+
+                <div class="tab-content hidden" id="validation-tab">
+                  <h4>Validation Results</h4>
+                  <div id="validation-results" class="validation-results">
+                    <div class="validation-empty">No validation issues</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </form>
+
+          <div
+            id="script-modal-status"
+            class="modal-status hidden"
+            role="status"
+            aria-live="polite"
+          ></div>
+
+          <div class="modal-footer">
+            <button id="validate-script" class="button button-secondary">Validate</button>
+            <!-- Other footer buttons will be dynamically generated -->
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Command Edit Modal -->
+      <dialog id="command-modal" class="modal hidden" aria-labelledby="command-modal-title">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3 id="command-modal-title">Create Command</h3>
+            <button id="command-modal-close" class="modal-close" aria-label="Close command editor">
+              &times;
+            </button>
           </div>
 
-          <div class="form-group">
-            <label for="agent-api-key">API Key <span id="agent-api-key-required">*</span></label>
-            <input type="password" id="agent-api-key" aria-describedby="agent-api-key-hint" placeholder="Your API key">
-            <span class="api-key-hint" id="agent-api-key-hint" aria-live="polite"></span>
-          </div>
-
-          <div class="form-group">
-            <label for="agent-system-prompt">Custom Instructions</label>
-            <span class="field-hint">Appended to the built-in system prompt.</span>
-            <textarea id="agent-system-prompt" rows="4" placeholder="Add custom instructions here... (leave empty to use defaults)"></textarea>
-          </div>
-
-          <div class="form-row">
+          <form id="command-form" class="modal-body">
             <div class="form-group">
-              <label for="agent-temperature">Temperature</label>
-              <input type="number" id="agent-temperature" min="0" max="2" step="0.1" value="0.7">
-              <span class="field-hint">0 = focused, 2 = creative</span>
+              <label for="command-name">Command Name *</label>
+              <input
+                type="text"
+                id="command-name"
+                placeholder="e.g., pr-reviewer, sql-expert"
+                pattern="[A-Za-z0-9\-_]+"
+                title="Use only letters, numbers, hyphens, and underscores (no slashes or spaces)"
+                required
+                maxlength="50"
+              />
+              <span class="field-hint"
+                >Letters, numbers, hyphens, and underscores only. No slashes or spaces. (1-50
+                characters)</span
+              >
             </div>
 
             <div class="form-group">
-              <label for="agent-max-steps">Max Steps</label>
-              <input type="number" id="agent-max-steps" min="1" max="50" value="10">
-              <span class="field-hint">Tool calls per turn (1-50)</span>
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label class="checkbox-label">
-              <input type="checkbox" id="agent-is-default">
-              <span class="checkmark"></span>
-              Set as default agent
-            </label>
-          </div>
-        </form>
-
-        <div id="agent-modal-status" class="modal-status hidden" role="status" aria-live="polite"></div>
-
-        <div class="modal-footer">
-          <!-- Footer buttons will be dynamically generated -->
-        </div>
-      </div>
-    </div>
-
-    <!-- WebMCP Script Editor Modal -->
-    <div id="script-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="script-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-large">
-        <div class="modal-header">
-          <h3 id="script-modal-title">Create WebMCP Script</h3>
-          <button id="script-modal-close" class="modal-close" aria-label="Close script editor">&times;</button>
-        </div>
-        
-        <form id="script-form" class="modal-body script-editor-body">
-          <!-- Built-in Tool Banner (hidden by default) -->
-          <div id="builtin-banner" class="builtin-banner hidden">
-            <strong>Built-in Tool:</strong> This is a precompiled system tool. The code is read-only and cannot be modified.
-          </div>
-          
-          <div class="editor-layout">
-            <!-- Code Editor Section -->
-            <div class="editor-section">
-              <div class="editor-toolbar">
-                <label>Script Code</label>
-                <div class="editor-actions">
-                  <button type="button" id="insert-template" class="button button-small">Insert Template</button>
-                  <button type="button" id="format-code" class="button button-small">Format</button>
-                </div>
-              </div>
-              <div id="code-editor-container" class="code-editor-container">
-                <!-- CodeMirror will be inserted here -->
-                <textarea id="script-code" class="script-code-fallback" rows="20" placeholder="// Your WebMCP tool script here..."></textarea>
-              </div>
+              <label for="command-instructions">Instructions Template *</label>
+              <textarea
+                id="command-instructions"
+                rows="6"
+                maxlength="5000"
+                placeholder="You are an expert software developer. Review this code focusing on: $ARGUMENTS"
+                required
+              ></textarea>
+              <span class="field-hint"
+                >Use $ARGUMENTS where you want the command arguments to be inserted</span
+              >
             </div>
 
-            <!-- Preview & Validation Section -->
-            <div class="preview-section">
-              <div class="preview-tabs">
-                <button type="button" class="tab-button active" data-tab="metadata">Metadata</button>
-                <button type="button" class="tab-button" data-tab="validation">Validation</button>
-              </div>
-              
-              <div class="tab-content" id="metadata-tab">
-                <h4>Parsed Metadata</h4>
-                <div id="metadata-preview" class="metadata-preview">
-                  <div class="metadata-empty">Write a script to see metadata</div>
+            <div class="form-group">
+              <h4>Example Usage</h4>
+              <div class="example-usage">
+                <div class="example-input">
+                  <strong>Input:</strong>
+                  <code id="example-input">/command your arguments here</code>
                 </div>
-              </div>
-              
-              <div class="tab-content hidden" id="validation-tab">
-                <h4>Validation Results</h4>
-                <div id="validation-results" class="validation-results">
-                  <div class="validation-empty">No validation issues</div>
+                <div class="example-output">
+                  <strong>Expands to:</strong>
+                  <span id="example-output">Your template with arguments replaced</span>
                 </div>
               </div>
             </div>
+          </form>
+
+          <div
+            id="command-modal-status"
+            class="modal-status hidden"
+            role="status"
+            aria-live="polite"
+          ></div>
+
+          <div class="modal-footer">
+            <!-- Footer buttons will be dynamically generated -->
           </div>
-
-        </form>
-
-        <div id="script-modal-status" class="modal-status hidden" role="status" aria-live="polite"></div>
-
-        <div class="modal-footer">
-          <button id="validate-script" class="button button-secondary">Validate</button>
-          <!-- Other footer buttons will be dynamically generated -->
         </div>
-      </div>
+      </dialog>
+
+      <!-- Hidden file input for settings import -->
+      <input type="file" id="import-file-input" class="hidden" accept=".json" />
     </div>
 
-    <!-- Command Edit Modal -->
-    <div id="command-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="command-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3 id="command-modal-title">Create Command</h3>
-          <button id="command-modal-close" class="modal-close" aria-label="Close command editor">&times;</button>
-        </div>
-        
-        <form id="command-form" class="modal-body">
-          <div class="form-group">
-            <label for="command-name">Command Name *</label>
-            <input type="text" id="command-name"
-                   placeholder="e.g., pr-reviewer, sql-expert"
-                   pattern="[A-Za-z0-9\-_]+"
-                   title="Use only letters, numbers, hyphens, and underscores (no slashes or spaces)"
-                   required
-                   maxlength="50">
-            <span class="field-hint">Letters, numbers, hyphens, and underscores only. No slashes or spaces. (1-50 characters)</span>
-          </div>
-
-          <div class="form-group">
-            <label for="command-instructions">Instructions Template *</label>
-            <textarea id="command-instructions" rows="6" maxlength="5000" placeholder="You are an expert software developer. Review this code focusing on: $ARGUMENTS" required></textarea>
-            <span class="field-hint">Use $ARGUMENTS where you want the command arguments to be inserted</span>
-          </div>
-
-          <div class="form-group">
-            <h4>Example Usage</h4>
-            <div class="example-usage">
-              <div class="example-input">
-                <strong>Input:</strong> <code id="example-input">/command your arguments here</code>
-              </div>
-              <div class="example-output">
-                <strong>Expands to:</strong> <span id="example-output">Your template with arguments replaced</span>
-              </div>
-            </div>
-          </div>
-        </form>
-
-        <div id="command-modal-status" class="modal-status hidden" role="status" aria-live="polite"></div>
-
-        <div class="modal-footer">
-          <!-- Footer buttons will be dynamically generated -->
-        </div>
-      </div>
-    </div>
-
-    <!-- Hidden file input for settings import -->
-    <input type="file" id="import-file-input" class="hidden" accept=".json">
-  </div>
-
-  <script type="module" src="./index.ts"></script>
-</body>
-
+    <script type="module" src="./index.ts"></script>
+  </body>
 </html>

@@ -16,7 +16,6 @@ import {
   resolveSystemPrompt,
 } from '../storage/config';
 import { getToolRegistry } from '../webmcp/tool-registry';
-import { getRemoteMCPManager } from '../mcp/manager';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
 
@@ -103,6 +102,8 @@ export interface StreamFinishMetadata {
   stepsExhausted: boolean;
 }
 
+export type StreamAbortReason = 'replaced' | 'remote-tools-changed';
+
 export interface StreamCallbacks {
   // Text block callbacks - each text-start/end creates a separate message
   onTextBlockStart?: (blockId: string) => void;
@@ -111,7 +112,7 @@ export interface StreamCallbacks {
 
   onFinish: (fullText: string, metadata?: StreamFinishMetadata) => void;
   onError: (error: Error) => void;
-  onAbort?: () => void;
+  onAbort?: (reason: StreamAbortReason) => void;
 
   // Tool callbacks
   onToolCall?: (toolCall: ToolCall) => void;
@@ -134,13 +135,17 @@ export class AIClient {
   private activeStream?: {
     id: string;
     controller: AbortController;
-    notifyAbort: () => void;
+    notifyAbort: (reason?: StreamAbortReason) => void;
   };
   private streamRequestSequence = 0;
   private latestAcceptedStreamSequence = 0;
   private pendingStreams = new Map<
     string,
-    { controller: AbortController; notifyAbort: () => void; sequence: number }
+    {
+      controller: AbortController;
+      notifyAbort: (reason?: StreamAbortReason) => void;
+      sequence: number;
+    }
   >();
 
   static getInstance(): AIClient {
@@ -175,12 +180,13 @@ export class AIClient {
   ): Promise<void> {
     const requestSequence = ++this.streamRequestSequence;
     let abortController: AbortController | undefined;
+    let removeRemoteRevocationListener: (() => void) | undefined;
     let abortNotified = false;
-    const notifyAbort = () => {
+    const notifyAbort = (reason: StreamAbortReason = 'replaced') => {
       if (abortNotified) return;
       abortNotified = true;
       try {
-        callbacks.onAbort?.();
+        callbacks.onAbort?.(reason);
       } catch {
         // Cancellation ownership must not depend on a stale caller callback succeeding.
       }
@@ -225,10 +231,13 @@ export class AIClient {
       this.activeStream = { id: streamId, controller: abortController, notifyAbort };
 
       const runtime = createModelRuntime(agent);
+      const toolRegistry = getToolRegistry();
+      const toolSnapshot = toolRegistry.captureToolSnapshot(tabId);
 
-      // Build system prompt: base + user custom + MCP server instructions (if any)
-      const mcpInstructions = getRemoteMCPManager().getMCPInstructions();
-      const systemParts = [resolveSystemPrompt(agent), mcpInstructions].filter(Boolean);
+      // Build the prompt and tool catalog from one synchronous remote-session snapshot.
+      const systemParts = [resolveSystemPrompt(agent), toolSnapshot.mcpInstructions].filter(
+        Boolean
+      );
       const systemPrompt = systemParts.join('\n\n');
 
       const messagesWithSystem: CoreMessage[] = systemPrompt
@@ -250,13 +259,17 @@ export class AIClient {
       }
 
       try {
-        // Get tools from unified registry (already loaded by background)
-        const toolRegistry = getToolRegistry();
-
-        // Get tools scoped to the specific tab if tabId is provided.
-        // This ensures each sidebar only sees tools from its associated tab.
-        // Tab-bound system tools (e.g., navigate) are injected by the registry.
-        const allTools = tabId ? toolRegistry.getToolsForTab(tabId) : toolRegistry.getAllTools();
+        const { tools: allTools, remoteSession } = toolSnapshot;
+        if (remoteSession.hasContext) {
+          const onRemoteRevoked = () => {
+            abortController?.abort();
+            notifyAbort('remote-tools-changed');
+          };
+          remoteSession.signal.addEventListener('abort', onRemoteRevoked, { once: true });
+          removeRemoteRevocationListener = () =>
+            remoteSession.signal.removeEventListener('abort', onRemoteRevoked);
+          if (remoteSession.signal.aborted) onRemoteRevoked();
+        }
 
         const hasTools = Object.keys(allTools).length > 0;
         let streamFailed = false;
@@ -520,6 +533,7 @@ export class AIClient {
       }
       callbacks.onError(publicAIRequestError(error));
     } finally {
+      removeRemoteRevocationListener?.();
       if (this.pendingStreams.get(streamId) === pendingStream) {
         this.pendingStreams.delete(streamId);
       }

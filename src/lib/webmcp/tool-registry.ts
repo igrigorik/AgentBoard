@@ -11,7 +11,12 @@
  */
 
 import log from '../logger';
-import { getRemoteMCPManager } from '../mcp/manager';
+import {
+  EMPTY_REMOTE_MCP_SESSION,
+  getRemoteMCPManager,
+  type RemoteMCPManager,
+  type RemoteMCPSession,
+} from '../mcp/manager';
 import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
 import { ConfigStorage, type StorageConfig } from '../storage/config';
@@ -33,12 +38,22 @@ export interface ToolWithMetadata {
   publicName?: string;
 }
 
+/** One synchronous stream snapshot keeps remote tools and instructions coherent. */
+export interface ToolSnapshot {
+  tools: Record<string, AISDKTool>;
+  remoteSession: RemoteMCPSession;
+  mcpInstructions?: string;
+}
+
 /**
  * Manages unified tool registry across all sources
  */
 export class ToolRegistryManager {
   private tools = new Map<string, ToolWithMetadata>();
   private listeners = new Set<(tools: Record<string, AISDKTool>) => void>();
+  private remoteSession = EMPTY_REMOTE_MCP_SESSION;
+
+  constructor(private readonly remoteMCPManager: RemoteMCPManager = getRemoteMCPManager()) {}
 
   /**
    * Tab-bound system tool factories: (tabId) => AISDKTool.
@@ -243,6 +258,17 @@ export class ToolRegistryManager {
     return tools;
   }
 
+  /** Capture tools and MCP instructions from the same published remote session. */
+  captureToolSnapshot(tabId?: number): ToolSnapshot {
+    const remoteSession = this.remoteSession;
+    const mcpInstructions = remoteSession.getMCPInstructions();
+    return {
+      tools: tabId ? this.getToolsForTab(tabId) : this.getAllTools(),
+      remoteSession,
+      ...(mcpInstructions && { mcpInstructions }),
+    };
+  }
+
   /** Whether a global system or configured remote capability owns this public name. */
   isProtectedToolName(name: string): boolean {
     const global = this.tools.get(name);
@@ -346,6 +372,7 @@ export class ToolRegistryManager {
    */
   reset(): void {
     this.tools.clear();
+    this.remoteSession = EMPTY_REMOTE_MCP_SESSION;
     this.notifyListeners();
   }
 
@@ -364,65 +391,56 @@ export class ToolRegistryManager {
   }
 
   /**
-   * Load remote MCP server tools
+   * Reconcile remote MCP authority. A real MCP change clears the published
+   * catalog synchronously; a private candidate is installed only after it is ready.
    */
   async loadRemoteTools(configSnapshot?: StorageConfig): Promise<void> {
     try {
-      // First, remove any existing remote tools
-      const remoteTools: string[] = [];
-      for (const [name, meta] of this.tools.entries()) {
-        if (meta.source === 'remote') {
-          remoteTools.push(name);
-        }
-      }
-      for (const name of remoteTools) {
-        this.tools.delete(name);
-      }
-
-      // Get current config and ensure MCP manager is connected
       const config = configSnapshot ?? (await ConfigStorage.getInstance().get());
+      const completion = this.remoteMCPManager.reconcile(config.mcpConfig);
 
-      if (!config?.mcpConfig?.mcpServers || Object.keys(config.mcpConfig.mcpServers).length === 0) {
-        log.warn('[ToolRegistry] No MCP servers configured');
-        return;
-      }
+      // reconcile() synchronously detaches stale authority before its first await.
+      this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
+      await completion;
+      this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
+    } catch {
+      this.revokeRemoteTools();
+      log.error('[ToolRegistry] Remote MCP reconciliation failed');
+    }
+  }
 
-      // Load the configuration into Remote MCP manager (connects to servers)
-      const remoteMCPManager = getRemoteMCPManager();
-      await remoteMCPManager.loadConfig(config.mcpConfig);
+  /** Immediately remove all remote capabilities and close transports in the background. */
+  revokeRemoteTools(): void {
+    this.remoteMCPManager.revoke();
+    this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
+  }
 
-      // Now get the available tools
-      const mcpTools = remoteMCPManager.getAvailableTools();
+  private replaceRemoteSession(session: RemoteMCPSession): void {
+    if (this.remoteSession === session) return;
 
-      // Convert and add each tool
-      for (const mcpTool of mcpTools) {
-        // Get the server name for this tool
-        const serverStatuses = remoteMCPManager.getServerStatuses();
-        let serverName = 'unknown';
+    for (const [name, meta] of this.tools) {
+      if (meta.source === 'remote') this.tools.delete(name);
+    }
 
-        // Find which server has this tool
-        for (const status of serverStatuses) {
-          if (status.tools.some((t) => t.name === mcpTool.name)) {
-            serverName = status.name;
-            break;
-          }
-        }
-
-        const aiTool = convertMCPToAISDKTool(mcpTool, serverName);
-        // Prefix with server name so both AI and UI have origin context
-        // Execution uses original mcpTool.name via closure, not this key
-        this.addTool(`${serverName}_${mcpTool.name}`, {
-          tool: aiTool,
+    for (const capability of session.getToolCapabilities()) {
+      const { serverName, tool: mcpTool } = capability;
+      this.addTool(
+        `${serverName}_${mcpTool.name}`,
+        {
+          tool: convertMCPToAISDKTool(session, capability),
           source: 'remote',
           origin: serverName,
           description: mcpTool.description,
-        });
-      }
-
-      log.warn(`[ToolRegistry] Loaded ${mcpTools.length} remote MCP tools`);
-    } catch (error) {
-      log.error('[ToolRegistry] Error loading remote MCP tools:', error);
+        },
+        { silent: true }
+      );
     }
+
+    this.remoteSession = session;
+    this.notifyListeners();
+    // Streams that captured the replaced session observe its AbortSignal directly.
+    // Publishing the first remote session must not interrupt streams that captured none.
+    log.info('[ToolRegistry] Remote MCP snapshot replaced');
   }
 
   /**
