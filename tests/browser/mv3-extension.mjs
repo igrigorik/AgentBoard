@@ -11,9 +11,12 @@ const extensionPath = path.join(repositoryRoot, 'dist');
 const profileDirectory = mkdtempSync(path.join(tmpdir(), 'agentboard-mv3-chrome-'));
 const timeoutMs = 20_000;
 const webMCPFixturePath = '/webmcp-execution';
+const webMCPNavigationDestinationPath = '/webmcp-navigation-destination';
 const webMCPToolName = 'agentboard_browser_e2e';
+const webMCPNavigationToolName = 'agentboard_browser_navigation_e2e';
 const webMCPInput = 'bridge-proof';
 const webMCPResult = `main-world-closure:${webMCPInput}`;
+const webMCPNavigationResult = 'navigation-scheduled';
 
 function webMCPFixtureHtml() {
   return `<!doctype html>
@@ -28,6 +31,7 @@ function webMCPFixtureHtml() {
       const state = {
         registration: 'pending',
         executionCount: 0,
+        navigationExecutionCount: 0,
         lastInput: null,
       };
       globalThis.__agentboardWebMCPProof = state;
@@ -38,21 +42,38 @@ function webMCPFixtureHtml() {
       }
 
       try {
-        Promise.resolve(document.modelContext.registerTool({
-          name: ${JSON.stringify(webMCPToolName)},
-          description: 'Synthetic tool registered by the browser-test page',
-          inputSchema: {
-            type: 'object',
-            properties: { value: { type: 'string' } },
-            required: ['value'],
-            additionalProperties: false,
-          },
-          execute(input) {
-            state.executionCount += 1;
-            state.lastInput = input;
-            return closureMarker + ':' + input.value;
-          },
-        })).then(
+        const registrations = [
+          document.modelContext.registerTool({
+            name: ${JSON.stringify(webMCPToolName)},
+            description: 'Synthetic tool registered by the browser-test page',
+            inputSchema: {
+              type: 'object',
+              properties: { value: { type: 'string' } },
+              required: ['value'],
+              additionalProperties: false,
+            },
+            execute(input) {
+              state.executionCount += 1;
+              state.lastInput = input;
+              return closureMarker + ':' + input.value;
+            },
+          }),
+          document.modelContext.registerTool({
+            name: ${JSON.stringify(webMCPNavigationToolName)},
+            description: 'Synthetic tool that returns while scheduling a full navigation',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+            execute() {
+              state.navigationExecutionCount += 1;
+              setTimeout(() => location.assign(${JSON.stringify(webMCPNavigationDestinationPath)}), 0);
+              return ${JSON.stringify(webMCPNavigationResult)};
+            },
+          }),
+        ];
+        Promise.all(registrations).then(
           () => { state.registration = 'ready'; },
           () => { state.registration = 'failed'; }
         );
@@ -63,6 +84,18 @@ function webMCPFixtureHtml() {
   </script>
 </head>
 <body>WebMCP execution proof</body>
+</html>`;
+}
+
+function webMCPNavigationDestinationHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:,">
+  <title>AgentBoard WebMCP navigation destination</title>
+</head>
+<body>WebMCP navigation completed</body>
 </html>`;
 }
 
@@ -145,12 +178,24 @@ async function waitFor(check, label, deadline = timeoutMs) {
 async function startWireServer() {
   const requests = [];
   const server = http.createServer((request, response) => {
-    if (request.method === 'GET' && request.url === webMCPFixturePath) {
+    const requestUrl = new URL(request.url || '/', 'http://localhost');
+    if (request.method === 'GET' && requestUrl.pathname === webMCPFixturePath) {
       response.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
       });
       response.end(webMCPFixtureHtml());
+      return;
+    }
+    if (
+      request.method === 'GET' &&
+      requestUrl.pathname === webMCPNavigationDestinationPath
+    ) {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      response.end(webMCPNavigationDestinationHtml());
       return;
     }
 
@@ -193,6 +238,7 @@ async function startWireServer() {
   return {
     endpoint: `http://localhost:${address.port}/v1`,
     webMCPFixtureUrl: `http://localhost:${address.port}${webMCPFixturePath}`,
+    webMCPNavigationDestinationUrl: `http://localhost:${address.port}${webMCPNavigationDestinationPath}`,
     requests,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
@@ -570,15 +616,21 @@ async function main() {
           ),
         'WebMCP fixture tab ID'
       );
-      const pageTool = await waitFor(
+      const pageTools = await waitFor(
         () =>
           evaluate(
-            `chrome.runtime.sendMessage({ type: 'WEBMCP_GET_TOOLS', tabId: ${fixtureTabId} }).then((response) => response?.success ? response.data.find(({ name }) => name === ${JSON.stringify(webMCPToolName)}) || false : false)`
+            `chrome.runtime.sendMessage({ type: 'WEBMCP_GET_TOOLS', tabId: ${fixtureTabId} }).then((response) => response?.success && [${JSON.stringify(webMCPToolName)}, ${JSON.stringify(webMCPNavigationToolName)}].every((name) => response.data.some((tool) => tool.name === name)) ? response.data : false)`
           ),
         'page tool discovery through the built extension'
       );
+      const pageTool = pageTools.find(({ name }) => name === webMCPToolName);
+      const navigationTool = pageTools.find(({ name }) => name === webMCPNavigationToolName);
       assert.equal(pageTool.description, 'Synthetic tool registered by the browser-test page');
       assert.equal(pageTool.inputSchema?.properties?.value?.type, 'string');
+      assert.equal(
+        navigationTool.description,
+        'Synthetic tool that returns while scheduling a full navigation'
+      );
 
       const callResponse = await evaluate(
         `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: ${JSON.stringify(webMCPToolName)}, args: { value: ${JSON.stringify(webMCPInput)} } })`
@@ -598,12 +650,41 @@ async function main() {
         {
           registration: 'ready',
           executionCount: 1,
+          navigationExecutionCount: 0,
           lastInput: { value: webMCPInput },
           bridgeVersion: 3,
           modelContextTag: '[object ModelContext]',
         }
       );
       console.log('✓ executed a MAIN-world page tool through the built MV3 relay and bridge');
+
+      const navigationResponse = await evaluate(
+        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: ${JSON.stringify(webMCPNavigationToolName)}, args: {} })`
+      );
+      assert.deepEqual(navigationResponse, {
+        success: true,
+        result: webMCPNavigationResult,
+      });
+      await waitFor(
+        () =>
+          evaluateFixture(
+            `location.href === ${JSON.stringify(wire.webMCPNavigationDestinationUrl)} && document.readyState === 'complete' && globalThis.__webmcpPageBridge?.version === 3`
+          ),
+        'WebMCP navigation destination'
+      );
+      await waitFor(
+        () =>
+          evaluate(
+            `chrome.runtime.sendMessage({ type: 'WEBMCP_GET_TOOLS', tabId: ${fixtureTabId} }).then((response) => response?.success && !response.data.some(({ name }) => [${JSON.stringify(webMCPToolName)}, ${JSON.stringify(webMCPNavigationToolName)}].includes(name)) ? response.data : false)`
+          ),
+        'replacement document catalog'
+      );
+      assert.equal(
+        wire.requests.length,
+        providerRequestsBeforeWebMCP,
+        'navigation-triggering WebMCP execution must not contact the provider endpoint'
+      );
+      console.log('✓ settled a WebMCP result before its full-navigation teardown');
     } finally {
       await cdp.send('Target.closeTarget', { targetId: fixtureTargetId });
     }
@@ -792,7 +873,7 @@ async function main() {
 
 try {
   await main();
-  console.log('\n9 built-MV3 Chromium scenarios passed');
+  console.log('\n10 built-MV3 Chromium scenarios passed');
 } finally {
   rmSync(profileDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }

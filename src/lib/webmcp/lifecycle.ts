@@ -4,7 +4,7 @@
  */
 
 import log from '../logger';
-import type { WebMCPMessage, ToolsListChangedParams } from '../../types/index';
+import type { JsonRpcResponse, WebMCPMessage, ToolsListChangedParams } from '../../types/index';
 import {
   injectUserScripts,
   isProtectedExtensionGalleryError,
@@ -17,6 +17,15 @@ import { matchesUrl } from './script-parser';
 import { ConfigStorage, type LogLevel } from '../storage/config';
 
 const JSONRPC = '2.0';
+
+function isJsonRpcResponse(payload: unknown): payload is JsonRpcResponse {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'id' in payload &&
+    ('result' in payload || 'error' in payload)
+  );
+}
 
 export interface PendingPromise {
   resolve: (value: unknown) => void;
@@ -153,9 +162,15 @@ export class TabManager {
       // owned port may mutate this tab's registry or settle its tool calls.
       port.onMessage.addListener((msg) => {
         if (this.contentPorts.get(tabId) !== port) return;
-        if (this.navigatingTabs.has(tabId)) return;
         const ownedDocumentId = this.currentDocumentIds.get(tabId);
         if (documentId && ownedDocumentId && documentId !== ownedDocumentId) return;
+
+        const payload = msg?.type === 'webmcp' ? msg.payload : undefined;
+        const isResponse = isJsonRpcResponse(payload);
+        // Navigation revokes the retiring catalog immediately, but a response for work already
+        // issued to that document remains authoritative until its relay disconnects or a new
+        // document takes ownership. Notifications stay blocked so stale tools cannot reappear.
+        if (this.navigatingTabs.has(tabId) && !isResponse) return;
         this.handleContentMessage(tabId, msg);
       });
 
@@ -293,13 +308,17 @@ export class TabManager {
     if (!payload) return;
 
     // Type guard for responses (have id and either result or error)
-    const isResponse = 'id' in payload && ('result' in payload || 'error' in payload);
+    const isResponse = isJsonRpcResponse(payload);
 
     // Type guard for notifications (have method but no id)
     const isNotification = 'method' in payload && !('id' in payload);
 
     // Handle responses (with id)
     if (isResponse) {
+      const pending = this.pendingPromises.get(payload.id);
+      // Request IDs correlate responses globally, but tab ownership must be structural rather than
+      // relying on UUID secrecy from another page that may share the same origin.
+      if (!pending || pending.tabId !== tabId) return;
       const promise = this.takePendingPromise(payload.id);
       if (promise) {
         if ('error' in payload) {
@@ -365,11 +384,10 @@ export class TabManager {
    * Set up navigation monitoring for script injection
    */
   private setupNavigationMonitor(): void {
-    // Navigation starts - cancel in-flight operations
+    // Navigation starts - revoke the retiring catalog while issued calls finish or lose ownership.
     chrome.webNavigation.onBeforeNavigate.addListener((details) => {
       if (details.frameId !== 0) return; // Main frame only
 
-      this.cancelPendingCallsForTab(details.tabId);
       // Invalidate the old document immediately; queued messages can otherwise repopulate the
       // tab registry before its replacement relay connects. While navigation is pending, the
       // current document ID identifies and rejects reconnects from that retiring document.
