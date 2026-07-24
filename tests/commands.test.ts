@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { CommandRegistry } from '../src/lib/commands/registry';
 import { CommandProcessor } from '../src/lib/commands/processor';
+import { validateCommandStorage } from '../src/lib/commands/storage';
 import type { SlashCommand } from '../src/types';
 
 function installCommandStorageMock(initialValue?: unknown): void {
@@ -27,6 +28,48 @@ function installCommandStorageMock(initialValue?: unknown): void {
     return Promise.resolve(result);
   });
 }
+
+describe('command storage boundary', () => {
+  it('rejects sparse command arrays', () => {
+    expect(() => validateCommandStorage({ userCommands: new Array(1) })).toThrow(
+      'INVALID_COMMAND_STORAGE'
+    );
+  });
+
+  it.each(['', '   ', '\t\n'])('rejects an empty command instruction %j', (instructions) => {
+    expect(() =>
+      validateCommandStorage({
+        userCommands: [{ name: 'review', instructions, isBuiltin: false, createdAt: 1 }],
+      })
+    ).toThrow('INVALID_COMMAND_STORAGE');
+  });
+
+  it('returns exact canonical command fields', () => {
+    expect(
+      validateCommandStorage({
+        ignoredStorageField: 'drop me',
+        userCommands: [
+          {
+            name: 'review',
+            instructions: 'Review $ARGUMENTS',
+            isBuiltin: false,
+            createdAt: 1,
+            arbitraryImportedField: 'drop me',
+          },
+        ],
+      })
+    ).toEqual({
+      userCommands: [
+        {
+          name: 'review',
+          instructions: 'Review $ARGUMENTS',
+          isBuiltin: false,
+          createdAt: 1,
+        },
+      ],
+    });
+  });
+});
 
 describe('CommandRegistry', () => {
   let registry: CommandRegistry;

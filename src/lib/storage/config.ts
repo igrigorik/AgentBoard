@@ -224,8 +224,20 @@ function record(value: unknown, code: ConfigValidationErrorCode): Record<string,
   return value as Record<string, unknown>;
 }
 
+function denseArray(value: unknown, code: ConfigValidationErrorCode): unknown[] {
+  if (!Array.isArray(value)) throw new ConfigValidationError(code);
+  for (let index = 0; index < value.length; index++) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw new ConfigValidationError(code);
+    }
+  }
+  return value;
+}
+
 function requiredString(value: unknown, code: ConfigValidationErrorCode): asserts value is string {
-  if (typeof value !== 'string' || value.length === 0) throw new ConfigValidationError(code);
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ConfigValidationError(code);
+  }
 }
 
 function requiredHttpUrl(value: unknown, code: ConfigValidationErrorCode): void {
@@ -239,7 +251,10 @@ function requiredHttpUrl(value: unknown, code: ConfigValidationErrorCode): void 
   if (protocol !== 'http:' && protocol !== 'https:') throw new ConfigValidationError(code);
 }
 
-function optionalString(value: unknown, code: ConfigValidationErrorCode): void {
+function optionalString(
+  value: unknown,
+  code: ConfigValidationErrorCode
+): asserts value is string | undefined {
   if (value !== undefined && typeof value !== 'string') throw new ConfigValidationError(code);
 }
 
@@ -332,9 +347,9 @@ export function validateStorageConfigV2(value: unknown): StorageConfig {
   const config = record(value, 'INVALID_CONFIG');
   if (config.schemaVersion !== CONFIG_SCHEMA_VERSION)
     throw new ConfigValidationError('UNSUPPORTED_SCHEMA_VERSION');
-  if (!Array.isArray(config.agents)) throw new ConfigValidationError('INVALID_CONFIG');
-  config.agents.forEach(validateAgent);
-  const ids = config.agents.map((agent) => agent.id);
+  const agents = denseArray(config.agents, 'INVALID_CONFIG');
+  agents.forEach(validateAgent);
+  const ids = (agents as AgentConfig[]).map((agent) => agent.id);
   if (new Set(ids).size !== ids.length) throw new ConfigValidationError('INVALID_REFERENCE');
   optionalString(config.defaultAgentId, 'INVALID_REFERENCE');
   if (config.defaultAgentId !== undefined && !ids.includes(config.defaultAgentId))
@@ -355,9 +370,9 @@ export function validateStorageConfigV2(value: unknown): StorageConfig {
     ['userScripts', 'INVALID_SCRIPT'],
     ['builtinScripts', 'INVALID_SCRIPT'],
   ] as const) {
-    const scripts = config[field];
-    if (scripts === undefined) continue;
-    if (!Array.isArray(scripts)) throw new ConfigValidationError(code);
+    const scriptValues = config[field];
+    if (scriptValues === undefined) continue;
+    const scripts = denseArray(scriptValues, code);
     const scriptIds = new Set<string>();
     for (const scriptValue of scripts) {
       const script = record(scriptValue, code);
@@ -406,10 +421,10 @@ export function parseStorageConfig(value: unknown): { config: StorageConfig; mig
   if (source.schemaVersion === CONFIG_SCHEMA_VERSION) {
     return { config: canonicalConfig(validateStorageConfigV2(source)), migrated: false };
   }
-  if (!Array.isArray(source.agents)) throw new ConfigValidationError('INVALID_CONFIG');
+  const sourceAgents = denseArray(source.agents, 'INVALID_CONFIG');
   let agents: Record<string, unknown>[];
   try {
-    agents = source.agents.map(migrateAgentToV2);
+    agents = sourceAgents.map(migrateAgentToV2);
   } catch {
     throw new ConfigValidationError('INVALID_AGENT');
   }

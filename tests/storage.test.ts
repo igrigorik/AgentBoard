@@ -27,6 +27,10 @@ function current(overrides: Record<string, unknown> = {}): unknown {
   return { schemaVersion: 2, agents: [agent()], defaultAgentId: 'agent-1', ...overrides };
 }
 
+function sparseArray<T>(): T[] {
+  return new Array<T>(1);
+}
+
 function useStorage(initial: Stored, readDelay = 0): Stored {
   const state = initial;
   vi.mocked(chrome.storage.local.get).mockImplementation(async () => {
@@ -117,6 +121,39 @@ describe('schema-v2 parser', () => {
     expect(() =>
       parseStorageConfig(current({ agents: [{ ...agent(), openaiCompatible: false }] }))
     ).toThrowError(ConfigValidationError);
+  });
+
+  it.each(['id', 'name', 'model'] as const)('rejects whitespace-only agent %s', (field) => {
+    expect(() =>
+      parseStorageConfig(current({ agents: [{ ...agent(), [field]: ' \t\n ' }] }))
+    ).toThrowError(ConfigValidationError);
+  });
+
+  it('rejects whitespace-only script identifiers and MCP URLs', () => {
+    const invalidValues = [
+      current({ userScripts: [{ id: '  ', code: '', enabled: true }] }),
+      current({ builtinScripts: [{ id: '\t', enabled: true }] }),
+      current({
+        mcpConfig: { mcpServers: { invalid: { transport: 'http', url: ' \n ' } } },
+      }),
+    ];
+
+    for (const value of invalidValues) {
+      expect(() => parseStorageConfig(value)).toThrowError(ConfigValidationError);
+    }
+  });
+
+  it('rejects sparse arrays at current, legacy, and script storage boundaries', () => {
+    const invalidValues = [
+      current({ agents: sparseArray<AgentConfig>() }),
+      { agents: sparseArray<AgentConfig>() },
+      current({ userScripts: sparseArray() }),
+      current({ builtinScripts: sparseArray() }),
+    ];
+
+    for (const value of invalidValues) {
+      expect(() => parseStorageConfig(value)).toThrowError(ConfigValidationError);
+    }
   });
 
   it.each([

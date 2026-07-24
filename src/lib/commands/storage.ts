@@ -28,6 +28,11 @@ export function validateCommandStorage(value: unknown): CommandStorage {
 
   const storage = value as Record<string, unknown>;
   if (!Array.isArray(storage.userCommands)) throw new CommandStorageValidationError();
+  for (let index = 0; index < storage.userCommands.length; index++) {
+    if (!Object.prototype.hasOwnProperty.call(storage.userCommands, index)) {
+      throw new CommandStorageValidationError();
+    }
+  }
 
   const names = new Set<string>();
   const commands = storage.userCommands.map((value): SlashCommand => {
@@ -40,22 +45,32 @@ export function validateCommandStorage(value: unknown): CommandStorage {
       typeof command.name !== 'string' ||
       !isValidCommandName(command.name) ||
       typeof command.instructions !== 'string' ||
+      command.instructions.trim().length === 0 ||
       command.isBuiltin !== false ||
       typeof command.createdAt !== 'number' ||
       !Number.isFinite(command.createdAt) ||
-      command.createdAt < 0 ||
-      JSON.stringify(command).length > MAX_USER_COMMAND_SIZE
+      command.createdAt < 0
     ) {
       throw new CommandStorageValidationError();
     }
 
-    const normalizedName = command.name.toLowerCase();
+    const canonical: SlashCommand = {
+      name: command.name,
+      instructions: command.instructions,
+      isBuiltin: false,
+      createdAt: command.createdAt,
+    };
+    if (JSON.stringify(canonical).length > MAX_USER_COMMAND_SIZE) {
+      throw new CommandStorageValidationError();
+    }
+
+    const normalizedName = canonical.name.toLowerCase();
     if (names.has(normalizedName) || isBuiltinCommandName(normalizedName)) {
       throw new CommandStorageValidationError();
     }
     names.add(normalizedName);
 
-    return { ...command } as unknown as SlashCommand;
+    return canonical;
   });
 
   return { userCommands: commands };

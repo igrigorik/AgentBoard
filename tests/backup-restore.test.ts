@@ -110,6 +110,27 @@ describe('backup schema boundary', () => {
     expect(chrome.storage.local.clear).not.toHaveBeenCalled();
   });
 
+  it('canonicalizes imported commands before they reach the write boundary', () => {
+    const prepared = prepareBackupImport(
+      backup(
+        '2.0',
+        { schemaVersion: 2, agents: [currentAgent()] },
+        {
+          ignoredStorageField: 'drop me',
+          userCommands: [
+            {
+              ...commands.userCommands[0],
+              arbitraryImportedField: 'drop me',
+            },
+          ],
+        }
+      )
+    );
+
+    expect(prepared.commands).toEqual(commands);
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
   it('accepts schema v2 config wrapped by a rolled-back v1 exporter', () => {
     const source = backup('1.0', {
       schemaVersion: 2,
