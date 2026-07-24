@@ -593,6 +593,47 @@ describe('TabManager', () => {
       expect(result).toEqual({ success: true });
     });
 
+    it('settles concurrent calls by request ID when responses arrive out of order', async () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      let messageHandler: ((message: unknown) => void) | undefined;
+      mockPort.onMessage.addListener.mockImplementation((handler) => {
+        messageHandler = handler;
+      });
+      portHandlers.onConnect(mockPort);
+
+      const first = lifecycle.callTool(123, 'first', {});
+      const second = lifecycle.callTool(123, 'second', {});
+      const third = lifecycle.callTool(123, 'third', {});
+      const calls = mockPort.postMessage.mock.calls
+        .map(([message]) => message.payload)
+        .filter(({ method }) => method === 'tools/call');
+      const requestByName = new Map(calls.map((call) => [call.params.name, call.id]));
+
+      for (const name of ['second', 'third', 'first']) {
+        messageHandler?.({
+          type: 'webmcp',
+          payload: {
+            jsonrpc: '2.0',
+            id: requestByName.get(name),
+            result: `${name}-result`,
+          },
+        });
+      }
+
+      await expect(Promise.all([first, second, third])).resolves.toEqual([
+        'first-result',
+        'second-result',
+        'third-result',
+      ]);
+    });
+
     it.each([{ code: -32000, message: 'secret page-controlled failure' }, null, false, 0])(
       'should reject every response containing an error member',
       async (responseError) => {

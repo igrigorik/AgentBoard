@@ -196,6 +196,7 @@ describe('WebMCP Script Injector', () => {
       expect(wrappedCode).toContain('document.modelContext');
       expect(wrappedCode).toContain('modelContext.registerTool(tool, {');
       expect(wrappedCode).toContain('signal: registrationController.signal');
+      expect(wrappedCode).toContain('//# sourceURL=webmcp-script:test:test_tool.js');
       expect(wrappedCode).not.toContain('window.agent');
     });
 

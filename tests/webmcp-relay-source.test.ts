@@ -51,7 +51,15 @@ function createHarness() {
   };
   Object.defineProperty(window, 'chrome', { value: chromeHarness });
 
-  return { dom, window, chromeHarness, port, portMessages, storageChanged };
+  return {
+    dom,
+    window,
+    chromeHarness,
+    port,
+    portMessages,
+    portDisconnects,
+    storageChanged,
+  };
 }
 
 function inject(window: RelayWindow): void {
@@ -68,6 +76,7 @@ describe('real WebMCP relay source', () => {
   afterEach(() => {
     harness.window.__webmcpRelayBridge?.shutdown();
     harness.dom.window.close();
+    vi.useRealTimers();
   });
 
   it('makes duplicate injection side-effect free and requests only log level', () => {
@@ -86,6 +95,46 @@ describe('real WebMCP relay source', () => {
     );
     expect(harness.storageChanged.addListener).not.toHaveBeenCalled();
     expect(addWindowListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('queues page messages across a disconnect and flushes them after reconnecting', () => {
+    let reconnect: (() => void) | undefined;
+    const setTimeout = vi
+      .spyOn(harness.window as unknown as Window, 'setTimeout')
+      .mockImplementation((handler: TimerHandler) => {
+        if (typeof handler === 'function') reconnect = () => handler();
+        return 1;
+      });
+    inject(harness.window);
+    const bridge = harness.window.__webmcpRelayBridge!;
+    const [disconnect] = harness.portDisconnects.listeners;
+    disconnect();
+
+    bridge.onPageMessage({
+      source: harness.window,
+      data: {
+        source: 'webmcp-main',
+        jsonrpc: '2.0',
+        method: 'tools/listChanged',
+        params: { tools: [] },
+      },
+    });
+    expect(harness.port.postMessage).not.toHaveBeenCalled();
+
+    expect(setTimeout).toHaveBeenCalledWith(expect.any(Function), 100);
+    reconnect?.();
+
+    expect(harness.chromeHarness.runtime.connect).toHaveBeenCalledTimes(2);
+    expect(harness.port.postMessage).toHaveBeenCalledWith({
+      type: 'webmcp',
+      payload: {
+        jsonrpc: '2.0',
+        method: 'tools/listChanged',
+        params: { tools: [] },
+      },
+      tabUrl: 'https://page.example.test/',
+      timestamp: expect.any(Number),
+    });
   });
 
   it('updates logging only through an explicit level-only port message', () => {
