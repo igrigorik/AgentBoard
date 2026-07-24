@@ -8,8 +8,63 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = path.join(repositoryRoot, 'dist');
-const profileDirectory = mkdtempSync(path.join(tmpdir(), 'agentboard-config-chrome-'));
+const profileDirectory = mkdtempSync(path.join(tmpdir(), 'agentboard-mv3-chrome-'));
 const timeoutMs = 20_000;
+const webMCPFixturePath = '/webmcp-execution';
+const webMCPToolName = 'agentboard_browser_e2e';
+const webMCPInput = 'bridge-proof';
+const webMCPResult = `main-world-closure:${webMCPInput}`;
+
+function webMCPFixtureHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:,">
+  <title>AgentBoard WebMCP execution proof</title>
+  <script>
+    (() => {
+      const closureMarker = 'main-world-closure';
+      const state = {
+        registration: 'pending',
+        executionCount: 0,
+        lastInput: null,
+      };
+      globalThis.__agentboardWebMCPProof = state;
+
+      if (!document.modelContext || typeof document.modelContext.registerTool !== 'function') {
+        state.registration = 'missing-model-context';
+        return;
+      }
+
+      try {
+        Promise.resolve(document.modelContext.registerTool({
+          name: ${JSON.stringify(webMCPToolName)},
+          description: 'Synthetic tool registered by the browser-test page',
+          inputSchema: {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+            required: ['value'],
+            additionalProperties: false,
+          },
+          execute(input) {
+            state.executionCount += 1;
+            state.lastInput = input;
+            return closureMarker + ':' + input.value;
+          },
+        })).then(
+          () => { state.registration = 'ready'; },
+          () => { state.registration = 'failed'; }
+        );
+      } catch {
+        state.registration = 'failed';
+      }
+    })();
+  </script>
+</head>
+<body>WebMCP execution proof</body>
+</html>`;
+}
 
 function findChrome() {
   const candidates = [
@@ -90,6 +145,15 @@ async function waitFor(check, label, deadline = timeoutMs) {
 async function startWireServer() {
   const requests = [];
   const server = http.createServer((request, response) => {
+    if (request.method === 'GET' && request.url === webMCPFixturePath) {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      response.end(webMCPFixtureHtml());
+      return;
+    }
+
     let body = '';
     request.setEncoding('utf8');
     request.on('data', (chunk) => {
@@ -128,6 +192,7 @@ async function startWireServer() {
   assert(address && typeof address === 'object');
   return {
     endpoint: `http://localhost:${address.port}/v1`,
+    webMCPFixtureUrl: `http://localhost:${address.port}${webMCPFixturePath}`,
     requests,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
@@ -136,8 +201,16 @@ async function startWireServer() {
 async function main() {
   const chrome = findChrome();
   if (!chrome) throw new Error('Chrome or Chromium is required for MV3 browser tests');
-  if (!existsSync(path.join(extensionPath, 'manifest.json'))) {
-    throw new Error('Built extension is missing. Run pnpm run build first.');
+  const requiredBuiltFiles = [
+    'manifest.json',
+    'content-scripts/webmcp-polyfill.js',
+    'content-scripts/relay.js',
+    'content-scripts/page-bridge.js',
+  ];
+  if (requiredBuiltFiles.some((file) => !existsSync(path.join(extensionPath, file)))) {
+    throw new Error(
+      'Built extension or WebMCP bridge assets are missing. Run pnpm run build first.'
+    );
   }
 
   const wire = await startWireServer();
@@ -459,6 +532,82 @@ async function main() {
     assert.deepEqual(await getConfig(), saved);
     console.log('✓ restarted the MV3 worker without another migration write');
 
+    // This page supplies only a normal MAIN-world tool registration. Discovery and
+    // execution must cross the built extension's webNavigation injection, isolated
+    // relay, MAIN-world bridge, service worker, and public runtime message boundary.
+    const providerRequestsBeforeWebMCP = wire.requests.length;
+    const { targetId: fixtureTargetId } = await cdp.send('Target.createTarget', {
+      url: wire.webMCPFixtureUrl,
+    });
+    const { sessionId: fixtureSessionId } = await cdp.send('Target.attachToTarget', {
+      targetId: fixtureTargetId,
+      flatten: true,
+    });
+    await cdp.send('Runtime.enable', {}, fixtureSessionId);
+    await cdp.send('Page.enable', {}, fixtureSessionId);
+    const evaluateFixture = async (expression) => {
+      const result = await cdp.send(
+        'Runtime.evaluate',
+        { expression, awaitPromise: true, returnByValue: true },
+        fixtureSessionId
+      );
+      if (result.exceptionDetails) throw new Error('WebMCP fixture evaluation failed');
+      return result.result?.value;
+    };
+
+    try {
+      await waitFor(
+        () =>
+          evaluateFixture(
+            `document.readyState === 'complete' && globalThis.__agentboardWebMCPProof?.registration === 'ready' && globalThis.__webmcpPageBridge?.version === 3`
+          ),
+        'built WebMCP page bridge'
+      );
+      const fixtureTabId = await waitFor(
+        () =>
+          evaluate(
+            `chrome.tabs.query({ url: ${JSON.stringify(wire.webMCPFixtureUrl)} }).then(([tab]) => tab?.id || false)`
+          ),
+        'WebMCP fixture tab ID'
+      );
+      const pageTool = await waitFor(
+        () =>
+          evaluate(
+            `chrome.runtime.sendMessage({ type: 'WEBMCP_GET_TOOLS', tabId: ${fixtureTabId} }).then((response) => response?.success ? response.data.find(({ name }) => name === ${JSON.stringify(webMCPToolName)}) || false : false)`
+          ),
+        'page tool discovery through the built extension'
+      );
+      assert.equal(pageTool.description, 'Synthetic tool registered by the browser-test page');
+      assert.equal(pageTool.inputSchema?.properties?.value?.type, 'string');
+
+      const callResponse = await evaluate(
+        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: ${JSON.stringify(webMCPToolName)}, args: { value: ${JSON.stringify(webMCPInput)} } })`
+      );
+      assert.deepEqual(callResponse, { success: true, result: webMCPResult });
+      assert.equal(
+        wire.requests.length,
+        providerRequestsBeforeWebMCP,
+        'the synthetic WebMCP proof must not contact the provider endpoint'
+      );
+      assert.deepEqual(
+        await evaluateFixture(`({
+          ...globalThis.__agentboardWebMCPProof,
+          bridgeVersion: globalThis.__webmcpPageBridge?.version,
+          modelContextTag: Object.prototype.toString.call(document.modelContext),
+        })`),
+        {
+          registration: 'ready',
+          executionCount: 1,
+          lastInput: { value: webMCPInput },
+          bridgeVersion: 3,
+          modelContextTag: '[object ModelContext]',
+        }
+      );
+      console.log('✓ executed a MAIN-world page tool through the built MV3 relay and bridge');
+    } finally {
+      await cdp.send('Target.closeTarget', { targetId: fixtureTargetId });
+    }
+
     // Hold the production storage lock in this options page, then trigger a real
     // ConfigStorage mutation from a second extension page. The write must remain
     // pending until the first context releases the origin-scoped Web Lock.
@@ -643,7 +792,7 @@ async function main() {
 
 try {
   await main();
-  console.log('\n8 MV3 schema-v2 Chromium scenarios passed');
+  console.log('\n9 built-MV3 Chromium scenarios passed');
 } finally {
   rmSync(profileDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }

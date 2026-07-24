@@ -54,9 +54,9 @@ jobs:
         with:
           chrome-version: stable
 
-      - name: Run MV3 config migration browser tests
+      - name: Run built MV3 extension browser tests
         if: matrix.node-version == '22.x'
-        run: pnpm run test:browser:config:built
+        run: pnpm run test:browser:mv3:built
         env:
           CHROME_FOR_TESTING_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 
