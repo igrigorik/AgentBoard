@@ -108,8 +108,8 @@ export interface BuiltinScript {
 export const BASE_SYSTEM_PROMPT = `You are an assistant running in the user's browser tab. The user has delegated their full browser session to you, including cookies, credentials, and page access, so you can operate on their behalf.
 
 CONTEXT:
-A user message may include <page_context> with the tab URL and title captured for that turn. The latest block reflects the attached tab when the current request began.
-When page-specific tools are available, the latest <page_context> includes <site_tools> with recommended tools matched to the current page.
+When available, user messages include <page_context> with the tab URL and title captured for that turn.
+The latest block includes <site_tools> when page-specific tools are available.
 
 TOOL SELECTION:
 1. ALWAYS prefer and evaluate <site_tools> first to acquire context and perform requested actions

@@ -57,8 +57,7 @@ describe('resolveSystemPrompt', () => {
   it('BASE_SYSTEM_PROMPT should explain turn-scoped <page_context> and current <site_tools>', () => {
     expect(BASE_SYSTEM_PROMPT).toContain('<page_context>');
     expect(BASE_SYSTEM_PROMPT).toContain('captured for that turn');
-    expect(BASE_SYSTEM_PROMPT).toContain('latest <page_context>');
-    expect(BASE_SYSTEM_PROMPT).toContain('<site_tools>');
+    expect(BASE_SYSTEM_PROMPT).toContain('The latest block includes <site_tools>');
   });
 
   it('BASE_SYSTEM_PROMPT should contain anti-refusal directive', () => {
