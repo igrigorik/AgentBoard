@@ -5,6 +5,12 @@
 
 import log from '../lib/logger';
 import { raceWithAbort } from '../lib/abort';
+import {
+  DEFAULT_MAX_STEPS,
+  MAX_AUTO_CONTINUATIONS,
+  selectStreamContinuation,
+  stepLimitContinuationMessage,
+} from '../lib/ai/stream-policy';
 import './styles.css';
 import type { ChatMessage, ToolCall, MessageContent, MessagePart } from '../types';
 import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
@@ -45,7 +51,6 @@ const configStorage = ConfigStorage.getInstance();
 // Auto-continuation: when tools change mid-stream (e.g., navigation),
 // the stream stops and restarts with fresh tools. Capped to prevent loops.
 let autoContinuationCount = 0;
-const MAX_AUTO_CONTINUATIONS = 3;
 
 // Image attachment state
 interface ImageAttachment {
@@ -928,10 +933,16 @@ async function streamAIResponse() {
           currentSession = null;
           session.port.disconnect();
 
+          const continuation = selectStreamContinuation({
+            toolsChanged: Boolean(msg.toolsChanged),
+            stepsExhausted: Boolean(msg.stepsExhausted),
+            continuationCount: autoContinuationCount,
+          });
+
           // Auto-continue if tools changed mid-stream (e.g., after navigation).
           // The AI needs to restart with fresh tools to continue the task.
           // Capped to prevent infinite loops if tools keep changing.
-          if (msg.toolsChanged && autoContinuationCount < MAX_AUTO_CONTINUATIONS) {
+          if (continuation === 'tools-changed') {
             autoContinuationCount++;
             log.info(
               `[Sidebar] Tools changed during stream — auto-continuing (${autoContinuationCount}/${MAX_AUTO_CONTINUATIONS})`
@@ -973,19 +984,15 @@ async function streamAIResponse() {
 
           // When the model exhausts its tool step budget, give it one more
           // text-only turn to summarize progress instead of silently stopping.
-          if (
-            msg.stepsExhausted &&
-            !msg.toolsChanged &&
-            autoContinuationCount < MAX_AUTO_CONTINUATIONS
-          ) {
+          if (continuation === 'steps-exhausted') {
             autoContinuationCount++;
-            const limit = currentAgent?.maxSteps ?? 10;
+            const limit = currentAgent?.maxSteps ?? DEFAULT_MAX_STEPS;
             log.info(`[Sidebar] Steps exhausted (${limit}) — requesting wrap-up summary`);
 
             const contMsg: ChatMessage = {
               id: globalThis.crypto.randomUUID(),
               role: 'user',
-              content: `[You have used all ${limit} tool steps allowed for this turn. Do NOT call any more tools. Instead, summarize what you accomplished and what remains to be done.]`,
+              content: stepLimitContinuationMessage(currentAgent?.maxSteps),
               timestamp: Date.now(),
             };
             messageHistory.push(contMsg);

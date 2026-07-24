@@ -18,6 +18,7 @@ import {
 import { getToolRegistry } from '../webmcp/tool-registry';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
+import { decideStreamStop } from './stream-policy';
 
 interface APIError extends Error {
   statusCode?: number;
@@ -292,12 +293,9 @@ export class AIClient {
             // Stop after current step if tools changed (navigation, etc.)
             // or after agent-configured step limit (default 10).
             stopWhen: ({ steps }) => {
-              if (toolsInvalidated) return true;
-              if (steps.length >= (agent.maxSteps ?? 10)) {
-                stepsExhausted = true;
-                return true;
-              }
-              return false;
+              const decision = decideStreamStop(steps.length, agent.maxSteps, toolsInvalidated);
+              if (decision.stepsExhausted) stepsExhausted = true;
+              return decision.shouldStop;
             },
           }),
           ...(runtime.providerOptions && {
