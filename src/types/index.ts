@@ -187,6 +187,11 @@ export interface MessagePart {
   mimeType?: string; // e.g., 'image/png', 'image/jpeg'
 }
 
+export interface PageContext {
+  url: string;
+  title: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -201,6 +206,8 @@ export interface ChatMessage {
     agentId?: string;
     agentName?: string;
     hasAttachments?: boolean;
+    /** Browser-owned URL/title snapshot from when this user turn entered model history. */
+    pageContext?: PageContext;
   };
 }
 

@@ -12,7 +12,7 @@ import {
   stepLimitContinuationMessage,
 } from '../lib/ai/stream-policy';
 import './styles.css';
-import type { ChatMessage, ToolCall, MessageContent, MessagePart } from '../types';
+import type { ChatMessage, ToolCall, MessageContent, MessagePart, PageContext } from '../types';
 import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
 import { ToolCallBox } from './ToolCallBox';
 import { ReasoningBox } from './ReasoningBox';
@@ -216,7 +216,7 @@ log.info('[Sidebar] Initialized for tab:', attachedTabId);
  * Get current page context (URL, title) for the attached tab.
  * Returns null if no tab attached or tab info unavailable.
  */
-async function getPageContext(): Promise<{ url: string; title: string } | null> {
+async function getPageContext(): Promise<PageContext | null> {
   if (!attachedTabId) return null;
   try {
     const tab = await chrome.tabs.get(attachedTabId);
@@ -235,7 +235,7 @@ async function getPageContext(): Promise<{ url: string; title: string } | null> 
  * This is a steering hint — the full tool set is still sent via the API.
  */
 function buildPageContextXml(
-  ctx: { url: string; title: string },
+  ctx: PageContext,
   siteToolHints?: Array<{ name: string; description: string }>
 ): string {
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -704,7 +704,21 @@ async function streamAIResponse() {
   }
   if (currentStreamPreparation !== preparation || preparation.signal.aborted) return;
   currentStreamPreparation = null;
-  const contextPrefix = pageContext ? buildPageContextXml(pageContext, siteToolHints) : '';
+
+  // Keep page identity attached to the turn that observed it. Rebuilding history with only the
+  // latest URL would falsely relocate earlier questions after cross-page or SPA navigation.
+  // A turn cancelled during preparation stays context-less rather than borrowing a later page.
+  if (pageContext) {
+    for (let index = messageHistory.length - 1; index >= 0; index--) {
+      const message = messageHistory[index];
+      if (message.role !== 'user') continue;
+      message.metadata = {
+        ...message.metadata,
+        pageContext: message.metadata?.pageContext ?? { ...pageContext },
+      };
+      break;
+    }
+  }
 
   // Each request owns one collision-resistant port and its promise settlement.
   const connectionId = `ai-stream-${attachedTabId || 'unknown'}-${globalThis.crypto.randomUUID()}`;
@@ -1065,41 +1079,47 @@ async function streamAIResponse() {
       }
     });
 
-    // Send messages to stream (exclude empty messages)
-    // Prepend page context to user messages so model knows current page
-    const messagesToSend = messageHistory
-      .filter((m) => {
-        if (m.role !== 'user' && m.role !== 'assistant') return false;
+    // Send messages to the model without rewriting historical turns onto the current page.
+    const outboundHistory = messageHistory.filter((message) => {
+      if (message.role !== 'user' && message.role !== 'assistant') return false;
+      if (typeof message.content === 'string') return message.content.trim() !== '';
+      return message.content.length > 0;
+    });
+    let latestUserIndex = -1;
+    for (let index = outboundHistory.length - 1; index >= 0; index--) {
+      if (outboundHistory[index].role === 'user') {
+        latestUserIndex = index;
+        break;
+      }
+    }
 
-        // Handle string content
-        if (typeof m.content === 'string') {
-          return m.content.trim() !== '';
-        }
+    const messagesToSend = outboundHistory.map((message, index) => {
+      if (message.role !== 'user' || !message.metadata?.pageContext) {
+        return { role: message.role, content: message.content };
+      }
 
-        // Handle multi-part content (images count as non-empty)
-        return m.content.length > 0;
-      })
-      .map((m) => {
-        // Prepend context to user messages only
-        if (m.role === 'user' && contextPrefix) {
-          if (typeof m.content === 'string') {
-            return { role: m.role, content: contextPrefix + m.content };
-          }
-          // Multi-part: prepend to first text part or add new text part
-          const parts = [...m.content];
-          const firstTextIdx = parts.findIndex((p) => p.type === 'text');
-          if (firstTextIdx >= 0 && parts[firstTextIdx].text) {
-            parts[firstTextIdx] = {
-              ...parts[firstTextIdx],
-              text: contextPrefix + parts[firstTextIdx].text,
-            };
-          } else {
-            parts.unshift({ type: 'text', text: contextPrefix });
-          }
-          return { role: m.role, content: parts };
-        }
-        return { role: m.role, content: m.content };
-      });
+      // Tool hints describe capabilities available now, not historical capability snapshots.
+      const currentHints =
+        index === latestUserIndex && message.metadata.pageContext.url === pageContext?.url
+          ? siteToolHints
+          : undefined;
+      const contextPrefix = buildPageContextXml(message.metadata.pageContext, currentHints);
+      if (typeof message.content === 'string') {
+        return { role: message.role, content: contextPrefix + message.content };
+      }
+
+      const parts = [...message.content];
+      const firstTextIndex = parts.findIndex((part) => part.type === 'text');
+      if (firstTextIndex >= 0 && parts[firstTextIndex].text) {
+        parts[firstTextIndex] = {
+          ...parts[firstTextIndex],
+          text: contextPrefix + parts[firstTextIndex].text,
+        };
+      } else {
+        parts.unshift({ type: 'text', text: contextPrefix });
+      }
+      return { role: message.role, content: parts };
+    });
 
     log.debug('[Sidebar] Sending messages to stream:', {
       agentId: currentAgentId,

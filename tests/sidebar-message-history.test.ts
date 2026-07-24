@@ -141,6 +141,56 @@ describe('sidebar model history', () => {
     window.location.hash = '';
   });
 
+  it('preserves each user turn page context without retaining historical tool hints', async () => {
+    const ports: MockPort[] = [];
+    configureChrome(ports, true);
+    let currentHints = [{ name: 'video_a_tool', description: 'Tool available on video A' }];
+    chrome.runtime.sendMessage = vi.fn(async (message) => {
+      if (message.type === 'GET_SITE_TOOL_HINTS') return { hints: currentHints };
+      return { pong: true };
+    });
+    chrome.tabs.get = vi.fn().mockResolvedValue({
+      id: 123,
+      url: 'https://video.example/watch/a',
+      title: 'Video A',
+    });
+
+    await import('../src/sidebar/index');
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await vi.waitFor(() => expect(configStorage.getDefaultAgent).toHaveBeenCalled());
+
+    sendMessage('Question about the first video');
+    await vi.waitFor(() => expect(ports[0]?.postMessage).toHaveBeenCalledOnce());
+    const firstPayload = ports[0].postMessage.mock.calls[0][0];
+    expect(firstPayload.messages[0].content).toContain('https://video.example/watch/a');
+    expect(firstPayload.messages[0].content).toContain('<title>Video A</title>');
+    expect(firstPayload.messages[0].content).toContain('video_a_tool');
+    await vi.waitFor(() => expect(ports[0].disconnect).toHaveBeenCalledOnce());
+
+    currentHints = [{ name: 'video_b_tool', description: 'Tool available on video B' }];
+    chrome.tabs.get = vi.fn().mockResolvedValue({
+      id: 123,
+      url: 'https://video.example/watch/b',
+      title: 'Video B',
+    });
+    sendMessage('Question about the second video');
+    await vi.waitFor(() => expect(ports[1]?.postMessage).toHaveBeenCalledOnce());
+
+    const secondPayload = ports[1].postMessage.mock.calls[0][0] as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const userMessages = secondPayload.messages.filter(({ role }) => role === 'user');
+    expect(userMessages).toHaveLength(2);
+    expect(userMessages[0].content).toContain('https://video.example/watch/a');
+    expect(userMessages[0].content).toContain('<title>Video A</title>');
+    expect(userMessages[0].content).not.toContain('https://video.example/watch/b');
+    expect(userMessages[0].content).not.toContain('<site_tools>');
+    expect(userMessages[1].content).toContain('https://video.example/watch/b');
+    expect(userMessages[1].content).toContain('<title>Video B</title>');
+    expect(userMessages[1].content).toContain('video_b_tool');
+    expect(userMessages[1].content).not.toContain('video_a_tool');
+  });
+
   it('renders sidebar notices without sending them as assistant turns', async () => {
     const ports: MockPort[] = [];
     configureChrome(ports, true);

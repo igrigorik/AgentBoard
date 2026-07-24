@@ -181,6 +181,11 @@ describe('sidebar stream lifecycle ownership', () => {
 
     sendMessage('Continue after tools change');
     await vi.waitFor(() => expect(ports[2]?.postMessage).toHaveBeenCalledOnce());
+    chrome.tabs.get = vi.fn().mockResolvedValue({
+      id: 123,
+      url: 'https://example.com/after-navigation',
+      title: 'Page after navigation',
+    });
     ports[2].emitMessage({
       type: 'STREAM_COMPLETE',
       fullResponse: 'first step',
@@ -190,6 +195,17 @@ describe('sidebar stream lifecycle ownership', () => {
       expect(ports).toHaveLength(4);
       expect(ports[3].postMessage).toHaveBeenCalledOnce();
     });
+    const continuationPayload = ports[3].postMessage.mock.calls[0][0] as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const originalTurn = continuationPayload.messages.find(
+      ({ role, content }) => role === 'user' && content.includes('Continue after tools change')
+    );
+    const continuationTurn = continuationPayload.messages.at(-1);
+    expect(originalTurn?.content).toContain('https://example.com/current');
+    expect(originalTurn?.content).not.toContain('https://example.com/after-navigation');
+    expect(continuationTurn?.content).toContain('https://example.com/after-navigation');
+    expect(continuationTurn?.content).toContain('<title>Page after navigation</title>');
 
     ports[2].emitDisconnect();
     ports[3].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'finished' });

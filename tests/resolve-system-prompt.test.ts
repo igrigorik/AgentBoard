@@ -54,8 +54,10 @@ describe('resolveSystemPrompt', () => {
     expect(result.startsWith(BASE_SYSTEM_PROMPT)).toBe(true);
   });
 
-  it('BASE_SYSTEM_PROMPT should reference <page_context> and <site_tools>', () => {
+  it('BASE_SYSTEM_PROMPT should explain turn-scoped <page_context> and current <site_tools>', () => {
     expect(BASE_SYSTEM_PROMPT).toContain('<page_context>');
+    expect(BASE_SYSTEM_PROMPT).toContain('captured for that turn');
+    expect(BASE_SYSTEM_PROMPT).toContain('latest <page_context>');
     expect(BASE_SYSTEM_PROMPT).toContain('<site_tools>');
   });
 

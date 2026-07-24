@@ -24,7 +24,7 @@ AgentBoard may make limited third-party requests to load its interface. Those se
 
 When you configure or use a provider, server, tool, or script, AgentBoard or that tool may send data to the relevant third-party services. These services can include model providers, proxies, MCP servers, websites, and services contacted by tools or scripts.
 
-Depending on the action, shared data may include content you provide, files, the current page's URL, title, or content, tool definitions and instructions, tool inputs and results, model settings, and credentials or browser-session data needed to access the selected service.
+Depending on the action, shared data may include content you provide, files, URL and title context captured for current or earlier conversation turns, page content, tool definitions and instructions, tool inputs and results, model settings, and credentials or browser-session data needed to access the selected service. Switching a conversation to another configured provider may send that existing conversation and its captured page context to the newly selected service.
 
 The exact data sent through configured services depends on the provider and the features, tools, and scripts used for your request. Review third-party tools and scripts before enabling or using them.
 
