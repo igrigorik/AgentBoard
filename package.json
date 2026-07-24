@@ -2,6 +2,10 @@
   "name": "ai-sidebar-extension",
   "version": "0.7.3",
   "description": "Chrome extension AI sidebar with LLM providers and MCP support",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/igrigorik/agentboard.git"
+  },
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,9 +28,10 @@
     "lint:strict": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\" \"*.{json,md}\"",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run test",
+    "check:generated": "git diff --exit-code --name-only -- src/lib/webmcp/tools/registry.ts src/lib/webmcp/builtin-sources.ts",
     "clean": "rm -rf dist release",
     "prerelease": "pnpm run clean && pnpm run check",
-    "release": "pnpm run build:release && pnpm run test:browser:built && pnpm run test:browser:mv3:built && node scripts/package-release.js",
+    "release": "pnpm run build:release && pnpm run check:generated && pnpm run test:browser:built && pnpm run test:browser:mv3:built && node scripts/package-release.js",
     "release:github": "node scripts/github-release.js",
     "postinstall": "husky || true"
   },

@@ -87,10 +87,15 @@ export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin
       try {
         // Page tools are self-registering script.js files. System tools are
         // ordinary TypeScript modules bundled through the extension entrypoints.
-        const allToolDirs = fs.readdirSync(config.toolsSourceDir).filter((name) => {
-          const fullPath = path.join(config.toolsSourceDir, name);
-          return fs.statSync(fullPath).isDirectory();
-        });
+        // Filesystem enumeration order varies by platform, so sort before it can
+        // influence generated registries, emitted assets, or reviewed diffs.
+        const allToolDirs = fs
+          .readdirSync(config.toolsSourceDir)
+          .sort()
+          .filter((name) => {
+            const fullPath = path.join(config.toolsSourceDir, name);
+            return fs.statSync(fullPath).isDirectory();
+          });
         const systemToolDirs = new Set(
           SYSTEM_TOOL_SOURCES.map(({ path: source }) => path.dirname(source))
         );
@@ -401,10 +406,13 @@ function generateBuiltinSources(toolsSourceDir: string, outputPath: string): voi
   const sources: Record<string, string> = {};
 
   // Read WebMCP tool sources (script.js files)
-  const toolDirs = fs.readdirSync(toolsSourceDir).filter((name) => {
-    const fullPath = path.join(toolsSourceDir, name);
-    return fs.statSync(fullPath).isDirectory();
-  });
+  const toolDirs = fs
+    .readdirSync(toolsSourceDir)
+    .sort()
+    .filter((name) => {
+      const fullPath = path.join(toolsSourceDir, name);
+      return fs.statSync(fullPath).isDirectory();
+    });
 
   for (const toolDir of toolDirs) {
     const scriptPath = path.join(toolsSourceDir, toolDir, 'script.js');
