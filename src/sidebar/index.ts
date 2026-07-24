@@ -4,8 +4,15 @@
  */
 
 import log from '../lib/logger';
+import { raceWithAbort } from '../lib/abort';
+import {
+  DEFAULT_MAX_STEPS,
+  MAX_AUTO_CONTINUATIONS,
+  selectStreamContinuation,
+  stepLimitContinuationMessage,
+} from '../lib/ai/stream-policy';
 import './styles.css';
-import type { ChatMessage, ToolCall, MessageContent, MessagePart } from '../types';
+import type { ChatMessage, ToolCall, MessageContent, MessagePart, PageContext } from '../types';
 import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
 import { ToolCallBox } from './ToolCallBox';
 import { ReasoningBox } from './ReasoningBox';
@@ -16,6 +23,7 @@ import { CommandRegistry, CommandProcessor, createBuiltinCommands } from '../lib
 // Streaming session interface to encapsulate all streaming state
 interface StreamingSession {
   port: chrome.runtime.Port;
+  cancel: () => void;
   currentReasoningBox?: ReasoningBox; // Currently streaming reasoning box
   reasoningBoxes: ReasoningBox[]; // All reasoning boxes in chronological order
   currentTextBox?: TextBox; // Currently streaming text box
@@ -37,12 +45,12 @@ let connectionRetries = 0;
 const MAX_RETRIES = 3;
 let messageHistory: ChatMessage[] = [];
 let currentSession: StreamingSession | null = null;
+let currentStreamPreparation: AbortController | null = null;
 const configStorage = ConfigStorage.getInstance();
 
 // Auto-continuation: when tools change mid-stream (e.g., navigation),
 // the stream stops and restarts with fresh tools. Capped to prevent loops.
 let autoContinuationCount = 0;
-const MAX_AUTO_CONTINUATIONS = 3;
 
 // Image attachment state
 interface ImageAttachment {
@@ -208,7 +216,7 @@ log.info('[Sidebar] Initialized for tab:', attachedTabId);
  * Get current page context (URL, title) for the attached tab.
  * Returns null if no tab attached or tab info unavailable.
  */
-async function getPageContext(): Promise<{ url: string; title: string } | null> {
+async function getPageContext(): Promise<PageContext | null> {
   if (!attachedTabId) return null;
   try {
     const tab = await chrome.tabs.get(attachedTabId);
@@ -227,7 +235,7 @@ async function getPageContext(): Promise<{ url: string; title: string } | null> 
  * This is a steering hint — the full tool set is still sent via the API.
  */
 function buildPageContextXml(
-  ctx: { url: string; title: string },
+  ctx: PageContext,
   siteToolHints?: Array<{ name: string; description: string }>
 ): string {
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -495,7 +503,7 @@ function setupEventListeners() {
         currentAgentId = selectedAgentId;
         currentAgent = agent;
 
-        addMessage('system', `Switched to ${agent.name} (${agent.provider.toUpperCase()})`);
+        addMessage('system', `Switched to ${agent.name}`);
       }
     } catch (error) {
       addMessage('error', 'Failed to switch agent');
@@ -661,20 +669,6 @@ async function streamAIResponse() {
     throw new Error('No agent selected');
   }
 
-  // Create connection for streaming - include tabId for isolation
-  const connectionId = `ai-stream-${attachedTabId || 'unknown'}-${Date.now()}`;
-  log.debug('[Sidebar] Creating port connection:', connectionId, 'for tab:', attachedTabId);
-  const port = chrome.runtime.connect({ name: connectionId });
-
-  // Initialize streaming session
-  currentSession = {
-    port,
-    currentReasoningBox: undefined,
-    reasoningBoxes: [],
-    currentTextBox: undefined,
-    toolCalls: new Map(),
-  };
-
   // Create assistant message placeholder (don't add to history yet)
   const assistantMsg: ChatMessage = {
     id: globalThis.crypto.randomUUID(),
@@ -684,25 +678,85 @@ async function streamAIResponse() {
     metadata: { agentId: currentAgentId, agentName: currentAgent.name },
   };
 
-  // Get page context and domain-specific tool hints to prepend to user messages
-  const pageContext = await getPageContext();
-  const siteToolHints = attachedTabId
-    ? (
-        await chrome.runtime.sendMessage({
-          type: 'GET_SITE_TOOL_HINTS',
-          tabId: attachedTabId,
-        })
-      )?.hints
-    : undefined;
-  const contextPrefix = pageContext ? buildPageContextXml(pageContext, siteToolHints) : '';
+  // Page-context preparation is cancellable before a provider-owned port exists.
+  currentStreamPreparation?.abort();
+  const preparation = new AbortController();
+  currentStreamPreparation = preparation;
+  let pageContext: Awaited<ReturnType<typeof getPageContext>>;
+  let siteToolHints: Array<{ name: string; description: string }> | undefined;
+  try {
+    pageContext = await raceWithAbort(getPageContext(), preparation.signal);
+    siteToolHints = attachedTabId
+      ? (
+          await raceWithAbort(
+            chrome.runtime.sendMessage({
+              type: 'GET_SITE_TOOL_HINTS',
+              tabId: attachedTabId,
+            }),
+            preparation.signal
+          )
+        )?.hints
+      : undefined;
+  } catch (error) {
+    if (currentStreamPreparation === preparation) currentStreamPreparation = null;
+    if (preparation.signal.aborted) return;
+    throw error;
+  }
+  if (currentStreamPreparation !== preparation || preparation.signal.aborted) return;
+  currentStreamPreparation = null;
+
+  // Keep page identity attached to the turn that observed it. Rebuilding history with only the
+  // latest URL would falsely relocate earlier questions after cross-page or SPA navigation.
+  // A turn cancelled during preparation stays context-less rather than borrowing a later page.
+  if (pageContext) {
+    for (let index = messageHistory.length - 1; index >= 0; index--) {
+      const message = messageHistory[index];
+      if (message.role !== 'user') continue;
+      message.metadata = {
+        ...message.metadata,
+        pageContext: message.metadata?.pageContext ?? { ...pageContext },
+      };
+      break;
+    }
+  }
+
+  // Each request owns one collision-resistant port and its promise settlement.
+  const connectionId = `ai-stream-${attachedTabId || 'unknown'}-${globalThis.crypto.randomUUID()}`;
+  log.debug('[Sidebar] Creating port connection:', connectionId, 'for tab:', attachedTabId);
+  const port = chrome.runtime.connect({ name: connectionId });
+  const session: StreamingSession = {
+    port,
+    cancel: () => undefined,
+    currentReasoningBox: undefined,
+    reasoningBoxes: [],
+    currentTextBox: undefined,
+    toolCalls: new Map(),
+  };
+  currentSession = session;
 
   return new Promise<void>((resolve, reject) => {
-    if (!currentSession) {
-      reject(new Error('Session not created'));
-      return;
-    }
+    let expectedDisconnect = false;
+    let settled = false;
+    const resolveOnce = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    session.cancel = () => {
+      if (settled) return;
+      expectedDisconnect = true;
+      if (currentSession === session) currentSession = null;
+      session.port.disconnect();
+      resolveOnce();
+    };
 
-    currentSession.port.onMessage.addListener((msg) => {
+    session.port.onMessage.addListener((msg) => {
+      if (currentSession !== session) return;
       log.debug('[Sidebar] Received message from port:', msg.type, msg);
       switch (msg.type) {
         case 'STREAM_REASONING_START': {
@@ -889,15 +943,20 @@ async function streamAIResponse() {
           messageHistory.push(assistantMsg);
 
           // Session cleanup (TextBox handles its own cleanup)
-          if (currentSession) {
-            currentSession.port.disconnect();
-            currentSession = null;
-          }
+          expectedDisconnect = true;
+          currentSession = null;
+          session.port.disconnect();
+
+          const continuation = selectStreamContinuation({
+            toolsChanged: Boolean(msg.toolsChanged),
+            stepsExhausted: Boolean(msg.stepsExhausted),
+            continuationCount: autoContinuationCount,
+          });
 
           // Auto-continue if tools changed mid-stream (e.g., after navigation).
           // The AI needs to restart with fresh tools to continue the task.
           // Capped to prevent infinite loops if tools keep changing.
-          if (msg.toolsChanged && autoContinuationCount < MAX_AUTO_CONTINUATIONS) {
+          if (continuation === 'tools-changed') {
             autoContinuationCount++;
             log.info(
               `[Sidebar] Tools changed during stream — auto-continuing (${autoContinuationCount}/${MAX_AUTO_CONTINUATIONS})`
@@ -929,7 +988,7 @@ async function streamAIResponse() {
             messageHistory.push(contMsg);
 
             // Chain the continuation — don't reset isLoading
-            streamAIResponse().then(resolve).catch(reject);
+            streamAIResponse().then(resolveOnce).catch(rejectOnce);
             break;
           }
 
@@ -939,31 +998,27 @@ async function streamAIResponse() {
 
           // When the model exhausts its tool step budget, give it one more
           // text-only turn to summarize progress instead of silently stopping.
-          if (
-            msg.stepsExhausted &&
-            !msg.toolsChanged &&
-            autoContinuationCount < MAX_AUTO_CONTINUATIONS
-          ) {
+          if (continuation === 'steps-exhausted') {
             autoContinuationCount++;
-            const limit = currentAgent?.maxSteps ?? 10;
+            const limit = currentAgent?.maxSteps ?? DEFAULT_MAX_STEPS;
             log.info(`[Sidebar] Steps exhausted (${limit}) — requesting wrap-up summary`);
 
             const contMsg: ChatMessage = {
               id: globalThis.crypto.randomUUID(),
               role: 'user',
-              content: `[You have used all ${limit} tool steps allowed for this turn. Do NOT call any more tools. Instead, summarize what you accomplished and what remains to be done.]`,
+              content: stepLimitContinuationMessage(currentAgent?.maxSteps),
               timestamp: Date.now(),
             };
             messageHistory.push(contMsg);
 
             // Chain continuation — model should respond with text summary
-            streamAIResponse().then(resolve).catch(reject);
+            streamAIResponse().then(resolveOnce).catch(rejectOnce);
             break;
           }
 
           isLoading = false;
           updateSendButton();
-          resolve();
+          resolveOnce();
           break;
         }
 
@@ -972,18 +1027,16 @@ async function streamAIResponse() {
           log.error('[Sidebar] Stream error:', msg.error);
 
           // Clean up session components
-          if (currentSession) {
-            // Clean up any active text box
-            if (currentSession.currentTextBox) {
-              currentSession.currentTextBox.destroy();
-            }
-            // Clean up reasoning box if streaming
-            if (currentSession.currentReasoningBox?.isStreamingActive()) {
-              currentSession.currentReasoningBox.finishStreaming();
-            }
-            currentSession.port.disconnect();
-            currentSession = null;
+          // Clean up this request without mutating a replacement session.
+          if (session.currentTextBox) {
+            session.currentTextBox.destroy();
           }
+          if (session.currentReasoningBox?.isStreamingActive()) {
+            session.currentReasoningBox.finishStreaming();
+          }
+          expectedDisconnect = true;
+          currentSession = null;
+          session.port.disconnect();
 
           // Enhanced error messages for multi-modal issues
           let errorMessage = msg.error || 'Streaming failed';
@@ -1010,58 +1063,63 @@ async function streamAIResponse() {
           // Don't pop from history since we didn't add it yet
           isLoading = false;
           updateSendButton();
-          reject(new Error(msg.error));
+          rejectOnce(new Error(msg.error));
           break;
         }
       }
     });
 
-    currentSession.port.onDisconnect.addListener(() => {
-      // Handle unexpected disconnection
-      if (currentSession) {
-        // Clean up any active text box
-        if (currentSession.currentTextBox) {
-          currentSession.currentTextBox.finishStreaming();
-        }
+    session.port.onDisconnect.addListener(() => {
+      if (currentSession === session) {
+        session.currentTextBox?.finishStreaming();
         currentSession = null;
+      }
+      if (!expectedDisconnect) {
+        rejectOnce(new Error('AI stream connection closed unexpectedly.'));
       }
     });
 
-    // Send messages to stream (exclude empty messages)
-    // Prepend page context to user messages so model knows current page
-    const messagesToSend = messageHistory
-      .filter((m) => {
-        if (m.role !== 'user' && m.role !== 'assistant') return false;
+    // Send messages to the model without rewriting historical turns onto the current page.
+    const outboundHistory = messageHistory.filter((message) => {
+      if (message.role !== 'user' && message.role !== 'assistant') return false;
+      if (typeof message.content === 'string') return message.content.trim() !== '';
+      return message.content.length > 0;
+    });
+    let latestUserIndex = -1;
+    for (let index = outboundHistory.length - 1; index >= 0; index--) {
+      if (outboundHistory[index].role === 'user') {
+        latestUserIndex = index;
+        break;
+      }
+    }
 
-        // Handle string content
-        if (typeof m.content === 'string') {
-          return m.content.trim() !== '';
-        }
+    const messagesToSend = outboundHistory.map((message, index) => {
+      if (message.role !== 'user' || !message.metadata?.pageContext) {
+        return { role: message.role, content: message.content };
+      }
 
-        // Handle multi-part content (images count as non-empty)
-        return m.content.length > 0;
-      })
-      .map((m) => {
-        // Prepend context to user messages only
-        if (m.role === 'user' && contextPrefix) {
-          if (typeof m.content === 'string') {
-            return { role: m.role, content: contextPrefix + m.content };
-          }
-          // Multi-part: prepend to first text part or add new text part
-          const parts = [...m.content];
-          const firstTextIdx = parts.findIndex((p) => p.type === 'text');
-          if (firstTextIdx >= 0 && parts[firstTextIdx].text) {
-            parts[firstTextIdx] = {
-              ...parts[firstTextIdx],
-              text: contextPrefix + parts[firstTextIdx].text,
-            };
-          } else {
-            parts.unshift({ type: 'text', text: contextPrefix });
-          }
-          return { role: m.role, content: parts };
-        }
-        return { role: m.role, content: m.content };
-      });
+      // Tool hints describe capabilities available now, not historical capability snapshots.
+      const currentHints =
+        index === latestUserIndex && message.metadata.pageContext.url === pageContext?.url
+          ? siteToolHints
+          : undefined;
+      const contextPrefix = buildPageContextXml(message.metadata.pageContext, currentHints);
+      if (typeof message.content === 'string') {
+        return { role: message.role, content: contextPrefix + message.content };
+      }
+
+      const parts = [...message.content];
+      const firstTextIndex = parts.findIndex((part) => part.type === 'text');
+      if (firstTextIndex >= 0 && parts[firstTextIndex].text) {
+        parts[firstTextIndex] = {
+          ...parts[firstTextIndex],
+          text: contextPrefix + parts[firstTextIndex].text,
+        };
+      } else {
+        parts.unshift({ type: 'text', text: contextPrefix });
+      }
+      return { role: message.role, content: parts };
+    });
 
     log.debug('[Sidebar] Sending messages to stream:', {
       agentId: currentAgentId,
@@ -1070,17 +1128,23 @@ async function streamAIResponse() {
       messages: messagesToSend,
     });
 
-    if (!currentSession) {
-      reject(new Error('Session not available'));
+    if (currentSession !== session) {
+      rejectOnce(new Error('AI stream session is no longer active.'));
       return;
     }
 
-    currentSession.port.postMessage({
-      type: 'STREAM_CHAT',
-      agentId: currentAgentId,
-      tabId: attachedTabId || undefined, // Pass the attached tab ID for tool scoping
-      messages: messagesToSend,
-    });
+    try {
+      session.port.postMessage({
+        type: 'STREAM_CHAT',
+        agentId: currentAgentId,
+        tabId: attachedTabId || undefined, // Pass the attached tab ID for tool scoping
+        messages: messagesToSend,
+      });
+    } catch {
+      currentSession = null;
+      expectedDisconnect = true;
+      rejectOnce(new Error('AI stream connection failed.'));
+    }
   });
 }
 
@@ -1151,10 +1215,9 @@ function displayConversationNotice(content: string): void {
 function clearConversation() {
   messageHistory = [];
   messagesContainer.innerHTML = '';
-  // Clean up any active session
-  if (currentSession) {
-    currentSession.port.disconnect();
-    currentSession = null;
+  // Clean up any active or preparing request.
+  if (currentSession || currentStreamPreparation) {
+    cancelCurrentStream();
   }
 
   // Reset scroll state - we're back at the top/beginning
@@ -1173,21 +1236,29 @@ document.addEventListener('keydown', (e) => {
 
 // Cancel current stream
 function cancelCurrentStream() {
+  if (currentStreamPreparation) {
+    const preparation = currentStreamPreparation;
+    currentStreamPreparation = null;
+    preparation.abort();
+    isLoading = false;
+    updateSendButton();
+    return;
+  }
+
   if (currentSession) {
-    chrome.runtime.sendMessage({
-      type: 'CANCEL_STREAM',
-      connectionId: currentSession.port.name,
-    } as const);
+    const session = currentSession;
+    // Settle the owning promise and disconnect first. The background owns this exact
+    // port, so cancellation cannot target any replacement session.
+    session.cancel();
 
     // Clean up session components
-    if (currentSession.currentTextBox) {
-      currentSession.currentTextBox.destroy();
+    if (session.currentTextBox) {
+      session.currentTextBox.destroy();
     }
-    if (currentSession.currentReasoningBox?.isStreamingActive()) {
-      currentSession.currentReasoningBox.finishStreaming();
+    if (session.currentReasoningBox?.isStreamingActive()) {
+      session.currentReasoningBox.finishStreaming();
     }
 
-    currentSession.port.disconnect();
     currentSession = null;
     isLoading = false;
     updateSendButton();
@@ -1197,8 +1268,8 @@ function cancelCurrentStream() {
 // Cancel current stream on Escape OR clear attachments
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    // Priority 1: Cancel active stream
-    if (currentSession) {
+    // Priority 1: Cancel active or preparing stream
+    if (currentSession || currentStreamPreparation) {
       cancelCurrentStream();
     }
     // Priority 2: Clear pending attachments

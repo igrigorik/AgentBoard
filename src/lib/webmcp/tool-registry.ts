@@ -11,10 +11,15 @@
  */
 
 import log from '../logger';
-import { getRemoteMCPManager } from '../mcp/manager';
+import {
+  EMPTY_REMOTE_MCP_SESSION,
+  getRemoteMCPManager,
+  type RemoteMCPManager,
+  type RemoteMCPSession,
+} from '../mcp/manager';
 import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
-import { ConfigStorage } from '../storage/config'; // Still needed for remote MCP tools
+import { ConfigStorage, type StorageConfig } from '../storage/config';
 import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
 import { createNavigateTool, NAVIGATE_TOOL_NAME } from './tools/navigate';
 import { calculateSpecificityScore } from './tool-patterns';
@@ -33,12 +38,22 @@ export interface ToolWithMetadata {
   publicName?: string;
 }
 
+/** One synchronous stream snapshot keeps remote tools and instructions coherent. */
+export interface ToolSnapshot {
+  tools: Record<string, AISDKTool>;
+  remoteSession: RemoteMCPSession;
+  mcpInstructions?: string;
+}
+
 /**
  * Manages unified tool registry across all sources
  */
 export class ToolRegistryManager {
   private tools = new Map<string, ToolWithMetadata>();
   private listeners = new Set<(tools: Record<string, AISDKTool>) => void>();
+  private remoteSession = EMPTY_REMOTE_MCP_SESSION;
+
+  constructor(private readonly remoteMCPManager: RemoteMCPManager = getRemoteMCPManager()) {}
 
   /**
    * Tab-bound system tool factories: (tabId) => AISDKTool.
@@ -65,33 +80,42 @@ export class ToolRegistryManager {
    * Respects user enable/disable preferences (default: enabled)
    */
   async registerSystemTools(): Promise<void> {
-    // Check if system tool is enabled (default: true)
     const configStorage = ConfigStorage.getInstance();
-    const isEnabled = await configStorage.isBuiltinToolEnabled(FETCH_URL_TOOL_NAME);
-
-    if (!isEnabled) {
-      log.info('[ToolRegistry] System tool disabled by user:', FETCH_URL_TOOL_NAME);
-      return;
-    }
-
-    // Register fetch URL tool (already pre-converted to AI SDK format)
-    this.addTool(FETCH_URL_TOOL_NAME, {
-      tool: fetchUrlTool,
-      source: 'system',
-      origin: 'system',
-      description: 'Fetch content from external URLs (not the current page)',
-    });
-
-    // Register tab-bound system tools (created per-tab via factory)
-    const isNavEnabled = await configStorage.isBuiltinToolEnabled(NAVIGATE_TOOL_NAME);
-    if (isNavEnabled) {
-      this.tabBoundFactories.set(NAVIGATE_TOOL_NAME, createNavigateTool);
-    }
-
-    log.info('[ToolRegistry] Registered system tools:', [
-      FETCH_URL_TOOL_NAME,
-      ...(isNavEnabled ? [NAVIGATE_TOOL_NAME] : []),
+    const [isFetchEnabled, isNavigateEnabled] = await Promise.all([
+      configStorage.isBuiltinToolEnabled(FETCH_URL_TOOL_NAME),
+      configStorage.isBuiltinToolEnabled(NAVIGATE_TOOL_NAME),
     ]);
+    let changed = false;
+
+    if (isFetchEnabled) {
+      const existingFetch = this.tools.get(FETCH_URL_TOOL_NAME);
+      if (existingFetch?.tool !== fetchUrlTool || existingFetch.source !== 'system') changed = true;
+      this.addTool(
+        FETCH_URL_TOOL_NAME,
+        {
+          tool: fetchUrlTool,
+          source: 'system',
+          origin: 'system',
+          description: 'Fetch content from external URLs (not the current page)',
+        },
+        { silent: true }
+      );
+    } else {
+      changed = this.tools.delete(FETCH_URL_TOOL_NAME) || changed;
+    }
+
+    if (isNavigateEnabled) {
+      if (this.tabBoundFactories.get(NAVIGATE_TOOL_NAME) !== createNavigateTool) changed = true;
+      this.tabBoundFactories.set(NAVIGATE_TOOL_NAME, createNavigateTool);
+    } else {
+      changed = this.tabBoundFactories.delete(NAVIGATE_TOOL_NAME) || changed;
+    }
+
+    if (changed) {
+      this.notifyListeners();
+      for (const tabId of this.tabChangeCallbacks.keys()) this.notifyTabChange(tabId);
+    }
+    log.info('[ToolRegistry] System tool configuration applied');
   }
 
   /**
@@ -154,14 +178,10 @@ export class ToolRegistryManager {
     }
   }
 
-  /**
-   * Collect, score, and sort tools by specificity.
-   * Returns tools as Record (ordered by score descending) plus debug info.
-   */
-  private getToolsSortedBySpecificity(filter?: (name: string, meta: ToolWithMetadata) => boolean): {
-    tools: Record<string, AISDKTool>;
-    debug: string[];
-  } {
+  /** Collect and sort tools by specificity for deterministic model ordering. */
+  private getToolsSortedBySpecificity(
+    filter?: (name: string, meta: ToolWithMetadata) => boolean
+  ): Record<string, AISDKTool> {
     type Candidate = {
       name: string;
       tool: AISDKTool;
@@ -185,7 +205,7 @@ export class ToolRegistryManager {
     }
 
     const scored: Candidate[] = [];
-    for (const [name, candidates] of grouped) {
+    for (const candidates of grouped.values()) {
       if (candidates.length === 1) {
         scored.push(candidates[0]);
         continue;
@@ -199,19 +219,13 @@ export class ToolRegistryManager {
       if (protectedCandidates.length === 1) {
         scored.push(protectedCandidates[0]);
       } else {
-        log.warn(
-          `[ToolRegistry] Omitting ambiguous tool ${name} from:`,
-          candidates.map(({ meta }) => meta.origin || meta.source)
-        );
+        log.warn('[ToolRegistry] Ambiguous tool omitted');
       }
     }
 
     scored.sort((a, b) => b.score - a.score);
 
-    return {
-      tools: Object.fromEntries(scored.map(({ name, tool }) => [name, tool])),
-      debug: scored.map(({ name, score }) => `${name}:${score}`),
-    };
+    return Object.fromEntries(scored.map(({ name, tool }) => [name, tool]));
   }
 
   /**
@@ -219,9 +233,7 @@ export class ToolRegistryManager {
    * Ordered by specificity score (descending)
    */
   getAllTools(): Record<string, AISDKTool> {
-    const { tools, debug } = this.getToolsSortedBySpecificity();
-    log.info(`[ToolRegistry] Providing ${debug.length} tools (all):`, debug);
-    return tools;
+    return this.getToolsSortedBySpecificity();
   }
 
   /**
@@ -233,7 +245,7 @@ export class ToolRegistryManager {
    * See tool-patterns.ts for scoring logic.
    */
   getToolsForTab(tabId: number): Record<string, AISDKTool> {
-    const { tools, debug } = this.getToolsSortedBySpecificity(
+    const tools = this.getToolsSortedBySpecificity(
       (_, meta) =>
         meta.origin === `tab-${tabId}` || meta.source === 'remote' || meta.source === 'system'
     );
@@ -241,11 +253,20 @@ export class ToolRegistryManager {
     // Inject tab-bound system tools (ephemeral, created per-call with tabId)
     for (const [name, factory] of this.tabBoundFactories) {
       tools[name] = factory(tabId);
-      debug.push(`${name}:factory`);
     }
 
-    log.info(`[ToolRegistry] Providing ${debug.length} tools for tab ${tabId}:`, debug);
     return tools;
+  }
+
+  /** Capture tools and MCP instructions from the same published remote session. */
+  captureToolSnapshot(tabId?: number): ToolSnapshot {
+    const remoteSession = this.remoteSession;
+    const mcpInstructions = remoteSession.getMCPInstructions();
+    return {
+      tools: tabId ? this.getToolsForTab(tabId) : this.getAllTools(),
+      remoteSession,
+      ...(mcpInstructions && { mcpInstructions }),
+    };
   }
 
   /** Whether a global system or configured remote capability owns this public name. */
@@ -351,6 +372,7 @@ export class ToolRegistryManager {
    */
   reset(): void {
     this.tools.clear();
+    this.remoteSession = EMPTY_REMOTE_MCP_SESSION;
     this.notifyListeners();
   }
 
@@ -369,66 +391,56 @@ export class ToolRegistryManager {
   }
 
   /**
-   * Load remote MCP server tools
+   * Reconcile remote MCP authority. A real MCP change clears the published
+   * catalog synchronously; a private candidate is installed only after it is ready.
    */
-  async loadRemoteTools(): Promise<void> {
+  async loadRemoteTools(configSnapshot?: StorageConfig): Promise<void> {
     try {
-      // First, remove any existing remote tools
-      const remoteTools: string[] = [];
-      for (const [name, meta] of this.tools.entries()) {
-        if (meta.source === 'remote') {
-          remoteTools.push(name);
-        }
-      }
-      for (const name of remoteTools) {
-        this.tools.delete(name);
-      }
+      const config = configSnapshot ?? (await ConfigStorage.getInstance().get());
+      const completion = this.remoteMCPManager.reconcile(config.mcpConfig);
 
-      // Get current config and ensure MCP manager is connected
-      const configStorage = ConfigStorage.getInstance();
-      const config = await configStorage.get();
+      // reconcile() synchronously detaches stale authority before its first await.
+      this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
+      await completion;
+      this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
+    } catch {
+      this.revokeRemoteTools();
+      log.error('[ToolRegistry] Remote MCP reconciliation failed');
+    }
+  }
 
-      if (!config?.mcpConfig?.mcpServers || Object.keys(config.mcpConfig.mcpServers).length === 0) {
-        log.warn('[ToolRegistry] No MCP servers configured');
-        return;
-      }
+  /** Immediately remove all remote capabilities and close transports in the background. */
+  revokeRemoteTools(): void {
+    this.remoteMCPManager.revoke();
+    this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
+  }
 
-      // Load the configuration into Remote MCP manager (connects to servers)
-      const remoteMCPManager = getRemoteMCPManager();
-      await remoteMCPManager.loadConfig(config.mcpConfig);
+  private replaceRemoteSession(session: RemoteMCPSession): void {
+    if (this.remoteSession === session) return;
 
-      // Now get the available tools
-      const mcpTools = remoteMCPManager.getAvailableTools();
+    for (const [name, meta] of this.tools) {
+      if (meta.source === 'remote') this.tools.delete(name);
+    }
 
-      // Convert and add each tool
-      for (const mcpTool of mcpTools) {
-        // Get the server name for this tool
-        const serverStatuses = remoteMCPManager.getServerStatuses();
-        let serverName = 'unknown';
-
-        // Find which server has this tool
-        for (const status of serverStatuses) {
-          if (status.tools.some((t) => t.name === mcpTool.name)) {
-            serverName = status.name;
-            break;
-          }
-        }
-
-        const aiTool = convertMCPToAISDKTool(mcpTool, serverName);
-        // Prefix with server name so both AI and UI have origin context
-        // Execution uses original mcpTool.name via closure, not this key
-        this.addTool(`${serverName}_${mcpTool.name}`, {
-          tool: aiTool,
+    for (const capability of session.getToolCapabilities()) {
+      const { serverName, tool: mcpTool } = capability;
+      this.addTool(
+        `${serverName}_${mcpTool.name}`,
+        {
+          tool: convertMCPToAISDKTool(session, capability),
           source: 'remote',
           origin: serverName,
           description: mcpTool.description,
-        });
-      }
-
-      log.warn(`[ToolRegistry] Loaded ${mcpTools.length} remote MCP tools`);
-    } catch (error) {
-      log.error('[ToolRegistry] Error loading remote MCP tools:', error);
+        },
+        { silent: true }
+      );
     }
+
+    this.remoteSession = session;
+    this.notifyListeners();
+    // Streams that captured the replaced session observe its AbortSignal directly.
+    // Publishing the first remote session must not interrupt streams that captured none.
+    log.info('[ToolRegistry] Remote MCP snapshot replaced');
   }
 
   /**

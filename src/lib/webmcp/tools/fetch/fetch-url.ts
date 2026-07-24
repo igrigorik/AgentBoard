@@ -7,7 +7,9 @@
  * Pre-converted to AI SDK format for direct use in tool registry.
  */
 
+import { raceWithAbort } from '../../../abort';
 import log from '../../../logger';
+import { ConfigStorage } from '../../../storage/config';
 import { convertToMarkdown } from './content-extractor';
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -19,13 +21,10 @@ const TOOL_DESCRIPTION =
   'Returns raw content or optionally converts HTML to clean markdown.';
 
 const PARAM_DESCRIPTIONS = {
-  url: 'URL to fetch (supports http, https, localhost, private IPs)',
+  url: 'URL to fetch (supports HTTPS URLs, including private IPs, and HTTP localhost URLs)',
   convertToMarkdown:
     'Convert HTML content to markdown format with metadata (default: false). ' +
     'Extracts article content, strips ads/navigation, formats as clean markdown.',
-  includeCredentials:
-    'Include cookies and authentication headers (default: true). ' +
-    'Set to false for unauthenticated requests.',
 } as const;
 
 /**
@@ -35,23 +34,36 @@ const PARAM_DESCRIPTIONS = {
 const fetchUrlSchema = z.object({
   url: z.string().describe(PARAM_DESCRIPTIONS.url),
   convertToMarkdown: z.boolean().optional().describe(PARAM_DESCRIPTIONS.convertToMarkdown),
-  includeCredentials: z.boolean().optional().describe(PARAM_DESCRIPTIONS.includeCredentials),
 });
 
 /**
  * Execute fetch URL operation
  */
-async function executeFetchUrl(args: z.infer<typeof fetchUrlSchema>): Promise<string> {
-  const { url, convertToMarkdown: shouldConvert, includeCredentials = true } = args;
+async function executeFetchUrl(
+  args: z.infer<typeof fetchUrlSchema>,
+  { abortSignal }: { abortSignal?: AbortSignal } = {}
+): Promise<string> {
+  const { url, convertToMarkdown: shouldConvert } = args;
 
   log.debug('[fetch_url] Fetching:', url, {
     convertToMarkdown: shouldConvert,
-    includeCredentials,
   });
 
   try {
-    // Validate URL
-    new URL(url); // Throws if invalid
+    const isEnabled = await raceWithAbort(
+      ConfigStorage.getInstance().isBuiltinToolEnabled(FETCH_URL_TOOL_NAME),
+      abortSignal
+    );
+    if (!isEnabled) throw new Error('Tool disabled');
+
+    // Match manifest host permissions instead of promising fetches Chromium will reject.
+    const parsedUrl = new URL(url);
+    if (
+      parsedUrl.protocol !== 'https:' &&
+      !(parsedUrl.protocol === 'http:' && parsedUrl.hostname === 'localhost')
+    ) {
+      throw new Error('Unsupported URL');
+    }
 
     // Get version from manifest dynamically (falls back for tests)
     const version =
@@ -59,10 +71,10 @@ async function executeFetchUrl(args: z.infer<typeof fetchUrlSchema>): Promise<st
         ? chrome.runtime.getManifest().version
         : '0.1.0';
 
-    // Fetch with appropriate credentials mode
-    // Note: Service workers have fetch in global scope
+    // Model-selected URLs are never allowed to inherit browser session credentials.
     const response = await globalThis.fetch(url, {
-      credentials: includeCredentials ? 'include' : 'omit',
+      credentials: 'omit',
+      signal: abortSignal,
       headers: {
         'User-Agent': `AgentBoard/${version}`,
       },
@@ -88,11 +100,9 @@ async function executeFetchUrl(args: z.infer<typeof fetchUrlSchema>): Promise<st
 
     log.debug('[fetch_url] Converted to', markdown.length, 'characters');
     return markdown;
-  } catch (error) {
-    log.error('[fetch_url] Error:', error);
-    throw new Error(
-      `Failed to fetch ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+  } catch {
+    log.error('[fetch_url] Request failed');
+    throw new Error('URL fetch failed');
   }
 }
 
@@ -123,10 +133,6 @@ export const FETCH_URL_METADATA = {
       convertToMarkdown: {
         type: 'boolean',
         description: PARAM_DESCRIPTIONS.convertToMarkdown,
-      },
-      includeCredentials: {
-        type: 'boolean',
-        description: PARAM_DESCRIPTIONS.includeCredentials,
       },
     },
     required: ['url'],

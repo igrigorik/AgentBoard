@@ -9,6 +9,11 @@
 (function () {
   'use strict';
 
+  const diagnostics = Object.freeze({
+    log: () => console.log('[AgentBoard] WebMCP bootstrap event'),
+    warn: () => console.warn('[AgentBoard] WebMCP bootstrap warning')
+  });
+
   function ensureTrustedTypesPolicy() {
     if (typeof trustedTypes === 'undefined' || window.__agentboardTTPolicy) return;
 
@@ -22,10 +27,9 @@
           );
         }
       });
-      console.log('[WebMCP] Created Trusted Types policy for user scripts');
-    } catch (error) {
-      console.warn('[WebMCP] Could not create Trusted Types policy:', error?.message || error);
-      console.warn('[WebMCP] User scripts may not work on this site due to Trusted Types');
+      diagnostics.log();
+    } catch {
+      diagnostics.warn();
     }
   }
 
@@ -295,11 +299,11 @@
   }
 
   if (isCompleteModelContext(existingModelContext)) {
-    console.log('[WebMCP] Native document.modelContext available');
+    diagnostics.log();
     return;
   }
   if (existingModelContext != null) {
-    console.warn('[WebMCP] Existing document.modelContext is incomplete; leaving it untouched');
+    diagnostics.warn();
     return;
   }
 
@@ -318,10 +322,9 @@
       api,
       registerTool: api.registerTool,
       getTools: api.getTools,
-      executeTool: api.executeTool,
-      kind: native ? 'native' : 'polyfill'
+      executeTool: api.executeTool
     };
-    console.log(`[WebMCP] document.modelContext selected ${selectedBackend.kind} backend`);
+    diagnostics.log();
     return selectedBackend;
   }
 
@@ -372,5 +375,5 @@
     enumerable: true
   });
 
-  console.log('[WebMCP] document.modelContext facade ready');
+  diagnostics.log();
 })();

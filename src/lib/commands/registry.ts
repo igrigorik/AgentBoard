@@ -4,6 +4,8 @@
 
 import log from '../logger';
 import type { SlashCommand, CommandStorage } from '../../types';
+import { isValidCommandName, MAX_USER_COMMAND_SIZE, validateCommandStorage } from './storage';
+import { runStorageOperation } from '../storage/operation-queue';
 
 export class CommandRegistry {
   private builtinCommands: Map<string, () => void>;
@@ -30,18 +32,12 @@ export class CommandRegistry {
    */
   async loadUserCommands(): Promise<void> {
     try {
-      const result = await chrome.storage.local.get(this.storageKey);
-      const storage = result[this.storageKey] as CommandStorage | undefined;
-
-      if (storage?.userCommands) {
-        this.userCommands.clear();
-        for (const command of storage.userCommands) {
-          this.userCommands.set(command.name.toLowerCase(), command);
-        }
-      }
-    } catch (error) {
-      log.error('Failed to load user commands:', error);
-      // Continue with empty user commands if storage fails
+      await runStorageOperation(async () => {
+        this.userCommands = await this.readUserCommands();
+      });
+    } catch {
+      this.userCommands.clear();
+      log.error('Failed to load user commands: INVALID_COMMAND_STORAGE');
     }
   }
 
@@ -64,20 +60,21 @@ export class CommandRegistry {
 
     // Validate storage size (Chrome sync limit is 100KB total)
     const commandSize = JSON.stringify(command).length;
-    if (commandSize > 8192) {
+    if (commandSize > MAX_USER_COMMAND_SIZE) {
       // 8KB per command limit
       throw new Error('Command template is too large (max 8KB)');
     }
 
-    // Add or update command
-    this.userCommands.set(normalizedName, {
+    const savedCommand = globalThis.structuredClone({
       ...command,
       name: command.name, // Preserve original casing
-      isBuiltin: false,
+      isBuiltin: false as const,
       createdAt: command.createdAt || Date.now(),
     });
 
-    await this.persistUserCommands();
+    await this.mutateUserCommands((commands) => {
+      commands.set(normalizedName, savedCommand);
+    });
   }
 
   /**
@@ -86,12 +83,11 @@ export class CommandRegistry {
   async deleteUserCommand(name: string): Promise<void> {
     const normalizedName = name.toLowerCase();
 
-    if (!this.userCommands.has(normalizedName)) {
-      throw new Error(`Command not found: ${name}`);
-    }
-
-    this.userCommands.delete(normalizedName);
-    await this.persistUserCommands();
+    await this.mutateUserCommands((commands) => {
+      if (!commands.delete(normalizedName)) {
+        throw new Error(`Command not found: ${name}`);
+      }
+    });
   }
 
   /**
@@ -146,7 +142,7 @@ export class CommandRegistry {
    * Must be alphanumeric with hyphens, 1-50 chars
    */
   isValidCommandName(name: string): boolean {
-    return /^[a-z0-9-]{1,50}$/i.test(name);
+    return isValidCommandName(name);
   }
 
   /**
@@ -164,17 +160,31 @@ export class CommandRegistry {
     return Array.from(this.userCommands.values());
   }
 
-  /**
-   * Persist user commands to storage
-   */
-  private async persistUserCommands(): Promise<void> {
-    const storage: CommandStorage = {
-      userCommands: Array.from(this.userCommands.values()),
-    };
+  private async readUserCommands(): Promise<Map<string, SlashCommand>> {
+    const result = await chrome.storage.local.get(this.storageKey);
+    const storedValue = result[this.storageKey];
+    const commands = new Map<string, SlashCommand>();
+    if (storedValue === undefined) return commands;
 
+    for (const command of validateCommandStorage(storedValue).userCommands) {
+      commands.set(command.name.toLowerCase(), command);
+    }
+    return commands;
+  }
+
+  /** Mutate a fresh storage snapshot so imports and concurrent saves cannot be overwritten. */
+  private async mutateUserCommands(
+    mutate: (commands: Map<string, SlashCommand>) => void
+  ): Promise<void> {
     try {
-      await chrome.storage.local.set({
-        [this.storageKey]: storage,
+      await runStorageOperation(async () => {
+        const commands = await this.readUserCommands();
+        mutate(commands);
+        const storage: CommandStorage = validateCommandStorage({
+          userCommands: Array.from(commands.values()),
+        });
+        await chrome.storage.local.set({ [this.storageKey]: storage });
+        this.userCommands = commands;
       });
     } catch (error) {
       log.error('Failed to save user commands:', error);

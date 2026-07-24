@@ -1,61 +1,79 @@
 /**
- * Centralized logging module using loglevel
- * Provides consistent log level management across all extension contexts
+ * Privacy-preserving application logger.
  *
- * Design decisions:
- * - Single global logger (no namespacing) for simplicity
- * - Two-phase initialization: sync default -> async storage override
- * - Default level: 'warn' to balance feedback vs noise
- * - User-configurable via Options UI, stored in chrome.storage
- * - All contexts (background, sidebar, options, content scripts) respect same level
+ * Callers may supply diagnostic context, but this boundary deliberately discards
+ * it before reaching the browser console. Provider traffic, browser content,
+ * credentials, configuration values, and arbitrary errors must never be logged.
  */
 
-import log from 'loglevel';
+import baseLogger from 'loglevel';
+import { parseStorageConfig, type LogLevel, type StorageConfig } from '../storage/config';
 
-// Detect test environment - Vitest sets process.env.NODE_ENV and global test context
 const isTestEnvironment =
   (typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') ||
   (typeof globalThis !== 'undefined' && 'vitest' in globalThis);
+const DEFAULT_LOG_LEVEL: LogLevel = isTestEnvironment ? 'silent' : 'warn';
 
-// Default log level - applied synchronously on import to capture early logs
-// Silent in tests to avoid noise, warn in production for useful feedback
-const DEFAULT_LOG_LEVEL = isTestEnvironment ? 'silent' : 'warn';
+function applyLogLevel(config: StorageConfig): void {
+  baseLogger.setLevel(config.logLevel ?? DEFAULT_LOG_LEVEL);
+}
 
-// Initialize with default immediately (synchronous)
-log.setLevel(DEFAULT_LOG_LEVEL as log.LogLevelDesc);
+function rejectLogLevel(): void {
+  baseLogger.setLevel(DEFAULT_LOG_LEVEL);
+  console.error('[AgentBoard] Invalid logging configuration ignored');
+}
 
-// Phase 2: Override from storage asynchronously
-// This runs ASAP after import, updates level if user has configured it
-// Guard against test environments where chrome APIs may not be fully mocked
+function applyStoredConfig(value: unknown): void {
+  if (value === undefined) {
+    baseLogger.setLevel(DEFAULT_LOG_LEVEL);
+    return;
+  }
+  try {
+    const parsed = parseStorageConfig(value);
+    // ConfigStorage owns migration. Logger stays at its safe default until the
+    // resulting durable v2 storage event arrives.
+    if (!parsed.migrated) applyLogLevel(parsed.config);
+  } catch {
+    rejectLogLevel();
+  }
+}
+
+baseLogger.setLevel(DEFAULT_LOG_LEVEL);
+let configChangeObserved = false;
+
 if (typeof chrome !== 'undefined' && chrome.storage?.local?.get) {
   chrome.storage.local.get(['config'], (result) => {
-    if (result.config?.logLevel) {
-      try {
-        log.setLevel(result.config.logLevel as log.LogLevelDesc);
-      } catch (error) {
-        console.error('[Logger] Invalid log level in storage:', result.config.logLevel, error);
-      }
-    }
+    if (!configChangeObserved) applyStoredConfig(result.config);
   });
 }
 
-// Phase 3: Listen for real-time changes from Options UI
-// Only set up listener if chrome.storage.onChanged is available
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.config?.newValue?.logLevel) {
-      try {
-        log.setLevel(changes.config.newValue.logLevel as log.LogLevelDesc);
-      } catch (error) {
-        console.error(
-          '[Logger] Invalid log level in update:',
-          changes.config.newValue.logLevel,
-          error
-        );
-      }
+    if (area === 'local' && changes.config) {
+      configChangeObserved = true;
+      applyStoredConfig(changes.config.newValue);
     }
   });
 }
 
-// Export configured logger
+type SafeLogMethod = (...discardedContext: unknown[]) => void;
+
+/**
+ * Fixed messages preserve severity and event counts without allowing call-site
+ * values to escape into extension/page consoles.
+ */
+const log: Readonly<{
+  trace: SafeLogMethod;
+  debug: SafeLogMethod;
+  info: SafeLogMethod;
+  warn: SafeLogMethod;
+  error: SafeLogMethod;
+}> = Object.freeze({
+  trace: () => baseLogger.trace('[AgentBoard] Trace event'),
+  debug: () => baseLogger.debug('[AgentBoard] Debug event'),
+  info: () => baseLogger.info('[AgentBoard] Information event'),
+  warn: () => baseLogger.warn('[AgentBoard] Warning event'),
+  error: () => baseLogger.error('[AgentBoard] Operation failed'),
+});
+
 export default log;

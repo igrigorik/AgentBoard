@@ -231,8 +231,48 @@ describe('WebMCP page bridge catalog and execution', () => {
 
     expect(executionSignal.aborted).toBe(true);
     expect(response(harness, 'cancel-call')).toMatchObject({
-      error: { message: 'Tool call cancelled', data: { name: 'AbortError' } },
+      error: { message: 'Tool execution cancelled' },
     });
+    expect(response(harness, 'cancel-call').error).not.toHaveProperty('data');
+  });
+
+  it('does not publish a late success from a tool that ignores cancellation', async () => {
+    const harness = createHarness({ loadPolyfill: false });
+    const native = createNativeHarness(harness.window, [
+      nativeTool(harness.window, 'noncooperative_tool'),
+    ]);
+    let resolveExecution!: (value: string) => void;
+    native.api.executeTool.mockImplementation(
+      () => new Promise<string>((resolve) => (resolveExecution = resolve))
+    );
+    installNative(harness, native);
+    harness.loadBridge();
+    await flush(harness.window);
+
+    harness.send({
+      id: 'late-success-call',
+      method: 'tools/call',
+      params: { name: 'noncooperative_tool', arguments: {} },
+    });
+    await flush(harness.window);
+    harness.send({ method: 'tools/cancel', params: { id: 'late-success-call' } });
+    await flush(harness.window);
+
+    const cancellationResponses = harness.outbox.filter(
+      (message) => message.id === 'late-success-call'
+    );
+    expect(cancellationResponses).toEqual([
+      expect.objectContaining({ error: { code: -32000, message: 'Tool execution cancelled' } }),
+    ]);
+
+    resolveExecution('secret late result');
+    await flush(harness.window);
+
+    const responses = harness.outbox.filter((message) => message.id === 'late-success-call');
+    expect(responses).toEqual([
+      expect.objectContaining({ error: { code: -32000, message: 'Tool execution cancelled' } }),
+    ]);
+    expect(JSON.stringify(responses)).not.toContain('secret late result');
   });
 
   it('refreshes the catalog on toolchange', async () => {
@@ -319,7 +359,7 @@ describe('WebMCP page bridge catalog and execution', () => {
     });
     await flush(harness.window);
 
-    expect(response(harness, 'ambiguous-call').error.message).toContain('ambiguous');
+    expect(response(harness, 'ambiguous-call').error.message).toBe('Tool name is ambiguous');
     expect(native.api.executeTool).not.toHaveBeenCalled();
   });
 
@@ -340,10 +380,30 @@ describe('WebMCP page bridge catalog and execution', () => {
     });
     await flush(harness.window);
 
-    expect(response(harness, 'failed-discovery-call').error.message).toContain(
-      'discovery unavailable'
+    expect(response(harness, 'failed-discovery-call').error.message).toBe(
+      'Tool catalog is unavailable'
     );
     expect(native.api.executeTool).not.toHaveBeenCalled();
+  });
+
+  it('does not relay arbitrary tool errors or stacks across the page boundary', async () => {
+    const harness = createHarness({ loadPolyfill: false });
+    const native = createNativeHarness(harness.window, [nativeTool(harness.window, 'unsafe_tool')]);
+    native.api.executeTool.mockRejectedValueOnce(new Error('secret tool output'));
+    installNative(harness, native);
+    harness.loadBridge();
+    await flush(harness.window);
+
+    harness.send({
+      id: 'unsafe-error-call',
+      method: 'tools/call',
+      params: { name: 'unsafe_tool', arguments: {} },
+    });
+    await flush(harness.window);
+
+    const error = response(harness, 'unsafe-error-call').error;
+    expect(error).toEqual({ code: -32000, message: 'Tool execution failed' });
+    expect(JSON.stringify(error)).not.toContain('secret tool output');
   });
 });
 
@@ -480,8 +540,9 @@ describe('WebMCP page bridge lifecycle', () => {
     await flush(harness.window);
 
     expect(response(harness, 'disposed-call')).toMatchObject({
-      error: { message: 'Document bridge disposed', data: { name: 'AbortError' } },
+      error: { message: 'Tool execution cancelled' },
     });
+    expect(response(harness, 'disposed-call').error).not.toHaveProperty('data');
   });
 
   it('replaces a prior bridge without retaining duplicate message handlers', async () => {

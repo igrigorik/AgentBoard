@@ -7,8 +7,3 @@
  */
 
 export { COMPILED_TOOLS, type CompiledToolInfo } from './registry';
-
-// DEPRECATED: Legacy DEFAULT_TOOLS Map for backward compatibility with user scripts
-// User scripts still use dynamic injection (works on permissive CSP only)
-// TODO: Remove after user script handling is fully separated
-export const DEFAULT_TOOLS = new Map<string, string>([]);

@@ -4,8 +4,8 @@
 
 A switchboard for AI in your browser: wire in any model, script WebMCP tools, connect remote MCP servers, bring your commands.
 
-- **Multi agent**: Configure as many profile as you want, switch mid-conversation.
-- **Your provider**: OpenAI, Anthropic, Google, or your own completion-compatible endpoint.
+- **Multi agent**: Configure as many profiles as you want and switch mid-conversation.
+- **Your connection**: OpenAI-style Responses or legacy Chat Completions, Anthropic Messages, Google Generative AI, or a compatible proxy endpoint.
 - **Your settings**: System prompts, temperature, thinking settings.
 - **Your keys**: Bring your own API keys. No lock-in, no upselling.
 - **Your tools**: Script WebMCP tools for page interactions. Connect remote MCP servers.
@@ -50,18 +50,30 @@ Bring your own models—local, fine-tuned, custom—to power multiple agent prof
 
 The AI sidebar is tab-scoped—each sidebar instance binds to one browser tab and sees tools from that tab's page context plus global tools (remote MCP servers and system capabilities). At document start, AgentBoard preserves Chromium's native `document.modelContext` when available or installs a standards-shaped polyfill otherwise. Pages and injected AgentBoard scripts register tools through `document.modelContext.registerTool()`. A MAIN-world bridge publishes clone-safe tool descriptors through the ISOLATED-world relay and persistent port to the background service worker. The ToolRegistry combines tab-owned WebMCP tools with remote MCP and system capabilities, then converts them to AI SDK format for the AI Client.
 
-When you send a message, the AI Client streams responses from your chosen provider (OpenAI, Anthropic, Google, or a custom endpoint). WebMCP calls route back to the owning browser tab, where the MAIN-world bridge invokes the exact browser descriptor through `document.modelContext.executeTool()`. Remote MCP tools execute on external servers with streaming HTTP, while system tools run in the service worker with elevated privileges such as CORS-free fetching.
+When you send a message, the AI Client uses the agent's explicit Connection API and streams from its direct or proxy endpoint. The descriptive provider label does not select the wire protocol. WebMCP calls route back to the owning browser tab, where the MAIN-world bridge invokes the exact browser descriptor through `document.modelContext.executeTool()`. Remote MCP tools execute on external servers with streaming HTTP, while system tools run in the service worker with elevated privileges such as CORS-free fetching.
 
 ---
 
 ## Agent Profiles
 
-**Gemini with Extended Thinking:**
+Every agent has an explicit Connection API. AgentBoard never guesses a protocol from the provider, model, or endpoint at request time and never retries a failed request through another protocol.
+
+| Settings choice            | `apiProtocol`             | Wire contract                                                                                  |
+| -------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------- |
+| OpenAI-style · Responses   | `openai-responses`        | OpenAI Responses API; new OpenAI-style agents default here and requests include `store: false` |
+| OpenAI-style · Legacy Chat | `openai-chat-completions` | OpenAI Chat Completions API for compatible providers and proxies                               |
+| Anthropic                  | `anthropic-messages`      | Anthropic Messages API                                                                         |
+| Google                     | `google-generative-ai`    | Google Generative AI API                                                                       |
+
+Choose the contract implemented by the endpoint, not the company that produced the model. For example, a Gemini model served by an OpenAI-compatible proxy uses an OpenAI-style Connection API. A custom endpoint must implement the selected contract, including its authentication and streaming format; when its API key is left blank, AgentBoard omits provider authentication headers. Existing or imported proxy-routed agents can retain descriptive `provider` metadata that differs from the Connection API, while newly created agents derive that metadata from the selected API.
+
+**Google with thinking:**
 
 ```javascript
 {
   provider: "google",
-  model: "gemini-2.0-flash-thinking-exp-01-21",
+  apiProtocol: "google-generative-ai",
+  model: "your-google-model",
   apiKey: "your-api-key",
   systemPrompt: "You are a helpful assistant.",
   reasoning: {
@@ -74,20 +86,20 @@ When you send a message, the AI Client streams responses from your chosen provid
 }
 ```
 
-**Local Ollama:**
+**Local Ollama using legacy Chat Completions:**
 
 ```javascript
 {
   provider: "openai",
+  apiProtocol: "openai-chat-completions",
   endpoint: "http://localhost:11434/v1",
   model: "llama3.1:70b",
-  apiKey: "ollama",  // Required but not used
   systemPrompt: "You are a coding assistant.",
   temperature: 0.7
 }
 ```
 
-Configure as many profiles as you want. Switch mid-conversation.
+Configure as many profiles as you want. Switch mid-conversation. Current settings and exports use schema v2 with required `schemaVersion: 2` and per-agent `apiProtocol`. Released v1 settings and v1 backups are migrated once; a v1 backup envelope containing already-migrated v2 settings after a rollback is also accepted. Older releases ignore `apiProtocol` and may infer a different transport, so a safe rollback that preserves routing requires a pre-migration export or an explicit reverse migration.
 
 ## MCP tools
 
@@ -144,11 +156,15 @@ export async function execute() {
 
 Save in Settings → My Tools. The AI can now call it when you ask about prices on example.com. See [examples/](examples/) for more complete tool implementations.
 
-**Built-in WebMCP tools:**
+**Built-in page/WebMCP tools:**
 
 - `agentboard_read_page` - Read the rendered page as article markdown, visible application text, or metadata context
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
-- `agentboard_fetch_url` - Fetch external URLs with optional markdown conversion
+
+**Built-in system tools:**
+
+- `agentboard_fetch_url` - Fetch external URLs without browser credentials, with optional markdown conversion
+- `agentboard_navigate` - Navigate the attached tab in its normal browser context; enabled by default and uses that tab's authenticated session
 
 ## Commands
 
@@ -164,17 +180,28 @@ Fast interactions with expansion templates.
 
 ---
 
+## Privacy and data flow
+
+AgentBoard has no operated telemetry or AI proxy, but configured features are not local-only. When you send a chat, the selected AI endpoint receives the conversation plus URL and title snapshots captured for its user turns; switching agents can therefore send the existing in-memory conversation and its page-context snapshots to the newly selected endpoint. URLs may contain sensitive paths, query parameters, fragments, document identifiers, or tokens. AI endpoints can also receive attachments, tool definitions, tool arguments, and tool results. Remote MCP servers receive MCP protocol traffic and authorization tokens. Credential-free URL fetches contact the requested website. The built-in YouTube transcript tool contacts YouTube Innertube and caption endpoints; its same-origin Innertube request and explicit caption request can include browser YouTube/Google session credentials. User WebMCP scripts run with page-level capabilities defined by their source.
+
+Settings are stored in `chrome.storage.local`. Conversation traffic is kept in memory rather than extension storage. AgentBoard's application logger and relay diagnostics discard caller-supplied values; generated page-tool registration wrappers and browser/provider code log independently and may include their own errors. Settings exports are plaintext and can contain AI credentials, MCP tokens, endpoint URLs, system prompts, and executable user scripts; treat every backup as a secret.
+
+OpenAI Responses requests include `store: false`, but that does not guarantee Zero Data Retention or disable provider/proxy logging, abuse monitoring, retention, or prompt caching. See [PRIVACY.md](PRIVACY.md) for the complete boundary and deletion guidance.
+
+---
+
 ## Development
 
 ```bash
 pnpm install      # Install dependencies
-pnpm run dev      # Start with hot reload
-pnpm run build    # Production build
-pnpm test         # Run tests
-pnpm run check    # Type check + lint + test
+pnpm run dev            # Start with hot reload
+pnpm run build          # Development build with source maps
+pnpm run build:release  # Minified release build without source maps
+pnpm test               # Run tests
+pnpm run check          # Type check + lint + test
 ```
 
-Load `dist/` folder in `chrome://extensions` (Developer Mode).
+Load `dist/` folder in `chrome://extensions` (Developer Mode). Chromium derives an unpacked extension's identity from its absolute path, so loading `dist/` from a different checkout creates a separate installation with separate `chrome.storage.local` settings. Rebuild and reload the same unpacked path when testing an upgrade, or use an export to move settings between installations.
 
 ---
 
@@ -188,10 +215,12 @@ Any MCP server that supports HTTP streaming. Add auth tokens if needed. Examples
 
 Any JavaScript that interacts with the page. Extract data with CSS selectors. Click buttons. Submit forms. Modify content. Access page JavaScript state. Read cookies. Trigger events. Use URL match patterns to scope tools to specific sites. Full DOM access, full page context. If you can do it in the browser console, you can script it as a WebMCP tool.
 
+URL match patterns are evaluated when a document loads or script settings are reapplied; AgentBoard does not rematch injected scripts after a same-document SPA route change. A script that remains registered still executes against the live document and should read route-specific state such as `window.location` inside `execute()` rather than capturing it during registration.
+
 ## How do site CSP policies and WebMCP interact?
 
 Sites that deploy strict CSP (e.g. no dynamic scripts) may not allow custom tools to be executed — this is expected behavior. Built-in tools that ship with AgentBoard can execute in all context, but custom scripts are constrained by site's CSP policy.
 
 ## What information does AgentBoard collect?
 
-None. See [PRIVACY.md](PRIVACY.md).
+AgentBoard does not send telemetry to an AgentBoard-operated service. It stores your settings locally and sends request data to the AI, MCP, and website endpoints you configure or invoke. See [PRIVACY.md](PRIVACY.md) for the exact data boundaries.

@@ -4,8 +4,14 @@
  */
 
 import log from '../lib/logger';
-import { AIClient } from '../lib/ai/client';
-import { ConfigStorage, type StorageConfig } from '../lib/storage/config';
+import { raceWithAbort } from '../lib/abort';
+import { AIClient, type StreamCallbacks } from '../lib/ai/client';
+import {
+  ConfigStorage,
+  ConfigValidationError,
+  configValidationMessage,
+  type StorageConfig,
+} from '../lib/storage/config';
 import { getTabManager } from '../lib/webmcp/lifecycle';
 import { getToolRegistry } from '../lib/webmcp/tool-registry';
 import type { CoreMessage } from 'ai';
@@ -18,7 +24,9 @@ import type {
 
 interface StreamingConnection {
   port: chrome.runtime.Port;
-  isStreaming: boolean;
+  requestHandled: boolean;
+  activeStreamId?: string;
+  preparation?: AbortController;
 }
 
 // AI client and streaming management
@@ -71,15 +79,6 @@ async function setupContextMenu() {
 // Extension installation/update lifecycle
 chrome.runtime.onInstalled.addListener(async (details) => {
   log.info('[Background] Extension installed/updated:', details.reason);
-
-  // Set default configuration on first install
-  if (details.reason === 'install') {
-    // Use the default config from ConfigStorage (single source of truth)
-    const defaultConfig = await configStorage.get();
-    chrome.storage.local.set({
-      config: defaultConfig,
-    });
-  }
 
   // Log available agents after installation/update
   logAvailableAgents();
@@ -307,18 +306,19 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
   log.debug('Background received message:', request.type);
 
   switch (request.type) {
-    case 'GET_CONFIG':
-      chrome.storage.local.get(['config'], (result) => {
-        sendResponse(result.config || {});
-      });
+    case 'GET_LOG_LEVEL':
+      configStorage
+        .get()
+        .then(({ logLevel }) => sendResponse({ logLevel }))
+        .catch(() => sendResponse({ error: 'CONFIGURATION_UNAVAILABLE' }));
       return true; // Keep channel open for async response
 
-    case 'SAVE_CONFIG':
-      chrome.storage.local.set({ config: request.config }, async () => {
-        // Config saved - agents will be loaded on-demand
-        sendResponse({ success: true });
-      });
-      return true;
+    case 'GET_CONFIG':
+      configStorage
+        .get()
+        .then((config) => sendResponse(config))
+        .catch(() => sendResponse({ error: 'CONFIGURATION_UNAVAILABLE' }));
+      return true; // Keep channel open for async response
 
     case 'WEBMCP_SCRIPTS_UPDATED':
       // Hot reload: rebuild built-in and user WebMCP registrations in all tabs
@@ -329,9 +329,9 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           log.debug('[Background] Hot reload completed');
           sendResponse({ success: true });
         })
-        .catch((error) => {
-          log.error('[Background] Hot reload failed:', error);
-          sendResponse({ success: false, error: error.message });
+        .catch(() => {
+          log.error('[Background] Hot reload failed');
+          sendResponse({ success: false, error: 'WebMCP script refresh failed' });
         });
       return true; // Keep channel open for async response
 
@@ -345,7 +345,10 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
         } catch (error) {
           sendResponse({
             success: false,
-            message: error instanceof Error ? error.message : 'Test failed',
+            message:
+              error instanceof ConfigValidationError
+                ? configValidationMessage(error)
+                : 'Connection test failed. Verify the Connection API and settings.',
           });
         }
       })();
@@ -355,20 +358,19 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       // Test new agent connection with provided details
       aiClient
         .testConnectionWithDetails({
-          provider: request.provider,
+          apiProtocol: request.apiProtocol,
           apiKey: request.apiKey,
           model: request.model,
           endpoint: request.endpoint,
-          openaiCompatible: request.openaiCompatible,
         })
         .then((result) => {
           sendResponse(result);
         })
-        .catch((error) => {
-          log.error('[Background] TEST_NEW_CONNECTION error:', error);
+        .catch(() => {
+          log.error('[Background] TEST_NEW_CONNECTION failed');
           sendResponse({
             success: false,
-            message: error instanceof Error ? error.message : 'Test failed',
+            message: 'Connection test failed. Verify the selected Connection API and settings.',
           });
         });
       return true;
@@ -376,21 +378,6 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
     case 'PING':
       sendResponse({ pong: true });
       return false;
-
-    case 'CANCEL_STREAM': {
-      // Cancel active streaming
-      aiClient.cancelStream();
-      const connectionId = request.connectionId;
-      if (connectionId && activeStreams.has(connectionId)) {
-        const connection = activeStreams.get(connectionId);
-        if (connection) {
-          connection.isStreaming = false;
-          activeStreams.delete(connectionId);
-        }
-      }
-      sendResponse({ success: true });
-      return false;
-    }
 
     case 'WEBMCP_CALL_TOOL': {
       // Handle WebMCP tool calls from sidebar or AI execution
@@ -449,20 +436,19 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           }
 
           if (!tabId) {
-            const errorMsg = `No active tab found with tool "${toolName}". Make sure the page with this tool is still open.`;
-            log.error(`[Background] ${errorMsg}`);
-            responseData = { success: false, error: errorMsg };
+            log.error('[Background] No active tab found for WebMCP tool');
+            responseData = { success: false, error: 'WebMCP tool execution failed' };
           } else {
             log.debug(`[Background] Calling tool ${toolName} in tab ${tabId}`);
             const result = await webmcp.callTool(tabId, toolName, args);
             log.debug(`[Background] Tool ${toolName} returned:`, result);
             responseData = { success: true, result };
           }
-        } catch (error) {
-          log.error(`[Background] Tool call error:`, error);
+        } catch {
+          log.error('[Background] WebMCP tool execution failed');
           responseData = {
             success: false,
-            error: error instanceof Error ? error.message : 'Tool call failed',
+            error: 'WebMCP tool execution failed',
           };
         }
 
@@ -542,7 +528,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
     case 'GET_SITE_TOOL_HINTS': {
       (async () => {
         try {
-          await toolsReady;
+          await systemToolsReady;
           const toolRegistry = getToolRegistry();
           const hints = toolRegistry.getSiteToolHints(request.tabId);
           sendResponse({ hints });
@@ -676,30 +662,48 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name.startsWith('ai-stream-')) {
     const connectionId = port.name;
     log.debug('[Background] AI stream connection established:', connectionId);
-    activeStreams.set(connectionId, { port, isStreaming: false });
+    if (activeStreams.has(connectionId)) {
+      // Connection IDs contain a random UUID. A duplicate is stale or forged;
+      // replacing the owner would orphan the still-connected original request.
+      log.warn('[Background] Duplicate stream connection rejected');
+      port.disconnect();
+      return;
+    }
+    const connection: StreamingConnection = { port, requestHandled: false };
+    activeStreams.set(connectionId, connection);
 
     port.onMessage.addListener(async (msg: PortMessage) => {
       log.debug('[Background] Received message on port:', msg.type, msg);
       if (msg.type === 'STREAM_CHAT') {
-        const connection = activeStreams.get(connectionId);
-        if (!connection) {
-          log.error('[Background] Connection not found:', connectionId);
+        if (activeStreams.get(connectionId) !== connection) {
+          log.error('[Background] Superseded connection ignored');
           return;
         }
+        // Sidebar sessions create one port per request. Never reusing a handled port
+        // prevents duplicate messages from replacing or reviving its stream owner.
+        if (connection.requestHandled) {
+          log.warn('[Background] Reused stream connection ignored');
+          return;
+        }
+        connection.requestHandled = true;
 
-        connection.isStreaming = true;
+        const streamId = globalThis.crypto.randomUUID();
+        const preparation = new AbortController();
+        connection.activeStreamId = streamId;
+        connection.preparation = preparation;
+        const isCurrentStream = () =>
+          activeStreams.get(connectionId) === connection && connection.activeStreamId === streamId;
+        const finishCurrentStream = () => {
+          if (connection.activeStreamId !== streamId) return;
+          connection.activeStreamId = undefined;
+          if (connection.preparation === preparation) connection.preparation = undefined;
+        };
         log.debug('[Background] Starting stream for agent:', msg.agentId, 'tab:', msg.tabId);
 
         try {
-          await toolsReady;
+          await raceWithAbort(toolsReady, preparation.signal);
+          if (!isCurrentStream()) return;
           const { agentId, tabId, messages } = msg;
-
-          // Ensure the agent is available
-          if (!(await aiClient.isAgentAvailable(agentId))) {
-            log.debug('[Background] Agent not available or not configured properly');
-            throw new Error('Agent not configured. Please add API key in settings.');
-          }
-          log.debug('[Background] Agent is ready');
 
           // Convert messages to CoreMessage format
           const coreMessages: CoreMessage[] = messages.map(
@@ -716,10 +720,10 @@ chrome.runtime.onConnect.addListener((port) => {
             'for tab:',
             tabId
           );
-          await aiClient.streamChat(agentId, coreMessages, tabId, {
+          const streamCallbacks: StreamCallbacks = {
             // Text block callbacks for interleaved display
             onTextBlockStart: (blockId) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_TEXT_BLOCK_START',
                   blockId,
@@ -728,7 +732,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onTextBlockChunk: (blockId, chunk) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_TEXT_BLOCK_CHUNK',
                   blockId,
@@ -738,7 +742,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onTextBlockEnd: (blockId) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_TEXT_BLOCK_END',
                   blockId,
@@ -747,7 +751,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onReasoningStart: () => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 log.debug('[Background] Reasoning started');
                 port.postMessage({
                   type: 'STREAM_REASONING_START',
@@ -756,7 +760,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onReasoningChunk: (chunk) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_REASONING_CHUNK',
                   chunk,
@@ -765,7 +769,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onReasoningEnd: (usage) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 log.debug('[Background] Reasoning ended', usage);
                 port.postMessage({
                   type: 'STREAM_REASONING_END',
@@ -775,7 +779,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onToolCall: (toolCall) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_TOOL_CALL',
                   toolCall,
@@ -784,7 +788,7 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onToolResult: (result) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_TOOL_RESULT',
                   toolCallId: result.id,
@@ -796,82 +800,109 @@ chrome.runtime.onConnect.addListener((port) => {
               }
             },
             onFinish: (fullText, metadata) => {
-              if (connection.isStreaming) {
+              if (isCurrentStream()) {
                 port.postMessage({
                   type: 'STREAM_COMPLETE',
                   fullResponse: fullText,
                   toolsChanged: metadata?.toolsChanged || false,
                   stepsExhausted: metadata?.stepsExhausted || false,
                 });
-                connection.isStreaming = false;
+                finishCurrentStream();
               }
             },
-            onError: (error) => {
-              log.error('[Background] Stream error from AI client:', error);
-              const errorMessage =
-                error.message ||
-                error.toString() ||
-                'Streaming failed - no error details available';
-
+            onAbort: (reason) => {
+              if (!isCurrentStream()) return;
               port.postMessage({
                 type: 'STREAM_ERROR',
-                error: errorMessage,
+                error:
+                  reason === 'remote-tools-changed'
+                    ? 'Remote tools changed. Send the request again.'
+                    : 'AI request was replaced by a newer request.',
               });
-              connection.isStreaming = false;
+              finishCurrentStream();
             },
-          });
+            onError: () => {
+              if (!isCurrentStream()) return;
+              log.error('[Background] AI stream failed');
+              port.postMessage({
+                type: 'STREAM_ERROR',
+                error: 'AI request failed. Check the agent connection settings and try again.',
+              });
+              finishCurrentStream();
+            },
+          };
+          await aiClient.streamChat(agentId, coreMessages, tabId, streamCallbacks, streamId);
+          // Superseded and user-cancelled streams return without an error callback.
+          finishCurrentStream();
         } catch (error) {
-          log.error('[Background] Caught error in stream handler:', error);
+          if (!isCurrentStream()) return;
+          log.error(
+            '[Background] Stream handler failed:',
+            error instanceof ConfigValidationError ? error.code : 'STREAM_FAILED'
+          );
           port.postMessage({
             type: 'STREAM_ERROR',
-            error: error instanceof Error ? error.message : 'Stream failed',
+            error:
+              error instanceof ConfigValidationError
+                ? configValidationMessage(error)
+                : 'AI request failed. Check the agent connection settings and try again.',
           });
-          connection.isStreaming = false;
+          finishCurrentStream();
         }
       }
     });
 
     port.onDisconnect.addListener(() => {
-      // Clean up connection
-      const connection = activeStreams.get(connectionId);
-      if (connection?.isStreaming) {
-        aiClient.cancelStream();
-      }
+      // A stale port must not cancel or delete the connection that replaced it.
+      if (activeStreams.get(connectionId) !== connection) return;
+      const streamId = connection.activeStreamId;
+      const preparation = connection.preparation;
       activeStreams.delete(connectionId);
+      preparation?.abort();
+      if (streamId) aiClient.cancelStream(streamId);
     });
   }
 });
 
-// Listen for config changes from Options page
-configStorage.onChange(async (newConfig: StorageConfig) => {
-  await toolsReady; // Ensure initial load completes before reload
-  const agents = await aiClient.getAvailableAgents();
-  log.debug(
-    '[Background] Config updated - available agents:',
-    agents.map((a) => `${a.name} (${a.provider})`)
-  );
+// Local system tools are sufficient for page hints; remote MCP startup must not
+// block the sidebar from constructing a cancellable request.
+const systemToolsReady = getToolRegistry().registerSystemTools();
+let systemToolRefreshes = systemToolsReady;
 
-  const toolRegistry = getToolRegistry();
-
-  // Re-register system tools if builtin script states changed
-  // This handles enable/disable of fetch_url tool
-  if (newConfig.builtinScripts !== undefined) {
-    log.debug('[Background] Re-registering system tools after builtin config change');
-    await toolRegistry.registerSystemTools();
-  }
-
-  // Reload remote MCP tools
-  log.debug('[Background] Reloading MCP tools after config change');
-  await toolRegistry.loadRemoteTools();
-});
-
-// Initialization gate — handlers that need tools await this to avoid
-// race between async MCP connection and immediate message handlers
+// Handlers that send the full catalog wait for configured remote MCP tools too.
 const toolsReady = (async () => {
-  const toolRegistry = getToolRegistry();
-  await toolRegistry.registerSystemTools();
-  await toolRegistry.loadRemoteTools();
+  await systemToolsReady;
+  await getToolRegistry().loadRemoteTools();
   log.debug('[Background] Tool registry initialized');
 })();
+
+// Listen for config changes from Options page
+configStorage.onChange(
+  (newConfig: StorageConfig) => {
+    webmcp.setRelayLogLevel(newConfig.logLevel);
+    log.debug(
+      '[Background] Config updated - available agents:',
+      newConfig.agents.map((agent) => `${agent.name} (${agent.provider})`)
+    );
+
+    const toolRegistry = getToolRegistry();
+
+    // Keep the storage callback non-blocking: the remote reconciler synchronously
+    // revokes stale authority and independently fences superseded candidates.
+    if (newConfig.builtinScripts !== undefined) {
+      systemToolRefreshes = systemToolRefreshes
+        .catch(() => undefined)
+        .then(() => toolRegistry.registerSystemTools())
+        .catch(() => {
+          log.error('[Background] System tool refresh failed');
+        });
+    }
+    void toolRegistry.loadRemoteTools(newConfig);
+  },
+  (error) => {
+    getToolRegistry().revokeRemoteTools();
+    log.error('[Background] Invalid configuration revoked remote MCP tools:', error.code);
+  }
+);
 
 export {};

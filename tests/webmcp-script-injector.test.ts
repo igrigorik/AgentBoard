@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   injectUserScripts,
   getMatchingScripts,
+  isProtectedExtensionGalleryError,
   validateAllScripts,
   reinjectScripts,
 } from '../src/lib/webmcp/script-injector';
@@ -195,6 +196,7 @@ describe('WebMCP Script Injector', () => {
       expect(wrappedCode).toContain('document.modelContext');
       expect(wrappedCode).toContain('modelContext.registerTool(tool, {');
       expect(wrappedCode).toContain('signal: registrationController.signal');
+      expect(wrappedCode).toContain('//# sourceURL=webmcp-script:test:test_tool.js');
       expect(wrappedCode).not.toContain('window.agent');
     });
 
@@ -386,6 +388,26 @@ describe('WebMCP Script Injector', () => {
       expect(tools).toHaveLength(1);
       expect(await modelContext.executeTool(updatedTool, '{}')).toBe('updated result');
       dom.window.close();
+    });
+
+    it('should skip protected extension stores before reinjection', async () => {
+      vi.mocked(chrome.tabs.get).mockResolvedValue({
+        id: 123,
+        url: 'https://chromewebstore.google.com/detail/example/abc123',
+      } as any);
+
+      await reinjectScripts(123);
+
+      expect(mockExecuteScript).not.toHaveBeenCalled();
+    });
+
+    it('should treat a gallery restriction from a navigation race as expected', async () => {
+      const galleryError = new Error('The extensions gallery cannot be scripted.');
+      expect(isProtectedExtensionGalleryError(galleryError)).toBe(true);
+      mockExecuteScript.mockRejectedValueOnce(galleryError);
+
+      await expect(reinjectScripts(123)).resolves.toBeUndefined();
+      expect(mockExecuteScript).toHaveBeenCalledOnce();
     });
 
     it('should handle tabs without URLs', async () => {

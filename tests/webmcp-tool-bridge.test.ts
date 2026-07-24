@@ -52,7 +52,7 @@ describe('WebMCP Tool Bridge tab ownership', () => {
     ) as any;
 
     await expect(sdkTool.execute({ destructive: true })).rejects.toThrow(
-      'tool catalog entry for "page_action" is no longer active in tab 100'
+      'WebMCP tool execution failed'
     );
     expect(callTool).not.toHaveBeenCalled();
   });
@@ -68,7 +68,7 @@ describe('WebMCP Tool Bridge tab ownership', () => {
 
     const staleTool = convertWebMCPToAISDKTool(staleDescriptor, 100) as any;
     await expect(staleTool.execute({ destructive: true })).rejects.toThrow(
-      'tool catalog entry for "page_action" is no longer active in tab 100'
+      'WebMCP tool execution failed'
     );
     expect(callTool).not.toHaveBeenCalled();
   });

@@ -1,34 +1,41 @@
 # Privacy Policy
 
-Last updated: 11/10/2025
+Last updated: July 18, 2026
 
-## Information Collection and Use
+AgentBoard is a browser extension that connects your browser to services and tools you choose. This policy explains what stays on your device, what is sent to AgentBoard, and what may be sent to third parties.
 
-We do not collect any health, financial and payment, authentication, personal communications, location, web history, user activity, website content information, or other types of personally identifiable information.
+## Data sent to AgentBoard
 
-## Data Usage
+The extension does not send your activity or content to us. AgentBoard does not operate an account system, analytics service, advertising service, telemetry collector, or backend that receives extension data.
 
-- Personally Identifiable Information: We do not collect any personally identifiable information.
-- Health Information: We do not collect any health information.
-- Financial and Payment Information: We do not collect any financial information.
-- Authentication Information: We do not collect any authentication information.
-- Personal Communications: We do not collect any personal communications.
-- Location: We do not collect any location information.
-- Web History: We do not collect any web history information.
-- User Activity: We do not collect any user activity data.
-- Website Content: We do not collect any content from the websites you visit.
+We do not sell extension data or use it for advertising.
 
-## Data Transfer and Sale
+## Data on your device
 
-We follow these standards to ensure the protection of your privacy:
+AgentBoard stores its settings in your browser. These settings may include service credentials, endpoints, model and tool configuration, prompts, scripts, commands, and interface preferences.
 
-1. We do not sell or transfer user data to third parties, outside of the approved use cases.
-2. We do not use or transfer user data for purposes that are unrelated to the item's single purpose.
+Conversations, files, page content, and tool activity may be held in memory while the extension is running, but AgentBoard does not write them to persistent extension storage.
 
-## Changes to This Privacy Policy
+Settings exports are plaintext files and may contain credentials or other sensitive configuration. Treat them as secrets.
 
-We may update our Privacy Policy from time to time. Thus, we advise you to review this page periodically for any changes. We will notify you of any changes by posting the new Privacy Policy on this page.
+## Data sent to third parties
 
-## Contact Us
+AgentBoard may make limited third-party requests to load its interface. Those services receive ordinary network information, such as your IP address and request headers.
 
-If you have any questions or suggestions about our Privacy Policy, do not hesitate to contact us by opening a discussion the extension repository or contacting the author via information provided in GitHub profile.
+When you configure or use a provider, server, tool, or script, AgentBoard or that tool may send data to the relevant third-party services. These services can include model providers, proxies, MCP servers, websites, and services contacted by tools or scripts.
+
+Depending on the action, shared data may include content you provide, files, URL and title context captured for current or earlier conversation turns, page content, tool definitions and instructions, tool inputs and results, model settings, and credentials or browser-session data needed to access the selected service. Switching a conversation to another configured provider may send that existing conversation and its captured page context to the newly selected service.
+
+The exact data sent through configured services depends on the provider and the features, tools, and scripts used for your request. Review third-party tools and scripts before enabling or using them.
+
+Third-party services process data under their own terms and privacy policies. AgentBoard does not control their logging, retention, caching, or use of data after they receive it.
+
+## Your choices
+
+You control which providers, endpoints, tools, and scripts you configure and use. You can remove local settings by deleting them in AgentBoard, clearing the extension's browser data, or uninstalling the extension.
+
+Deleting local data does not delete exported backups or data already received by third parties.
+
+## Contact
+
+For privacy or security questions, open an issue at <https://github.com/igrigorik/agentboard/issues>.

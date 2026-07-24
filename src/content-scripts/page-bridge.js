@@ -8,6 +8,12 @@
 (function () {
   'use strict';
 
+  const diagnostics = Object.freeze({
+    log: () => console.log('[AgentBoard] WebMCP bridge event'),
+    warn: () => console.warn('[AgentBoard] WebMCP bridge warning'),
+    error: () => console.error('[AgentBoard] WebMCP bridge failure')
+  });
+
   const previousBridge = window.__webmcpPageBridge;
   if (previousBridge) {
     if (typeof previousBridge.dispose === 'function') previousBridge.dispose();
@@ -16,11 +22,12 @@
 
   const JSONRPC = '2.0';
   const BRIDGE_ID = 'webmcp-main';
+  class PublicBridgeError extends Error {}
   let api;
   try {
     api = document.modelContext;
-  } catch (error) {
-    console.error('[WebMCP Bridge] Failed to read document.modelContext:', error);
+  } catch {
+    diagnostics.error();
     api = null;
   }
 
@@ -46,7 +53,7 @@
 
   function sanitizeTool(rawTool) {
     if (!rawTool || typeof rawTool !== 'object') {
-      console.warn('[WebMCP Bridge] Ignoring malformed tool: expected an object');
+      diagnostics.warn();
       return null;
     }
 
@@ -54,13 +61,13 @@
     let description;
     try {
       ({ name, description } = rawTool);
-    } catch (error) {
-      console.warn('[WebMCP Bridge] Ignoring malformed tool with unreadable metadata:', error);
+    } catch {
+      diagnostics.warn();
       return null;
     }
 
     if (typeof name !== 'string' || !name || typeof description !== 'string') {
-      console.warn('[WebMCP Bridge] Ignoring malformed tool: invalid name or description');
+      diagnostics.warn();
       return null;
     }
 
@@ -73,8 +80,8 @@
         descriptor.annotations = cloneJsonValue(rawTool.annotations);
       }
       return descriptor;
-    } catch (error) {
-      console.warn(`[WebMCP Bridge] Ignoring non-serializable tool "${name}":`, error);
+    } catch {
+      diagnostics.warn();
       return null;
     }
   }
@@ -136,7 +143,7 @@
     for (const [name, entries] of entriesByName) {
       if (entries.length !== 1) {
         ambiguousNames.add(name);
-        console.warn(`[WebMCP Bridge] Omitting ambiguous tool "${name}"`);
+        diagnostics.warn();
         continue;
       }
 
@@ -168,16 +175,14 @@
     let catalog;
     try {
       catalog = await collectCatalog();
-    } catch (error) {
+    } catch {
       if (disposed || generation !== publishGeneration) return;
 
-      console.error('[WebMCP Bridge] Failed to read document.modelContext tools:', error);
+      diagnostics.error();
       if (retryOnFailure) {
         setTimeout(() => {
           if (disposed || generation !== publishGeneration) return;
-          publishCatalog(false).catch((retryError) =>
-            console.error('[WebMCP Bridge] Failed to publish unavailable catalog:', retryError)
-          );
+          publishCatalog(false).catch(() => diagnostics.error());
         }, 0);
       } else {
         // Native policy/security failures must not leave an old catalog active indefinitely.
@@ -197,25 +202,45 @@
     queueMicrotask(() => {
       refreshScheduled = false;
       if (disposed) return;
-      publishCatalog().catch((error) =>
-        console.error('[WebMCP Bridge] Failed to publish changed tools:', error)
-      );
+      publishCatalog().catch(() => diagnostics.error());
+    });
+  }
+
+  function raceWithAbort(operation, signal) {
+    if (signal.aborted) return Promise.reject(signal.reason);
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (callback) => (value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        callback(value);
+      };
+      const onAbort = settle(reject);
+      signal.addEventListener('abort', onAbort, { once: true });
+      Promise.resolve(operation).then(settle(resolve), settle(reject));
     });
   }
 
   async function executeTool(name, args, signal) {
-    if (typeof name !== 'string' || !name) throw new TypeError('Tool name is required');
+    if (typeof name !== 'string' || !name) throw new PublicBridgeError('Tool name is required');
 
-    const catalog = await collectCatalog();
+    let catalog;
+    try {
+      catalog = await collectCatalog();
+    } catch {
+      throw new PublicBridgeError('Tool catalog is unavailable');
+    }
     if (catalog.ambiguousNames.has(name)) {
-      throw new Error(`Tool "${name}" is ambiguous`);
+      throw new PublicBridgeError('Tool name is ambiguous');
     }
 
     const registeredTool = catalog.routes.get(name);
-    if (!registeredTool) throw new Error(`Tool "${name}" not found`);
+    if (!registeredTool) throw new PublicBridgeError('Tool was not found');
 
     const methods = getApiMethods();
-    if (!methods) throw new Error('document.modelContext is unavailable or incomplete');
+    if (!methods) throw new PublicBridgeError('Tool catalog is unavailable');
     return Reflect.apply(methods.executeTool, api, [
       registeredTool,
       JSON.stringify(args ?? {}),
@@ -233,7 +258,6 @@
       const controller = pendingExecutions.get(message.params?.id);
       if (controller) {
         controller.abort(new DOMException('Tool call cancelled', 'AbortError'));
-        pendingExecutions.delete(message.params.id);
       }
       return;
     }
@@ -241,8 +265,8 @@
     if (message.method === 'tools/list') {
       try {
         await publishCatalog();
-      } catch (error) {
-        console.error('[WebMCP Bridge] Failed explicit tools snapshot:', error);
+      } catch {
+        diagnostics.error();
       }
       return;
     }
@@ -254,19 +278,24 @@
     const controller = new AbortController();
     pendingExecutions.set(message.id, controller);
     try {
-      const result = await executeTool(name, args, controller.signal);
+      const result = await raceWithAbort(
+        executeTool(name, args, controller.signal),
+        controller.signal
+      );
+      if (controller.signal.aborted) throw controller.signal.reason;
       if (!disposed) postToExtension({ jsonrpc: JSONRPC, id: message.id, result });
     } catch (error) {
+      const publicMessage = controller.signal.aborted
+        ? 'Tool execution cancelled'
+        : error instanceof PublicBridgeError
+          ? error.message
+          : 'Tool execution failed';
       postToExtension({
         jsonrpc: JSONRPC,
         id: message.id,
         error: {
           code: -32000,
-          message: error?.message || String(error),
-          data: {
-            name: error?.name,
-            stack: error?.stack
-          }
+          message: publicMessage
         }
       });
     } finally {
@@ -298,17 +327,15 @@
   if (methods) {
     try {
       Reflect.apply(methods.addEventListener, api, ['toolchange', scheduleRefresh]);
-      publishCatalog().catch((error) =>
-        console.error('[WebMCP Bridge] Failed initial tools snapshot:', error)
-      );
-    } catch (error) {
+      publishCatalog().catch(() => diagnostics.error());
+    } catch {
       postCatalog([], { unavailable: true });
-      console.error('[WebMCP Bridge] Failed to subscribe to document.modelContext:', error);
+      diagnostics.error();
     }
   } else {
     postCatalog([], { unavailable: true });
-    console.error('[WebMCP Bridge] document.modelContext is unavailable or incomplete');
+    diagnostics.error();
   }
 
-  console.log('[WebMCP Bridge] Ready and listening');
+  diagnostics.log();
 })();

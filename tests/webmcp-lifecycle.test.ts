@@ -133,6 +133,28 @@ describe('TabManager', () => {
       expect(mockPort.onDisconnect.addListener).toHaveBeenCalled();
     });
 
+    it('pushes only the validated log level to connected relays', () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+      mockPort.postMessage.mockClear();
+
+      lifecycle.setRelayLogLevel('debug');
+
+      expect(mockPort.postMessage).toHaveBeenCalledWith({
+        type: 'RELAY_LOG_LEVEL',
+        logLevel: 'debug',
+      });
+      expect(JSON.stringify(mockPort.postMessage.mock.calls)).not.toContain('agents');
+      expect(JSON.stringify(mockPort.postMessage.mock.calls)).not.toContain('apiKey');
+    });
+
     it('should ignore non-WebMCP port connections', () => {
       const mockPort = {
         name: 'other-port',
@@ -246,39 +268,40 @@ describe('TabManager', () => {
   });
 
   describe('Navigation Monitoring', () => {
-    it('should track navigation start and cancel pending calls', async () => {
-      // First connect a port so tool call can be sent
+    it('should revoke navigation-time capabilities while allowing an issued call to settle', async () => {
       const mockPort = {
         name: 'webmcp-content-script',
-        sender: {
-          tab: { id: 123 },
-        },
-        onMessage: {
-          addListener: vi.fn(),
-        },
-        onDisconnect: {
-          addListener: vi.fn(),
-        },
+        sender: { tab: { id: 123 }, documentId: 'retiring-document' },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
         postMessage: vi.fn(),
         disconnect: vi.fn(),
       };
-
       portHandlers.onConnect(mockPort);
+      const messageHandler = mockPort.onMessage.addListener.mock.calls[0][0];
+      const promise = lifecycle.callTool(123, 'navigation-tool', {});
+      const requestId = mockPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
 
-      // Start a tool call (it will be queued)
-      const promise = lifecycle.callTool(123, 'test-tool', {});
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
 
-      // Small delay to ensure promise is set up
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await expect(lifecycle.callTool(123, 'stale-tool', {})).rejects.toThrow(
+        'No connection to tab 123'
+      );
+      expect(
+        mockPort.postMessage.mock.calls.some(
+          (call) =>
+            call[0]?.payload?.method === 'tools/cancel' &&
+            call[0]?.payload?.params?.id === requestId
+        )
+      ).toBe(false);
 
-      // Trigger navigation which should cancel pending calls
-      navHandlers.onBeforeNavigate({
-        tabId: 123,
-        frameId: 0,
+      messageHandler({
+        type: 'webmcp',
+        payload: { jsonrpc: '2.0', id: requestId, result: 'navigation-started' },
       });
-
-      // Promise should reject
-      await expect(promise).rejects.toThrow('Tool call cancelled');
+      await expect(promise).resolves.toBe('navigation-started');
     });
 
     it('should restore the surviving document when a provisional navigation fails', async () => {
@@ -292,6 +315,10 @@ describe('TabManager', () => {
       };
       portHandlers.onConnect(mockPort);
       const messageHandler = mockPort.onMessage.addListener.mock.calls[0][0];
+      const promise = lifecycle.callTool(123, 'surviving_tool', {});
+      const requestId = mockPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
       const catalog = {
         type: 'webmcp',
         payload: {
@@ -327,6 +354,11 @@ describe('TabManager', () => {
       expect(lifecycle.getToolRegistry(123)?.tools.map(({ name }) => name)).toEqual([
         'surviving_tool',
       ]);
+      messageHandler({
+        type: 'webmcp',
+        payload: { jsonrpc: '2.0', id: requestId, result: 'still-running' },
+      });
+      await expect(promise).resolves.toBe('still-running');
     });
 
     it('should reject relay reconnections from the retiring document', async () => {
@@ -438,23 +470,23 @@ describe('TabManager', () => {
       expect(mockChrome.scripting.executeScript).not.toHaveBeenCalled();
     });
 
-    it('should skip injection for restricted URLs', async () => {
-      mockChrome.tabs.get.mockResolvedValue({
-        id: 123,
-        url: 'chrome://extensions',
-      });
+    it('should skip URLs outside manifest permissions and protected extension stores', async () => {
+      const unsupportedUrls = [
+        'chrome://extensions',
+        'chrome-extension://abc123',
+        'about:blank',
+        'file:///tmp/example.html',
+        'http://example.com',
+        'https://chromewebstore.google.com/detail/example/abc123',
+        'https://chrome.google.com/webstore/detail/example/abc123',
+        'https://microsoftedge.microsoft.com/addons/detail/example/abc123',
+      ];
 
-      await lifecycle.injectScripts(123);
+      for (const url of unsupportedUrls) {
+        mockChrome.tabs.get.mockResolvedValue({ id: 123, url });
+        await lifecycle.injectScripts(123);
+      }
 
-      expect(mockChrome.scripting.executeScript).not.toHaveBeenCalled();
-
-      // Test other restricted URLs
-      mockChrome.tabs.get.mockResolvedValue({
-        id: 123,
-        url: 'chrome-extension://abc123',
-      });
-
-      await lifecycle.injectScripts(123);
       expect(mockChrome.scripting.executeScript).not.toHaveBeenCalled();
     });
   });
@@ -571,55 +603,128 @@ describe('TabManager', () => {
       expect(result).toEqual({ success: true });
     });
 
-    it('should reject tool call on error response', async () => {
+    it('settles concurrent calls by request ID when responses arrive out of order', async () => {
       const mockPort = {
         name: 'webmcp-content-script',
-        sender: {
-          tab: { id: 123 },
-        },
-        onMessage: {
-          addListener: vi.fn(),
-        },
-        onDisconnect: {
-          addListener: vi.fn(),
-        },
+        sender: { tab: { id: 123 } },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
         postMessage: vi.fn(),
+        disconnect: vi.fn(),
       };
-
-      let messageHandler: Function | null = null;
-      mockPort.onMessage.addListener = vi.fn((handler) => {
+      let messageHandler: ((message: unknown) => void) | undefined;
+      mockPort.onMessage.addListener.mockImplementation((handler) => {
         messageHandler = handler;
       });
-
       portHandlers.onConnect(mockPort);
 
-      const promise = lifecycle.callTool(123, 'failing-tool', {});
+      const first = lifecycle.callTool(123, 'first', {});
+      const second = lifecycle.callTool(123, 'second', {});
+      const third = lifecycle.callTool(123, 'third', {});
+      const calls = mockPort.postMessage.mock.calls
+        .map(([message]) => message.payload)
+        .filter(({ method }) => method === 'tools/call');
+      const requestByName = new Map(calls.map((call) => [call.params.name, call.id]));
 
-      // Find the tools/call request (not the tools/list request)
-      const toolCallRequest = mockPort.postMessage.mock.calls.find(
-        (call) => call[0]?.payload?.method === 'tools/call'
-      );
-
-      expect(toolCallRequest).toBeDefined();
-      const requestId = toolCallRequest![0].payload.id;
-
-      // Send error response
-      if (messageHandler) {
-        (messageHandler as Function)({
+      for (const name of ['second', 'third', 'first']) {
+        messageHandler?.({
           type: 'webmcp',
           payload: {
             jsonrpc: '2.0',
-            id: requestId,
-            error: {
-              code: -32000,
-              message: 'Tool execution failed',
-            },
+            id: requestByName.get(name),
+            result: `${name}-result`,
           },
         });
       }
 
-      await expect(promise).rejects.toThrow('Tool execution failed');
+      await expect(Promise.all([first, second, third])).resolves.toEqual([
+        'first-result',
+        'second-result',
+        'third-result',
+      ]);
     });
+
+    it('should not let another tab settle a pending call by request ID', async () => {
+      const makePort = (tabId: number) => ({
+        name: 'webmcp-content-script',
+        sender: { tab: { id: tabId }, documentId: `document-${tabId}` },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      });
+      const ownerPort = makePort(123);
+      const otherPort = makePort(456);
+      portHandlers.onConnect(ownerPort);
+      portHandlers.onConnect(otherPort);
+      const ownerHandler = ownerPort.onMessage.addListener.mock.calls[0][0];
+      const otherHandler = otherPort.onMessage.addListener.mock.calls[0][0];
+      const promise = lifecycle.callTool(123, 'owned-tool', {});
+      const requestId = ownerPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
+
+      otherHandler({
+        type: 'webmcp',
+        payload: { jsonrpc: '2.0', id: requestId, result: 'wrong-tab' },
+      });
+      ownerHandler({
+        type: 'webmcp',
+        payload: { jsonrpc: '2.0', id: requestId, result: 'owning-tab' },
+      });
+
+      await expect(promise).resolves.toBe('owning-tab');
+    });
+
+    it.each([{ code: -32000, message: 'secret page-controlled failure' }, null, false, 0])(
+      'should reject every response containing an error member',
+      async (responseError) => {
+        const mockPort = {
+          name: 'webmcp-content-script',
+          sender: {
+            tab: { id: 123 },
+          },
+          onMessage: {
+            addListener: vi.fn(),
+          },
+          onDisconnect: {
+            addListener: vi.fn(),
+          },
+          postMessage: vi.fn(),
+        };
+
+        let messageHandler: Function | null = null;
+        mockPort.onMessage.addListener = vi.fn((handler) => {
+          messageHandler = handler;
+        });
+
+        portHandlers.onConnect(mockPort);
+
+        const promise = lifecycle.callTool(123, 'failing-tool', {});
+
+        // Find the tools/call request (not the tools/list request)
+        const toolCallRequest = mockPort.postMessage.mock.calls.find(
+          (call) => call[0]?.payload?.method === 'tools/call'
+        );
+
+        expect(toolCallRequest).toBeDefined();
+        const requestId = toolCallRequest![0].payload.id;
+
+        // Send error response
+        if (messageHandler) {
+          (messageHandler as Function)({
+            type: 'webmcp',
+            payload: {
+              jsonrpc: '2.0',
+              id: requestId,
+              error: responseError,
+            },
+          });
+        }
+
+        await expect(promise).rejects.toThrow('WebMCP tool execution failed');
+      }
+    );
 
     it('should forward an AI cancellation signal to the page', async () => {
       const mockPort = {
@@ -684,6 +789,24 @@ describe('TabManager', () => {
       expect(
         newPort.postMessage.mock.calls.some((call) => call[0]?.payload?.method === 'tools/cancel')
       ).toBe(false);
+    });
+
+    it('should cancel unresolved calls when their document relay disconnects', async () => {
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'closed-document' },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+      const disconnectHandler = mockPort.onDisconnect.addListener.mock.calls[0][0];
+      const promise = lifecycle.callTool(123, 'slow-tool', {});
+
+      disconnectHandler();
+
+      await expect(promise).rejects.toThrow('Tool call cancelled');
     });
 
     it('should cancel page execution when a tool call times out', async () => {
@@ -1134,6 +1257,21 @@ describe('TabManager', () => {
       await expect(promise).rejects.toThrow('Navigation failed for tab 123');
     });
 
+    it('should remove navigation listeners when the stream is cancelled', async () => {
+      const onCompleted = { addListener: vi.fn(), removeListener: vi.fn() };
+      const onErrorOccurred = { addListener: vi.fn(), removeListener: vi.fn() };
+      (mockChrome.webNavigation as any).onCompleted = onCompleted;
+      (mockChrome.webNavigation as any).onErrorOccurred = onErrorOccurred;
+      const controller = new AbortController();
+      const promise = lifecycle.waitForNavigation(123, 30000, controller.signal);
+
+      controller.abort();
+
+      await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(onCompleted.removeListener).toHaveBeenCalledOnce();
+      expect(onErrorOccurred.removeListener).toHaveBeenCalledOnce();
+    });
+
     it('should timeout after specified duration', async () => {
       vi.useFakeTimers();
 
@@ -1268,10 +1406,6 @@ describe('TabManager', () => {
     });
 
     it('should handle injection errors gracefully', async () => {
-      // Spy on log.error instead of console.error
-      const { default: log } = await import('../src/lib/logger');
-      const logSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
-
       mockChrome.tabs.get.mockResolvedValue({
         id: 123,
         url: 'https://example.com',
@@ -1279,14 +1413,8 @@ describe('TabManager', () => {
 
       mockChrome.scripting.executeScript.mockRejectedValue(new Error('Cannot access tab'));
 
-      await lifecycle.injectScripts(123);
-
-      expect(logSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to inject scripts'),
-        expect.any(Error)
-      );
-
-      logSpy.mockRestore();
+      await expect(lifecycle.injectScripts(123)).resolves.toBeUndefined();
+      expect(mockChrome.scripting.executeScript).toHaveBeenCalled();
     });
   });
 });

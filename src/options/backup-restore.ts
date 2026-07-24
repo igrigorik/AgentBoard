@@ -4,18 +4,24 @@
  */
 
 import log from '../lib/logger';
-import { ConfigStorage } from '../lib/storage/config';
-import type { StorageConfig } from '../lib/storage/config';
+import { ConfigStorage, parseStorageConfig, type StorageConfig } from '../lib/storage/config';
+import { validateCommandStorage } from '../lib/commands/storage';
+import { runStorageOperation } from '../lib/storage/operation-queue';
 import type { CommandStorage } from '../types';
 
-// Backup format version for compatibility checking
-const BACKUP_VERSION = '1.0';
+export const BACKUP_VERSION = '2.0' as const;
+const LEGACY_BACKUP_VERSION = '1.0' as const;
 
 interface BackupData {
-  version: string;
+  version: typeof BACKUP_VERSION;
   extensionVersion: string;
   timestamp: number;
-  exportedBy: string;
+  exportedBy: 'AgentBoard';
+  config: StorageConfig;
+  commands: CommandStorage;
+}
+
+export interface PreparedBackup {
   config: StorageConfig;
   commands: CommandStorage;
 }
@@ -81,24 +87,13 @@ export async function exportSettings(): Promise<void> {
  */
 export async function importSettings(file: File): Promise<void> {
   try {
-    showStatus('Importing settings...', 'info');
+    showStatus('Validating backup...', 'info');
 
-    // Read file
     const content = await readFile(file);
-    const backupData: BackupData = JSON.parse(content);
+    const prepared = prepareBackupImport(JSON.parse(content) as unknown);
 
-    // Validate format
-    if (backupData.version !== BACKUP_VERSION) {
-      throw new Error(
-        `Incompatible backup version: ${backupData.version} (expected ${BACKUP_VERSION})`
-      );
-    }
-
-    // Validate structure
-    validateBackupStructure(backupData);
-
-    // Apply atomically (all or nothing)
-    await applyBackup(backupData);
+    showStatus('Importing settings...', 'info');
+    await applyPreparedBackup(prepared);
 
     // Success
     showStatus('Settings imported successfully! Reloading...', 'success');
@@ -123,13 +118,13 @@ export async function importSettings(file: File): Promise<void> {
 /**
  * Gather all data to backup
  */
-async function gatherBackupData(): Promise<BackupData> {
-  // Get config from local storage
-  const config = await configStorage.get();
-
-  // Get commands from local storage
-  const commandsResult = await chrome.storage.local.get('slashCommands');
-  const commands: CommandStorage = commandsResult.slashCommands || { userCommands: [] };
+export async function gatherBackupData(): Promise<BackupData> {
+  // Read both keys under the same queue so import cannot split the export snapshot.
+  const { config, values } = await configStorage.getSnapshot(['slashCommands']);
+  const commands =
+    values.slashCommands === undefined
+      ? { userCommands: [] }
+      : validateCommandStorage(values.slashCommands);
 
   // Get extension version from manifest
   const manifest = chrome.runtime.getManifest();
@@ -144,47 +139,63 @@ async function gatherBackupData(): Promise<BackupData> {
   };
 }
 
-/**
- * Validate backup data structure
- */
-function validateBackupStructure(data: BackupData): void {
-  // Check required top-level fields
-  if (!data.version || !data.config || !data.commands) {
-    throw new Error('Invalid backup structure: missing required fields');
+function backupRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid backup structure');
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Validate and migrate the complete backup before the first storage mutation. */
+export function prepareBackupImport(value: unknown): PreparedBackup {
+  const backup = backupRecord(value);
+  if (
+    typeof backup.extensionVersion !== 'string' ||
+    typeof backup.timestamp !== 'number' ||
+    !Number.isFinite(backup.timestamp) ||
+    backup.timestamp < 0 ||
+    backup.exportedBy !== 'AgentBoard'
+  ) {
+    throw new Error('Invalid backup structure');
   }
 
-  // Check config structure
-  if (!Array.isArray(data.config.agents)) {
-    throw new Error('Invalid backup: config.agents must be an array');
+  if (backup.version !== LEGACY_BACKUP_VERSION && backup.version !== BACKUP_VERSION) {
+    throw new Error('Unsupported backup version');
   }
 
-  // Check commands structure
-  if (!Array.isArray(data.commands.userCommands)) {
-    throw new Error('Invalid backup: commands.userCommands must be an array');
+  const parsed = parseStorageConfig(backup.config);
+  // A v1 exporter can legitimately wrap schema-v2 config after a user rolls
+  // back to an older build. The envelope version describes the exporter, not
+  // the storage schema, so accept either validated schema under v1.
+  if (backup.version === BACKUP_VERSION && parsed.migrated) {
+    throw new Error('Invalid current backup configuration');
   }
+
+  const commands = validateCommandStorage(backup.commands);
+  return { config: parsed.config, commands };
 }
 
 /**
- * Apply backup data atomically
+ * Chrome storage has no transaction API. One validated two-key set is the
+ * narrowest commit boundary and avoids the destructive empty-state window.
  */
-async function applyBackup(data: BackupData): Promise<void> {
+export async function applyPreparedBackup(data: PreparedBackup): Promise<void> {
   try {
-    // Clear existing storage
-    await chrome.storage.local.clear();
-
-    // Restore config
-    await chrome.storage.local.set({
-      config: data.config,
+    const snapshot = globalThis.structuredClone(data);
+    await runStorageOperation(async () => {
+      // Revalidate inside the shared mutation queue, immediately before the one
+      // combined write, so no stale config mutation can overtake this commit.
+      const parsed = parseStorageConfig(snapshot.config);
+      if (parsed.migrated) throw new Error('Invalid prepared backup configuration');
+      const commands = validateCommandStorage(snapshot.commands);
+      await chrome.storage.local.set({
+        config: parsed.config,
+        slashCommands: commands,
+      });
     });
-
-    // Restore commands
-    await chrome.storage.local.set({
-      slashCommands: data.commands,
-    });
-
     log.info('[Backup] Successfully restored settings');
-  } catch (error) {
-    log.error('[Backup] Failed to apply backup:', error);
+  } catch {
+    log.error('[Backup] Failed to apply validated backup');
     throw new Error('Failed to save restored settings');
   }
 }

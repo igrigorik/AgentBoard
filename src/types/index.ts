@@ -2,19 +2,15 @@
  * Shared TypeScript type definitions
  */
 
-import type { AgentConfig } from '../lib/storage/config';
+import type { ApiProtocol } from '../lib/ai/protocol';
 
 // Individual message type interfaces
 interface GetConfigMessage {
   type: 'GET_CONFIG';
 }
 
-interface SaveConfigMessage {
-  type: 'SAVE_CONFIG';
-  config: {
-    agents?: AgentConfig[];
-    providers?: ProviderConfig[];
-  };
+interface GetLogLevelMessage {
+  type: 'GET_LOG_LEVEL';
 }
 
 interface TestConnectionMessage {
@@ -24,11 +20,10 @@ interface TestConnectionMessage {
 
 interface TestNewConnectionMessage {
   type: 'TEST_NEW_CONNECTION';
-  provider: AIProvider;
+  apiProtocol: ApiProtocol;
   apiKey?: string;
   model: string;
   endpoint?: string;
-  openaiCompatible: boolean | undefined;
 }
 
 interface PingMessage {
@@ -40,11 +35,6 @@ interface StreamChatMessage {
   message: string;
   agentId: string;
   conversationId?: string;
-}
-
-interface CancelStreamMessage {
-  type: 'CANCEL_STREAM';
-  connectionId: string;
 }
 
 interface ContextSelectionMessage {
@@ -138,12 +128,11 @@ export interface GetSiteToolHintsMessage {
 // Union type for all possible extension messages
 export type ExtensionMessage =
   | GetConfigMessage
-  | SaveConfigMessage
+  | GetLogLevelMessage
   | TestConnectionMessage
   | TestNewConnectionMessage
   | PingMessage
   | StreamChatMessage
-  | CancelStreamMessage
   | ContextSelectionMessage
   | StreamChunkMessage
   | StreamCompleteMessage
@@ -198,6 +187,11 @@ export interface MessagePart {
   mimeType?: string; // e.g., 'image/png', 'image/jpeg'
 }
 
+export interface PageContext {
+  url: string;
+  title: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -212,17 +206,9 @@ export interface ChatMessage {
     agentId?: string;
     agentName?: string;
     hasAttachments?: boolean;
+    /** Browser-owned URL/title snapshot from when this user turn entered model history. */
+    pageContext?: PageContext;
   };
-}
-
-// Provider types
-export type AIProvider = 'openai' | 'anthropic' | 'google';
-
-export interface ProviderConfig {
-  provider: AIProvider;
-  apiKey: string;
-  model: string;
-  endpoint?: string;
 }
 
 // Tool types (for MCP integration)

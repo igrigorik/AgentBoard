@@ -7,6 +7,12 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolRegistryManager } from '../src/lib/webmcp/tool-registry';
+import { FETCH_URL_TOOL_NAME } from '../src/lib/webmcp/tools/fetch';
+import { NAVIGATE_TOOL_NAME } from '../src/lib/webmcp/tools/navigate';
+
+const mocks = vi.hoisted(() => ({
+  isBuiltinToolEnabled: vi.fn(),
+}));
 
 // Mock the dependencies
 vi.mock('../src/lib/logger', () => ({
@@ -18,19 +24,23 @@ vi.mock('../src/lib/logger', () => ({
   },
 }));
 
-vi.mock('../src/lib/mcp/manager', () => ({
-  getRemoteMCPManager: vi.fn(() => ({
-    loadConfig: vi.fn(),
-    getAvailableTools: vi.fn(() => []),
-    getServerStatuses: vi.fn(() => []),
-  })),
-}));
+vi.mock('../src/lib/mcp/manager', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/mcp/manager')>();
+  return {
+    ...actual,
+    getRemoteMCPManager: vi.fn(() => ({
+      reconcile: vi.fn(),
+      getCurrentSession: vi.fn(() => actual.EMPTY_REMOTE_MCP_SESSION),
+      revoke: vi.fn(),
+    })),
+  };
+});
 
 vi.mock('../src/lib/storage/config', () => ({
   ConfigStorage: {
     getInstance: vi.fn(() => ({
       get: vi.fn().mockResolvedValue({}),
-      isBuiltinToolEnabled: vi.fn().mockResolvedValue(true),
+      isBuiltinToolEnabled: mocks.isBuiltinToolEnabled,
     })),
   },
 }));
@@ -39,7 +49,30 @@ describe('ToolRegistryManager Tab Scoping', () => {
   let registry: ToolRegistryManager;
 
   beforeEach(() => {
+    mocks.isBuiltinToolEnabled.mockResolvedValue(true);
     registry = new ToolRegistryManager();
+  });
+
+  describe('system tool registration', () => {
+    it('applies fetch and navigate enablement independently and revokes disabled tools', async () => {
+      await registry.registerSystemTools();
+      expect(registry.getToolsForTab(1)).toHaveProperty(FETCH_URL_TOOL_NAME);
+      expect(registry.getToolsForTab(1)).toHaveProperty(NAVIGATE_TOOL_NAME);
+
+      mocks.isBuiltinToolEnabled.mockImplementation(async (name: string) => {
+        return name === NAVIGATE_TOOL_NAME;
+      });
+      await registry.registerSystemTools();
+      expect(registry.getToolsForTab(1)).not.toHaveProperty(FETCH_URL_TOOL_NAME);
+      expect(registry.getToolsForTab(1)).toHaveProperty(NAVIGATE_TOOL_NAME);
+
+      mocks.isBuiltinToolEnabled.mockImplementation(async (name: string) => {
+        return name === FETCH_URL_TOOL_NAME;
+      });
+      await registry.registerSystemTools();
+      expect(registry.getToolsForTab(1)).toHaveProperty(FETCH_URL_TOOL_NAME);
+      expect(registry.getToolsForTab(1)).not.toHaveProperty(NAVIGATE_TOOL_NAME);
+    });
   });
 
   describe('getToolsForTab', () => {

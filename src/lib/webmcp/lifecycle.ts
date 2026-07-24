@@ -4,14 +4,28 @@
  */
 
 import log from '../logger';
-import type { WebMCPMessage, ToolsListChangedParams } from '../../types/index';
-import { injectUserScripts, reinjectScripts } from './script-injector';
+import type { JsonRpcResponse, WebMCPMessage, ToolsListChangedParams } from '../../types/index';
+import {
+  injectUserScripts,
+  isProtectedExtensionGalleryError,
+  reinjectScripts,
+  supportsWebMCPInjection,
+} from './script-injector';
 import { getToolRegistry } from './tool-registry';
 import { COMPILED_TOOLS } from './tools/index';
 import { matchesUrl } from './script-parser';
-import { ConfigStorage } from '../storage/config';
+import { ConfigStorage, type LogLevel } from '../storage/config';
 
 const JSONRPC = '2.0';
+
+function isJsonRpcResponse(payload: unknown): payload is JsonRpcResponse {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'id' in payload &&
+    ('result' in payload || 'error' in payload)
+  );
+}
 
 export interface PendingPromise {
   resolve: (value: unknown) => void;
@@ -55,6 +69,17 @@ export class TabManager {
     this.setupPortHandler();
     this.setupNavigationMonitor();
     this.setupTabCleanup();
+  }
+
+  /** Send only the validated logging preference into isolated relay worlds. */
+  setRelayLogLevel(logLevel: LogLevel | undefined): void {
+    for (const port of this.contentPorts.values()) {
+      try {
+        port.postMessage({ type: 'RELAY_LOG_LEVEL', logLevel: logLevel ?? 'warn' });
+      } catch {
+        log.warn('[WebMCP Lifecycle] Failed to update relay log level');
+      }
+    }
   }
 
   /**
@@ -137,9 +162,15 @@ export class TabManager {
       // owned port may mutate this tab's registry or settle its tool calls.
       port.onMessage.addListener((msg) => {
         if (this.contentPorts.get(tabId) !== port) return;
-        if (this.navigatingTabs.has(tabId)) return;
         const ownedDocumentId = this.currentDocumentIds.get(tabId);
         if (documentId && ownedDocumentId && documentId !== ownedDocumentId) return;
+
+        const payload = msg?.type === 'webmcp' ? msg.payload : undefined;
+        const isResponse = isJsonRpcResponse(payload);
+        // Navigation revokes the retiring catalog immediately, but a response for work already
+        // issued to that document remains authoritative until its relay disconnects or a new
+        // document takes ownership. Notifications stay blocked so stale tools cannot reappear.
+        if (this.navigatingTabs.has(tabId) && !isResponse) return;
         this.handleContentMessage(tabId, msg);
       });
 
@@ -229,31 +260,39 @@ export class TabManager {
    * Resolves with the final URL after onCompleted fires (main frame).
    * Rejects on navigation error or timeout.
    */
-  async waitForNavigation(tabId: number, timeoutMs: number = 30000): Promise<{ url: string }> {
+  async waitForNavigation(
+    tabId: number,
+    timeoutMs: number = 30000,
+    signal?: AbortSignal
+  ): Promise<{ url: string }> {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         chrome.webNavigation.onCompleted.removeListener(onCompleted);
         chrome.webNavigation.onErrorOccurred.removeListener(onError);
       };
-
+      const onAbort = () => {
+        cleanup();
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
       const timer = setTimeout(() => {
         cleanup();
         reject(new Error(`Navigation timeout after ${timeoutMs}ms for tab ${tabId}`));
       }, timeoutMs);
-
       const onCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
         if (details.tabId !== tabId || details.frameId !== 0) return;
         cleanup();
         resolve({ url: details.url });
       };
-
       const onError = (details: chrome.webNavigation.WebNavigationFramedErrorCallbackDetails) => {
         if (details.tabId !== tabId || details.frameId !== 0) return;
         cleanup();
         reject(new Error(`Navigation failed for tab ${tabId}: ${details.url}`));
       };
 
+      signal?.addEventListener('abort', onAbort, { once: true });
       chrome.webNavigation.onCompleted.addListener(onCompleted);
       chrome.webNavigation.onErrorOccurred.addListener(onError);
     });
@@ -269,21 +308,22 @@ export class TabManager {
     if (!payload) return;
 
     // Type guard for responses (have id and either result or error)
-    const isResponse = 'id' in payload && ('result' in payload || 'error' in payload);
+    const isResponse = isJsonRpcResponse(payload);
 
     // Type guard for notifications (have method but no id)
     const isNotification = 'method' in payload && !('id' in payload);
 
     // Handle responses (with id)
     if (isResponse) {
+      const pending = this.pendingPromises.get(payload.id);
+      // Request IDs correlate responses globally, but tab ownership must be structural rather than
+      // relying on UUID secrecy from another page that may share the same origin.
+      if (!pending || pending.tabId !== tabId) return;
       const promise = this.takePendingPromise(payload.id);
       if (promise) {
-        if ('error' in payload && payload.error) {
-          // Preserve structured error data from the page for debugging
-          const err: Error & { data?: unknown; code?: number } = new Error(payload.error.message);
-          if (payload.error.data) err.data = payload.error.data;
-          if (payload.error.code) err.code = payload.error.code;
-          promise.reject(err);
+        if ('error' in payload) {
+          // Page messages are forgeable; never trust their diagnostic text or data.
+          promise.reject(new Error('WebMCP tool execution failed'));
         } else if ('result' in payload) {
           promise.resolve(payload.result);
         }
@@ -344,11 +384,10 @@ export class TabManager {
    * Set up navigation monitoring for script injection
    */
   private setupNavigationMonitor(): void {
-    // Navigation starts - cancel in-flight operations
+    // Navigation starts - revoke the retiring catalog while issued calls finish or lose ownership.
     chrome.webNavigation.onBeforeNavigate.addListener((details) => {
       if (details.frameId !== 0) return; // Main frame only
 
-      this.cancelPendingCallsForTab(details.tabId);
       // Invalidate the old document immediately; queued messages can otherwise repopulate the
       // tab registry before its replacement relay connects. While navigation is pending, the
       // current document ID identifies and rejects reconnects from that retiring document.
@@ -526,14 +565,8 @@ export class TabManager {
       const tab = await chrome.tabs.get(tabId);
       if (!tab?.url) return;
 
-      // Skip chrome:// and other restricted URLs
-      if (
-        tab.url.startsWith('chrome://') ||
-        tab.url.startsWith('chrome-extension://') ||
-        tab.url.startsWith('edge://') ||
-        tab.url.startsWith('about:')
-      ) {
-        log.debug(`[WebMCP Lifecycle] Skipping injection for restricted URL: ${tab.url}`);
+      if (!supportsWebMCPInjection(tab.url)) {
+        log.debug('[WebMCP Lifecycle] Skipping unsupported injection target');
         return;
       }
 
@@ -577,6 +610,9 @@ export class TabManager {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg.includes('No tab with id')) {
         log.debug(`[WebMCP Lifecycle] Tab ${tabId} gone before injection (prerender/discard)`);
+      } else if (isProtectedExtensionGalleryError(error)) {
+        // Navigation can race the URL check above; browser extension stores remain protected.
+        log.debug('[WebMCP Lifecycle] Skipping protected extension gallery');
       } else {
         log.error(`[WebMCP Lifecycle] Failed to inject scripts into tab ${tabId}:`, error);
       }
@@ -712,15 +748,7 @@ export class TabManager {
       const tabUrl = tab.url;
       if (!tabId || !tabUrl) continue;
 
-      // Skip restricted URLs
-      if (
-        tabUrl.startsWith('chrome://') ||
-        tabUrl.startsWith('chrome-extension://') ||
-        tabUrl.startsWith('edge://') ||
-        tabUrl.startsWith('about:')
-      ) {
-        continue;
-      }
+      if (!supportsWebMCPInjection(tabUrl)) continue;
 
       try {
         await this.runScriptOperation(tabId, () =>

@@ -75,14 +75,14 @@ export class MCPClientService {
         tools: toolsList,
         ...(instructions && { instructions }),
       };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown connection error';
-      log.error(`Failed to connect to MCP server ${serverName}:`, error);
+    } catch {
+      log.error('MCP server connection failed');
+      await this.disconnect();
 
       return {
         connected: false,
         serverName: serverName || 'unknown',
-        error: errorMessage,
+        error: 'Connection failed',
       };
     }
   }
@@ -99,7 +99,7 @@ export class MCPClientService {
       const response = await this.client.listTools();
       return response.tools;
     } catch (error) {
-      log.error('Failed to list tools:', error);
+      log.error('MCP tool discovery failed');
       throw error;
     }
   }
@@ -107,7 +107,11 @@ export class MCPClientService {
   /**
    * Call a tool on the connected server
    */
-  async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<CallToolResult> {
     if (!this.client || !this.connected) {
       throw new Error('Client not connected');
     }
@@ -118,10 +122,10 @@ export class MCPClientService {
     };
 
     try {
-      const result = await this.client.callTool(toolCallPayload);
+      const result = await this.client.callTool(toolCallPayload, undefined, { signal });
       return result as CallToolResult;
     } catch (error) {
-      log.error(`Failed to call tool ${name}:`, error);
+      log.error('MCP tool execution failed');
       throw error;
     }
   }
@@ -137,9 +141,9 @@ export class MCPClientService {
     try {
       const response = await this.client.listResources();
       return response.resources;
-    } catch (error) {
+    } catch {
       // Resources might not be supported by all servers
-      log.warn('Failed to list resources (may not be supported):', error);
+      log.warn('MCP resource discovery failed');
       return [];
     }
   }
@@ -151,8 +155,8 @@ export class MCPClientService {
     if (this.client) {
       try {
         await this.client.close();
-      } catch (error) {
-        log.error('Error closing client:', error);
+      } catch {
+        log.error('MCP client close failed');
       }
       this.client = null;
     }

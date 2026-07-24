@@ -17,10 +17,10 @@ function makeAgent(systemPrompt: string): AgentConfig {
     id: 'test-1',
     name: 'Test Agent',
     provider: 'openai',
+    apiProtocol: 'openai-responses',
     model: 'gpt-4',
     systemPrompt,
     temperature: 0.7,
-    maxTokens: 2000,
   };
 }
 
@@ -54,9 +54,10 @@ describe('resolveSystemPrompt', () => {
     expect(result.startsWith(BASE_SYSTEM_PROMPT)).toBe(true);
   });
 
-  it('BASE_SYSTEM_PROMPT should reference <page_context> and <site_tools>', () => {
+  it('BASE_SYSTEM_PROMPT should explain turn-scoped <page_context> and current <site_tools>', () => {
     expect(BASE_SYSTEM_PROMPT).toContain('<page_context>');
-    expect(BASE_SYSTEM_PROMPT).toContain('<site_tools>');
+    expect(BASE_SYSTEM_PROMPT).toContain('captured for that turn');
+    expect(BASE_SYSTEM_PROMPT).toContain('The latest block includes <site_tools>');
   });
 
   it('BASE_SYSTEM_PROMPT should contain anti-refusal directive', () => {

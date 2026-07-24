@@ -5,8 +5,8 @@
  * Waits for full page load (onCompleted) before returning.
  *
  * Design: Factory pattern because the tool needs a tabId that's only known
- * at stream time, not at global registry initialization. The tool is injected
- * into allTools per-stream in client.ts, not registered in ToolRegistryManager.
+ * at stream time. ToolRegistry registers the factory globally and materializes
+ * a tab-bound tool for each stream.
  *
  * Lifecycle sequence:
  * 1. chrome.tabs.update(tabId, { url })
@@ -17,7 +17,9 @@
  * 6. Sidebar auto-continues with fresh tools from new page
  */
 
+import { raceWithAbort } from '../../../abort';
 import log from '../../../logger';
+import { ConfigStorage } from '../../../storage/config';
 import { getTabManager } from '../../lifecycle';
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -44,9 +46,15 @@ export function createNavigateTool(tabId: number) {
   return tool({
     description: TOOL_DESCRIPTION,
     inputSchema: navigateSchema,
-    execute: async (args) => {
+    execute: async (args, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       const { url } = args;
       log.info(`[navigate] Navigating tab ${tabId} to ${url}`);
+
+      const isEnabled = await raceWithAbort(
+        ConfigStorage.getInstance().isBuiltinToolEnabled(NAVIGATE_TOOL_NAME),
+        abortSignal
+      );
+      if (!isEnabled) throw new Error('Tool disabled');
 
       // Validate URL — only allow http/https to prevent dangerous schemes
       // (javascript:, data:, file://, chrome-extension:// etc.)
@@ -61,20 +69,32 @@ export function createNavigateTool(tabId: number) {
       // onCompleted can fire before the next microtask — registering after
       // would miss the event entirely.
       const tabManager = getTabManager();
-      const navigationPromise = tabManager.waitForNavigation(tabId);
+      const navigationController = new AbortController();
+      const abortNavigation = () => navigationController.abort();
+      if (abortSignal?.aborted) abortNavigation();
+      else abortSignal?.addEventListener('abort', abortNavigation, { once: true });
 
-      // Initiate navigation — triggers onBeforeNavigate (clears old tools)
-      await chrome.tabs.update(tabId, { url });
+      try {
+        const navigationPromise = tabManager.waitForNavigation(
+          tabId,
+          30000,
+          navigationController.signal
+        );
 
-      // Wait for navigation to complete (onCompleted for main frame)
-      const result = await navigationPromise;
+        const [, result] = await Promise.all([
+          raceWithAbort(chrome.tabs.update(tabId, { url }), abortSignal),
+          navigationPromise,
+        ]);
 
-      // Get page title after load
-      const tab = await chrome.tabs.get(tabId);
-
-      const summary = `Navigated to ${result.url}${tab.title ? ` — "${tab.title}"` : ''}`;
-      log.info(`[navigate] ${summary}`);
-      return summary;
+        const tab = await raceWithAbort(chrome.tabs.get(tabId), abortSignal);
+        const summary = `Navigated to ${result.url}${tab.title ? ` — "${tab.title}"` : ''}`;
+        log.info(`[navigate] ${summary}`);
+        return summary;
+      } finally {
+        abortSignal?.removeEventListener('abort', abortNavigation);
+        // A failed tabs.update must not leave the navigation timer/listeners alive.
+        abortNavigation();
+      }
     },
   });
 }

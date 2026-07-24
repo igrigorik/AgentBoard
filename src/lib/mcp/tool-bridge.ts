@@ -7,20 +7,19 @@ import log from '../logger';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { jsonSchemaToZod } from '../schema/jsonschema-to-zod';
-import type { Tool as MCPTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { getRemoteMCPManager } from './manager';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { RemoteMCPSession, RemoteMCPToolCapability } from './manager';
 import type { JSONSchema7 } from 'json-schema';
-
-/**
- * Convert JSON Schema to Zod schema
- * This is a simplified converter that handles common cases
- */
-// Use shared converter for consistency
 
 /**
  * Convert an MCP tool to AI SDK tool format
  */
-export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
+export function convertMCPToAISDKTool(
+  session: RemoteMCPSession,
+  capability: RemoteMCPToolCapability
+) {
+  const { tool: mcpTool } = capability;
+
   // Convert the input schema
   let zodSchema;
   try {
@@ -36,22 +35,19 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
   const toolDefinition = {
     description: mcpTool.description || `Tool: ${mcpTool.name}`,
     inputSchema: zodSchema,
-    execute: async (args: z.infer<typeof zodSchema>) => {
-      const remoteMCPManager = getRemoteMCPManager();
-
-      // MCP protocol expects an object for arguments, even if empty
-      // Convert undefined/null to empty object
-      const processedArgs =
-        args === undefined || args === null
-          ? {} // Use empty object instead of undefined/null
-          : args;
+    execute: async (
+      args: z.infer<typeof zodSchema>,
+      { abortSignal }: { abortSignal?: AbortSignal } = {}
+    ) => {
+      // MCP protocol expects an object for arguments, even if empty.
+      const processedArgs = args === undefined || args === null ? {} : args;
 
       try {
-        const result = await remoteMCPManager.executeTool({
-          toolName: mcpTool.name,
-          serverName,
-          input: processedArgs,
-        });
+        const result = await session.executeTool(capability, processedArgs, abortSignal);
+
+        // MCP uses a resolved isError result for semantic tool failures. Treat it
+        // like a thrown failure before any server-supplied diagnostic can escape.
+        if (result.isError) throw new Error('MCP tool execution failed');
 
         // Extract content from MCP result
         // Prefer structuredContent (typed data) over content (text summary)
@@ -78,83 +74,12 @@ export function convertMCPToAISDKTool(mcpTool: MCPTool, serverName: string) {
         }
 
         return result;
-      } catch (error) {
-        log.error(`Error executing MCP tool ${mcpTool.name}:`, error);
-        throw error;
+      } catch {
+        log.error('MCP tool execution failed');
+        throw new Error('MCP tool execution failed');
       }
     },
   };
 
   return tool(toolDefinition);
-}
-
-/**
- * Get all available MCP tools converted to AI SDK format
- */
-export async function getMCPToolsForAISDK() {
-  const remoteMCPManager = getRemoteMCPManager();
-  const mcpTools = remoteMCPManager.getAvailableTools();
-  const aiTools: Record<string, ReturnType<typeof convertMCPToAISDKTool>> = {};
-
-  // Get server names for each tool
-  // This is a simplified approach - in production you might want to track this better
-  const serverStatuses = remoteMCPManager.getServerStatuses();
-
-  for (const mcpTool of mcpTools) {
-    // Find which server has this tool
-    let serverName = '';
-    for (const status of serverStatuses) {
-      if (status.tools.some((t) => t.name === mcpTool.name)) {
-        serverName = status.name;
-        break;
-      }
-    }
-
-    if (serverName) {
-      // Use tool name as key to avoid duplicates
-      aiTools[mcpTool.name] = convertMCPToAISDKTool(mcpTool, serverName);
-    }
-  }
-
-  return aiTools;
-}
-
-/**
- * Load MCP configuration and initialize tools
- */
-export async function initializeMCPTools() {
-  try {
-    log.info('[Tool Bridge] Initializing MCP tools...');
-
-    // Use chrome.storage directly in service worker context
-    const result = await chrome.storage.local.get(['config']);
-    const config = result.config || { agents: [], mcpConfig: undefined };
-
-    log.info('[Tool Bridge] Retrieved config:', {
-      hasMcpConfig: !!config.mcpConfig,
-      serverCount: config.mcpConfig?.mcpServers?.length || 0,
-    });
-
-    if (config.mcpConfig && config.mcpConfig.mcpServers.length > 0) {
-      log.info(
-        '[Tool Bridge] Loading MCP servers:',
-        config.mcpConfig.mcpServers.map((s: { name: string }) => s.name)
-      );
-
-      const remoteMCPManager = getRemoteMCPManager();
-      const statuses = await remoteMCPManager.loadConfig(config.mcpConfig);
-
-      log.info('[Tool Bridge] Server connection statuses:', statuses);
-
-      const tools = await getMCPToolsForAISDK();
-      log.info('[Tool Bridge] Available tools after initialization:', Object.keys(tools));
-
-      return tools;
-    }
-
-    return {};
-  } catch (error) {
-    log.error('[Tool Bridge] Error initializing MCP tools:', error);
-    return {};
-  }
 }
