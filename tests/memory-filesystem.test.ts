@@ -61,13 +61,47 @@ describe('MemoryFilesystem', () => {
     }
   });
 
-  it('rejects invalid paths and file/directory type mismatches', async () => {
+  it('rejects invalid paths, patterns, and file/directory type mismatches', async () => {
     const { filesystem } = await setupMemory();
 
     for (const path of ['/memory/a.md', '../outside.md', 'memory//a.md', 'memory\\a.md']) {
       await expectMemoryError(filesystem.readFile(path), 'INVALID_PATH');
     }
+    for (const pattern of ['', 'memory/*.md', 'memory\\*.md', '\0', 'x'.repeat(256)]) {
+      await expectMemoryError(filesystem.listFiles('memory', pattern), 'INVALID_PATTERN');
+    }
     await expectMemoryError(filesystem.listFiles('MEMORY.md'), 'NOT_A_DIRECTORY');
+  });
+
+  it('filters immediate entries with case-sensitive basename globs', async () => {
+    const { filesystem } = await setupMemory();
+    await filesystem.writeFile('memory/2026-07-01.md', 'first');
+    await filesystem.writeFile('memory/2026-07-02.md', 'second');
+    await filesystem.writeFile('memory/2026-06-30.md', 'previous');
+    await filesystem.writeFile('memory/archive/2026-07-03.md', 'nested');
+    await filesystem.writeFile('memory/UPPER.MD', 'upper');
+
+    await expect(filesystem.listFiles('memory', '2026-07-??.md')).resolves.toMatchObject({
+      entries: [
+        { path: 'memory/2026-07-01.md', type: 'file' },
+        { path: 'memory/2026-07-02.md', type: 'file' },
+      ],
+      truncated: false,
+    });
+    const july = await filesystem.listFiles('memory', '*-07-*.md');
+    expect(july.entries.map((entry) => entry.path)).toEqual([
+      'memory/2026-07-01.md',
+      'memory/2026-07-02.md',
+    ]);
+    const markdown = await filesystem.listFiles('memory', '*.md');
+    expect(markdown.entries.map((entry) => entry.path)).toEqual([
+      'memory/2026-06-30.md',
+      'memory/2026-07-01.md',
+      'memory/2026-07-02.md',
+    ]);
+    await expect(filesystem.listFiles('memory', 'arch*')).resolves.toMatchObject({
+      entries: [{ path: 'memory/archive', type: 'directory' }],
+    });
   });
 
   it('requires current revisions and lets external edits win', async () => {
@@ -98,6 +132,33 @@ describe('MemoryFilesystem', () => {
     );
     expect(replaced.created).toBe(false);
     expect((await filesystem.readFile('memory/decision.md')).content).toBe('version two');
+  });
+
+  it('rechecks authority immediately before committing writes and deletes', async () => {
+    const { filesystem } = await setupMemory();
+    const original = await filesystem.writeFile('memory/protected.md', 'original');
+    let authorityChecks = 0;
+
+    await expectMemoryError(
+      filesystem.writeFile(
+        'memory/protected.md',
+        'late replacement',
+        original.revision,
+        () => ++authorityChecks === 1
+      ),
+      'OPERATION_FAILED'
+    );
+    const preserved = await filesystem.readFile('memory/protected.md');
+    expect(preserved.content).toBe('original');
+
+    await expectMemoryError(
+      filesystem.deleteFile('memory/protected.md', preserved.revision, () => false),
+      'OPERATION_FAILED'
+    );
+    await expect(filesystem.readFile('memory/protected.md')).resolves.toMatchObject({
+      content: 'original',
+      revision: preserved.revision,
+    });
   });
 
   it('deletes only revision-matched files under memory', async () => {
@@ -150,6 +211,10 @@ describe('MemoryFilesystem', () => {
     const listing = await filesystem.listFiles('memory');
     expect(listing.truncated).toBe(true);
     expect(listing.entries).toHaveLength(MAX_LIST_ENTRIES);
+    await expect(filesystem.listFiles('memory', '200.md')).resolves.toMatchObject({
+      entries: [{ path: 'memory/200.md', type: 'file' }],
+      truncated: false,
+    });
   });
 
   it('uses the smaller MEMORY.md bound consistently for reads and writes', async () => {

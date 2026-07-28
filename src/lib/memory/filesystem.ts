@@ -5,6 +5,9 @@ export const MEMORY_DIRECTORY = 'memory';
 export const MAX_MEMORY_FILE_BYTES = 256 * 1024;
 export const MAX_AUTOLOADED_MEMORY_BYTES = 64 * 1024;
 export const MAX_LIST_ENTRIES = 200;
+export const MAX_LIST_PATTERN_LENGTH = 255;
+
+export type MemoryPermissionMode = 'read' | 'readwrite';
 
 export interface MemoryFile {
   readonly size: number;
@@ -31,10 +34,15 @@ export interface MemoryDirectoryHandle {
   getFileHandle(name: string, options?: { create?: boolean }): Promise<MemoryFileHandle>;
   removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
   entries(): AsyncIterableIterator<[string, MemoryDirectoryHandle | MemoryFileHandle]>;
+  isSameEntry(other: MemoryDirectoryHandle): Promise<boolean>;
+  resolve(possibleDescendant: MemoryDirectoryHandle): Promise<string[] | null>;
+  queryPermission(options?: { mode?: MemoryPermissionMode }): Promise<PermissionState>;
+  requestPermission(options?: { mode?: MemoryPermissionMode }): Promise<PermissionState>;
 }
 
 export type MemoryFileErrorCode =
   | 'INVALID_PATH'
+  | 'INVALID_PATTERN'
   | 'PATH_NOT_FOUND'
   | 'NOT_A_FILE'
   | 'NOT_A_DIRECTORY'
@@ -57,6 +65,8 @@ function memoryFileErrorMessage(code: MemoryFileErrorCode): string {
   switch (code) {
     case 'INVALID_PATH':
       return 'Invalid memory path. Use a root-relative path without empty, dot, or parent segments.';
+    case 'INVALID_PATTERN':
+      return 'Invalid file-list pattern. Use a basename glob with literal characters, * and ?, without path separators.';
     case 'PATH_NOT_FOUND':
       return 'The requested memory path does not exist.';
     case 'NOT_A_FILE':
@@ -133,6 +143,50 @@ function parsePath(path: string, allowRoot: boolean): string[] {
     throw new MemoryFileError('INVALID_PATH');
   }
   return segments;
+}
+
+function validatePattern(pattern: string | undefined): string | undefined {
+  if (pattern === undefined) return undefined;
+  if (
+    typeof pattern !== 'string' ||
+    pattern.length === 0 ||
+    pattern.length > MAX_LIST_PATTERN_LENGTH ||
+    pattern.includes('\0') ||
+    pattern.includes('/') ||
+    pattern.includes('\\')
+  ) {
+    throw new MemoryFileError('INVALID_PATTERN');
+  }
+  return pattern;
+}
+
+// Keep filtering predictable and ReDoS-free: only basename literals, * and ? are special.
+function matchesPattern(name: string, pattern: string): boolean {
+  const nameCharacters = [...name];
+  const patternCharacters = [...pattern];
+  let nameIndex = 0;
+  let patternIndex = 0;
+  let starIndex = -1;
+  let starMatchIndex = 0;
+
+  while (nameIndex < nameCharacters.length) {
+    const token = patternCharacters[patternIndex];
+    if (token === '?' || token === nameCharacters[nameIndex]) {
+      nameIndex++;
+      patternIndex++;
+    } else if (token === '*') {
+      starIndex = patternIndex++;
+      starMatchIndex = nameIndex;
+    } else if (starIndex >= 0) {
+      patternIndex = starIndex + 1;
+      nameIndex = ++starMatchIndex;
+    } else {
+      return false;
+    }
+  }
+
+  while (patternCharacters[patternIndex] === '*') patternIndex++;
+  return patternIndex === patternCharacters.length;
 }
 
 function canonicalPath(segments: string[]): string {
@@ -228,11 +282,16 @@ async function readHandle(
   return { path, content, revision: await digest(bytes), bytes: bytes.byteLength };
 }
 
-async function writeHandle(handle: MemoryFileHandle, content: string): Promise<void> {
+async function writeHandle(
+  handle: MemoryFileHandle,
+  content: string,
+  isAuthorized: () => boolean = () => true
+): Promise<void> {
   let writable: MemoryWritable | undefined;
   try {
     writable = await handle.createWritable({ keepExistingData: false });
     await writable.write(content);
+    if (!isAuthorized()) throw new MemoryFileError('OPERATION_FAILED');
     await writable.close();
   } catch {
     try {
@@ -260,14 +319,16 @@ export async function initializeMemoryRoot(root: MemoryDirectoryHandle): Promise
 export class MemoryFilesystem {
   constructor(readonly root: MemoryDirectoryHandle) {}
 
-  async listFiles(path = '.'): Promise<MemoryListResult> {
+  async listFiles(path = '.', pattern?: string): Promise<MemoryListResult> {
     const segments = parsePath(path, true);
+    const basenamePattern = validatePattern(pattern);
     const directory = await getDirectory(this.root, segments);
     const entries: MemoryListEntry[] = [];
     let truncated = false;
 
     try {
       for await (const [name, handle] of directory.entries()) {
+        if (basenamePattern !== undefined && !matchesPattern(name, basenamePattern)) continue;
         if (entries.length === MAX_LIST_ENTRIES) {
           truncated = true;
           break;
@@ -302,10 +363,27 @@ export class MemoryFilesystem {
     }
   }
 
+  async validateLayout(): Promise<void> {
+    // readMemory() validates the companion MEMORY.md file immediately after this check.
+    try {
+      await getDirectory(this.root, [MEMORY_DIRECTORY]);
+    } catch (error) {
+      if (!(error instanceof MemoryFileError) || error.code !== 'PATH_NOT_FOUND') throw error;
+      // A missing optional memory/ entry and a deleted root both surface NotFoundError.
+      // Probe the root so a dead mount cannot silently degrade to empty memory.
+      try {
+        for await (const _entry of this.root.entries()) break;
+      } catch {
+        throw new MemoryFileError('OPERATION_FAILED');
+      }
+    }
+  }
+
   async writeFile(
     path: string,
     content: string,
-    expectedRevision?: string
+    expectedRevision?: string,
+    isAuthorized: () => boolean = () => true
   ): Promise<MemoryFileSnapshot & { created: boolean }> {
     const segments = parsePath(path, false);
     const normalized = canonicalPath(segments);
@@ -332,8 +410,9 @@ export class MemoryFilesystem {
         throw new MemoryFileError('REVISION_CONFLICT');
       }
 
+      if (!isAuthorized()) throw new MemoryFileError('OPERATION_FAILED');
       const handle = await getFileHandle(this.root, segments, true);
-      await writeHandle(handle, content);
+      await writeHandle(handle, content, isAuthorized);
       // Return the bytes actually on disk in case an external editor raced the write.
       return { ...(await readHandle(handle, normalized, maxBytes)), created: !existing };
     });
@@ -341,7 +420,8 @@ export class MemoryFilesystem {
 
   async deleteFile(
     path: string,
-    expectedRevision: string
+    expectedRevision: string,
+    isAuthorized: () => boolean = () => true
   ): Promise<{ path: string; deleted: true }> {
     const segments = parsePath(path, false);
     const normalized = canonicalPath(segments);
@@ -355,6 +435,7 @@ export class MemoryFilesystem {
       }
 
       const parent = await getDirectory(this.root, segments.slice(0, -1));
+      if (!isAuthorized()) throw new MemoryFileError('OPERATION_FAILED');
       try {
         await parent.removeEntry(finalSegment(segments), { recursive: false });
       } catch {

@@ -17,6 +17,7 @@ import {
   type RemoteMCPManager,
   type RemoteMCPSession,
 } from '../mcp/manager';
+import { RESERVED_MEMORY_TOOL_NAMES } from '../memory/tool-names';
 import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
 import { ConfigStorage, type StorageConfig } from '../storage/config';
@@ -132,6 +133,10 @@ export class ToolRegistryManager {
     const isTabTool = toolWithMeta.source === 'site';
     if (isTabTool && !/^tab-\d+$/.test(toolWithMeta.origin || '')) {
       throw new Error(`Site tool "${name}" requires a tab-scoped origin`);
+    }
+    if (RESERVED_MEMORY_TOOL_NAMES.has(name) && toolWithMeta.source !== 'system') {
+      log.warn('[ToolRegistry] Refusing to register a reserved memory tool name');
+      return;
     }
     const storageKey = isTabTool ? `${toolWithMeta.origin}\0${name}` : name;
     const existing = this.tools.get(storageKey);
@@ -273,7 +278,10 @@ export class ToolRegistryManager {
   isProtectedToolName(name: string): boolean {
     const global = this.tools.get(name);
     return (
-      global?.source === 'system' || global?.source === 'remote' || this.tabBoundFactories.has(name)
+      global?.source === 'system' ||
+      global?.source === 'remote' ||
+      this.tabBoundFactories.has(name) ||
+      RESERVED_MEMORY_TOOL_NAMES.has(name)
     );
   }
 

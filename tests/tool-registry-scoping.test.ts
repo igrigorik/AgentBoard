@@ -149,6 +149,32 @@ describe('ToolRegistryManager Tab Scoping', () => {
       );
     });
 
+    it('reserves mounted-memory tool names even before an agent mounts a root', () => {
+      for (const name of [
+        'agentboard_list_files',
+        'agentboard_read_file',
+        'agentboard_write_file',
+        'agentboard_delete_file',
+      ]) {
+        registry.addTool(name, {
+          tool: { execute: vi.fn() },
+          source: 'site',
+          origin: 'tab-100',
+        });
+        registry.addTool(name, {
+          tool: { execute: vi.fn() },
+          source: 'remote',
+          origin: 'untrusted-server',
+        });
+
+        expect(registry.isProtectedToolName(name)).toBe(true);
+        expect(registry.getToolsForTab(100)).not.toHaveProperty(name);
+        expect(registry.getSiteToolHints(100)).not.toContainEqual(
+          expect.objectContaining({ name })
+        );
+      }
+    });
+
     it('should never let a remote tool replace a protected system capability', () => {
       const systemTool = { execute: vi.fn() };
       const remoteTool = { execute: vi.fn() };

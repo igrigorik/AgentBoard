@@ -1,3 +1,4 @@
+import type { MemoryBinding, MemoryBindingRepository } from '../../src/lib/memory/bindings';
 import type {
   MemoryDirectoryHandle,
   MemoryFile,
@@ -51,6 +52,9 @@ class FakeMemoryFileHandle implements MemoryFileHandle {
 export class FakeMemoryDirectoryHandle implements MemoryDirectoryHandle {
   readonly kind = 'directory' as const;
   private readonly children = new Map<string, FakeMemoryDirectoryHandle | FakeMemoryFileHandle>();
+  private requestedPermission?: PermissionState;
+
+  private permission: PermissionState = 'granted';
 
   constructor(readonly name: string) {}
 
@@ -95,6 +99,37 @@ export class FakeMemoryDirectoryHandle implements MemoryDirectoryHandle {
     yield* this.children.entries();
   }
 
+  isSameEntry(other: MemoryDirectoryHandle): Promise<boolean> {
+    return Promise.resolve(other === this);
+  }
+
+  async resolve(possibleDescendant: MemoryDirectoryHandle): Promise<string[] | null> {
+    if (possibleDescendant === this) return [];
+    for (const [name, child] of this.children) {
+      if (child.kind !== 'directory') continue;
+      const descendantPath = await child.resolve(possibleDescendant);
+      if (descendantPath) return [name, ...descendantPath];
+    }
+    return null;
+  }
+
+  queryPermission(): Promise<PermissionState> {
+    return Promise.resolve(this.permission);
+  }
+
+  requestPermission(): Promise<PermissionState> {
+    if (this.requestedPermission) this.permission = this.requestedPermission;
+    return Promise.resolve(this.permission);
+  }
+
+  setPermission(permission: PermissionState): void {
+    this.permission = permission;
+  }
+
+  setRequestedPermission(permission: PermissionState): void {
+    this.requestedPermission = permission;
+  }
+
   async writeExternal(path: string, content: string | Uint8Array): Promise<void> {
     const segments = path.split('/');
     let directory: FakeMemoryDirectoryHandle = this;
@@ -110,5 +145,25 @@ export class FakeMemoryDirectoryHandle implements MemoryDirectoryHandle {
     for (const segment of path.split('/')) {
       directory = await directory.getDirectoryHandle(segment, { create: true });
     }
+  }
+}
+
+export class InMemoryBindingRepository implements MemoryBindingRepository {
+  readonly bindings = new Map<string, MemoryBinding>();
+
+  get(agentId: string): Promise<MemoryBinding | undefined> {
+    return Promise.resolve(this.bindings.get(agentId));
+  }
+
+  list(): Promise<MemoryBinding[]> {
+    return Promise.resolve([...this.bindings.values()]);
+  }
+
+  async put(binding: MemoryBinding): Promise<void> {
+    this.bindings.set(binding.agentId, binding);
+  }
+
+  async delete(agentId: string): Promise<void> {
+    this.bindings.delete(agentId);
   }
 }
