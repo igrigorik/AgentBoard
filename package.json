@@ -27,11 +27,11 @@
     "lint:fix": "eslint . --ext ts,tsx --fix",
     "lint:strict": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\" \"*.{json,md}\"",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run test",
-    "check:generated": "git diff --exit-code --name-only -- src/lib/webmcp/tools/registry.ts src/lib/webmcp/builtin-sources.ts",
+    "check": "pnpm run typecheck && pnpm run lint:strict && pnpm run test",
+    "check:generated": "git diff --exit-code HEAD -- src/lib/webmcp/tools/registry.ts src/lib/webmcp/builtin-sources.ts",
     "clean": "rm -rf dist release",
     "prerelease": "pnpm run clean && pnpm run check",
-    "release": "pnpm run build:release && pnpm run check:generated && pnpm run test:browser:built && pnpm run test:browser:mv3:built && node scripts/package-release.js",
+    "release": "pnpm run build:release && pnpm run check:generated && node scripts/package-release.js --stamp && pnpm run test:browser:built && pnpm run test:browser:mv3:built && node scripts/package-release.js",
     "release:github": "node scripts/github-release.js",
     "postinstall": "husky || true"
   },
@@ -74,7 +74,7 @@
   },
   "packageManager": "pnpm@10.28.0",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.10.0"
   },
   "lint-staged": {
     "*.{ts,tsx}": [

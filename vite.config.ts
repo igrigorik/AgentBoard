@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import { crx } from '@crxjs/vite-plugin';
 import manifest from './manifest.json' with { type: 'json' };
 import pkg from './package.json' with { type: 'json' };
-import path from 'path';
+import path from 'node:path';
 import { webmcpCompilerPlugin } from './scripts/vite-plugin-webmcp-compiler';
 
 // Single source of truth: inject version from package.json into manifest
@@ -10,6 +10,7 @@ const manifestWithVersion = {
   ...manifest,
   version: pkg.version,
 };
+const isReleaseBuild = process.env.RELEASE === '1';
 
 export default defineConfig({
   plugins: [
@@ -27,6 +28,8 @@ export default defineConfig({
     ],
   },
   build: {
+    // Never let a prior release stamp survive into a new build.
+    emptyOutDir: true,
     // Chrome extensions need to output multiple entry points
     rollupOptions: {
       input: {
@@ -58,8 +61,8 @@ export default defineConfig({
     chunkSizeWarningLimit: 650,
     // Chrome extensions have stricter CSP, can't use inline scripts
     // Only minify for release builds (`pnpm run build:release`).
-    minify: process.env.RELEASE ? 'terser' : false,
-    terserOptions: process.env.RELEASE
+    minify: isReleaseBuild ? 'terser' : false,
+    terserOptions: isReleaseBuild
       ? {
           format: {
             // Remove all comments in production
@@ -68,7 +71,7 @@ export default defineConfig({
         }
       : undefined,
     // Generate source maps for dev, exclude for release (smaller package, protects source)
-    sourcemap: !process.env.RELEASE,
+    sourcemap: !isReleaseBuild,
   },
   server: {
     port: 5173,

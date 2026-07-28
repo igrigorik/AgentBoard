@@ -1,140 +1,203 @@
 #!/usr/bin/env node
 
 /**
- * Package AgentBoard extension for Chrome Web Store release
- * 
- * This script:
- * 1. Reads version from package.json (single source of truth)
- * 2. Syncs version to dist/manifest.json
- * 3. Creates release/agentboard-{version}.zip
- * 4. Includes dist contents + LICENSE, README.md, PRIVACY.md
- * 5. Excludes source maps and duplicate assets
- * 
- * WHY: Ensures consistent versioning and clean release artifacts
- * TRADE-OFF: Extra build step, but prevents manual packaging errors
+ * Stamp one clean tagged build before browser tests, then package only those
+ * unchanged bytes. The embedded inventory is a provenance receipt, not a
+ * signature or reproducible-build claim.
  */
 
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import archiver from 'archiver';
+import {
+  RELEASE_METADATA_FILE,
+  RELEASE_SOURCE_FILES,
+  resolveLocalReleaseIdentity,
+} from './release-identity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
-
-// Verify dist exists
 const distDir = path.join(rootDir, 'dist');
-if (!fs.existsSync(distDir)) {
-  console.error('✗ dist/ directory not found. Run `pnpm run build:release` first.');
-  process.exit(1);
-}
-
-// Read version from package.json (single source of truth)
-const pkgPath = path.join(rootDir, 'package.json');
-const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-const version = pkg.version;
-
-console.log(`Packaging AgentBoard v${version}...`);
-
-// Verify manifest has correct version (should be injected by vite build)
-const manifestPath = path.join(distDir, 'manifest.json');
-if (!fs.existsSync(manifestPath)) {
-  console.error('✗ dist/manifest.json not found. Build may have failed.');
-  process.exit(1);
-}
-
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-if (manifest.version !== version) {
-  console.error(`✗ Version mismatch: manifest.json has ${manifest.version}, expected ${version}`);
-  console.error('  This should not happen. Check vite.config.ts version injection.');
-  process.exit(1);
-}
-
-// Create release directory
 const releaseDir = path.join(rootDir, 'release');
-if (!fs.existsSync(releaseDir)) {
-  fs.mkdirSync(releaseDir, { recursive: true });
-}
+const stampOnly = process.argv[2] === '--stamp';
 
-// Package the extension
-const zipPath = path.join(releaseDir, `agentboard-${version}.zip`);
-const output = fs.createWriteStream(zipPath);
-const archive = archiver('zip', {
-  zlib: { level: 9 } // Maximum compression
-});
-
-// Error handling
-archive.on('error', (err) => {
-  console.error('✗ Archiving failed:', err);
+function fail(message) {
+  console.error(`✗ ${message}`);
   process.exit(1);
-});
+}
 
-archive.on('warning', (err) => {
-  if (err.code === 'ENOENT') {
-    console.warn('⚠ Warning:', err);
-  } else {
-    throw err;
-  }
-});
+if (process.argv.length > (stampOnly ? 3 : 2)) fail('Usage: package-release.js [--stamp]');
 
-archive.pipe(output);
-
-// Add dist files (excluding source maps and duplicate assets)
-let filesAdded = 0;
-let bytesAdded = 0;
-
-archive.directory(distDir, false, (entry) => {
-  // Exclude source maps (not needed for production, reduces size)
-  if (entry.name.endsWith('.map')) {
-    return false;
-  }
-  // Exclude duplicate public/ directory (crx plugin issue)
-  // Icons are already in dist/icons/
-  if (entry.name.startsWith('public/')) {
-    return false;
-  }
-  // Exclude macOS cruft
-  if (entry.name === '.DS_Store' || entry.name.includes('/.DS_Store')) {
-    return false;
-  }
-
-  filesAdded++;
-  bytesAdded += entry.stats?.size || 0;
-  return entry;
-});
-
-// Add required root files for Chrome Web Store
-const rootFiles = ['LICENSE', 'README.md', 'PRIVACY.md'];
-for (const file of rootFiles) {
-  const filePath = path.join(rootDir, file);
-  if (fs.existsSync(filePath)) {
-    archive.file(filePath, { name: file });
-    filesAdded++;
-    bytesAdded += fs.statSync(filePath).size;
-  } else {
-    console.warn(`⚠ ${file} not found, skipping`);
+function readJson(file, label) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    fail(`${label} is missing or invalid: ${path.relative(rootDir, file)}`);
   }
 }
 
-archive.finalize();
+function excluded(relativePath) {
+  const segments = relativePath.split('/');
+  return (
+    relativePath === RELEASE_METADATA_FILE ||
+    segments[0] === 'public' ||
+    segments.includes('.DS_Store') ||
+    relativePath.endsWith('.map')
+  );
+}
 
-output.on('close', () => {
-  const totalBytes = archive.pointer();
-  const totalMB = (totalBytes / 1024 / 1024).toFixed(2);
+function snapshotDist() {
+  if (!fs.existsSync(distDir)) fail('dist/ is missing. Run the release build first.');
+  const files = [];
 
-  console.log(`✓ Release package created: agentboard-${version}.zip`);
-  console.log(`  Files: ${filesAdded}`);
-  console.log(`  Size: ${totalMB} MB`);
-  console.log(`  Location: release/agentboard-${version}.zip`);
-
-  // Chrome Web Store has a 128MB limit, warn if getting close
-  if (totalBytes > 100 * 1024 * 1024) {
-    console.warn(`⚠ Package size is large (${totalMB} MB). Chrome Web Store limit is 128 MB.`);
+  function visit(directory, prefix = '') {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) fail(`Release build contains a symbolic link: ${relativePath}`);
+      if (!relativePath || relativePath.includes('\\') || /[\x00-\x1f\x7f]/.test(relativePath)) {
+        fail(`Release build contains an unsafe path: ${relativePath}`);
+      }
+      if (entry.isDirectory()) {
+        if (!excluded(relativePath)) visit(absolutePath, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) fail(`Release build contains a special file: ${relativePath}`);
+      if (!excluded(relativePath))
+        files.push({ path: relativePath, bytes: fs.readFileSync(absolutePath) });
+    }
   }
 
-  console.log('\nNext steps:');
-  console.log('  1. Test the packaged extension locally');
-  console.log('  2. Upload to Chrome Web Store Developer Dashboard');
-  console.log('  3. Tag release: git tag v' + version);
-});
+  visit(distDir);
+  files.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return files;
+}
 
+function inventory(files) {
+  return files.map((file) => ({
+    path: file.path,
+    size: file.bytes.byteLength,
+    sha256: createHash('sha256').update(file.bytes).digest('hex'),
+  }));
+}
+
+function metadataBytes(identity, files) {
+  return Buffer.from(
+    `${JSON.stringify(
+      {
+        formatVersion: 1,
+        version: identity.version,
+        tag: identity.tag,
+        sourceCommit: identity.sourceCommit,
+        files: inventory(files),
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+function taggedFile(sourceCommit, file) {
+  try {
+    return execFileSync('git', ['show', `${sourceCommit}:${file}`], { cwd: rootDir });
+  } catch {
+    fail(`Required release file is missing from ${sourceCommit}: ${file}`);
+  }
+}
+
+const pkg = readJson(path.join(rootDir, 'package.json'), 'package.json');
+let identity;
+try {
+  identity = resolveLocalReleaseIdentity(rootDir, pkg.version);
+} catch (error) {
+  fail(error instanceof Error ? error.message : 'Release identity is invalid.');
+}
+
+const files = snapshotDist();
+const manifestFile = files.find((file) => file.path === 'manifest.json');
+let manifest;
+try {
+  manifest = JSON.parse(manifestFile?.bytes.toString('utf8') ?? '');
+} catch {
+  fail('release manifest is missing or invalid: dist/manifest.json');
+}
+if (manifest.version !== identity.version) {
+  fail(
+    `Version mismatch: dist/manifest.json has ${manifest.version}, expected ${identity.version}.`
+  );
+}
+
+const expectedMetadata = metadataBytes(identity, files);
+const metadataPath = path.join(distDir, RELEASE_METADATA_FILE);
+if (stampOnly) {
+  fs.writeFileSync(metadataPath, expectedMetadata);
+  console.log(`✓ Stamped ${files.length} release payload files for ${identity.tag}`);
+  process.exit(0);
+}
+
+let stampedMetadata;
+try {
+  stampedMetadata = fs.readFileSync(metadataPath);
+} catch {
+  fail('Release metadata is missing. Run package-release.js --stamp before browser tests.');
+}
+if (!stampedMetadata.equals(expectedMetadata)) {
+  fail('Release payload changed after it was stamped. Rebuild and rerun browser tests.');
+}
+
+const entries = new Map(files.map((file) => [file.path, file.bytes]));
+entries.set(RELEASE_METADATA_FILE, stampedMetadata);
+for (const file of RELEASE_SOURCE_FILES) {
+  if (entries.has(file)) fail(`Duplicate release entry: ${file}`);
+  entries.set(file, taggedFile(identity.sourceCommit, file));
+}
+
+fs.mkdirSync(releaseDir, { recursive: true });
+const zipName = `agentboard-${identity.version}.zip`;
+const zipPath = path.join(releaseDir, zipName);
+const checksumPath = `${zipPath}.sha256`;
+fs.rmSync(zipPath, { force: true });
+fs.rmSync(checksumPath, { force: true });
+
+const output = fs.createWriteStream(zipPath);
+const archive = archiver('zip', { zlib: { level: 9 } });
+const completed = new Promise((resolve, reject) => {
+  output.on('close', resolve);
+  output.on('error', reject);
+  archive.on('error', reject);
+  archive.on('warning', reject);
+});
+archive.pipe(output);
+for (const [name, bytes] of entries) archive.append(bytes, { name });
+
+try {
+  await Promise.all([archive.finalize(), completed]);
+} catch (error) {
+  output.destroy();
+  fs.rmSync(zipPath, { force: true });
+  fail(`Archiving failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+}
+
+const zipBytes = fs.readFileSync(zipPath);
+const checksum = createHash('sha256').update(zipBytes).digest('hex');
+try {
+  fs.writeFileSync(checksumPath, `${checksum}  ${zipName}\n`, { flag: 'wx' });
+} catch (error) {
+  fs.rmSync(zipPath, { force: true });
+  fs.rmSync(checksumPath, { force: true });
+  fail(`Checksum creation failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+}
+
+console.log(`✓ Release package: release/${zipName}`);
+console.log(`✓ SHA-256: ${checksum}`);
+console.log(`  Source: ${identity.sourceCommit} (${identity.tag})`);
+console.log(`  Files: ${entries.size}`);
+console.log(`  ZIP size: ${(zipBytes.byteLength / 1024 / 1024).toFixed(2)} MB`);
+if (zipBytes.byteLength > 100 * 1024 * 1024) {
+  console.warn('⚠ Package is approaching the Chrome Web Store 128 MB limit.');
+}
+console.log(`\nVerify: (cd release && shasum -a 256 -c ${zipName}.sha256)`);
+console.log('Push the exact commit and tag only after explicit approval.');

@@ -5,6 +5,7 @@ node_modules/
 
 # Build outputs
 dist/
+/release/
 *.crx
 *.pem
 *.zip
