@@ -1,9 +1,13 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
+  chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -36,13 +40,16 @@ function repository(): string {
 function releaseRepository(tagKind: 'annotated' | 'lightweight' | 'branch' = 'annotated'): string {
   const directory = repository();
   mkdirSync(path.join(directory, 'scripts'));
-  for (const file of ['package-release.js', 'release-identity.js']) {
+  for (const file of ['package-release.js', 'release-identity.js', 'github-release.js']) {
     cpSync(path.join(projectRoot, 'scripts', file), path.join(directory, 'scripts', file));
   }
   for (const file of ['LICENSE', 'README.md', 'PRIVACY.md']) {
     writeFileSync(path.join(directory, file), `${file} at reviewed commit\n`);
   }
-  writeFileSync(path.join(directory, 'package.json'), '{"version":"9.9.9"}\n');
+  writeFileSync(
+    path.join(directory, 'package.json'),
+    '{"version":"9.9.9","repository":{"url":"https://github.com/example/agentboard.git"}}\n'
+  );
   writeFileSync(path.join(directory, '.gitignore'), 'dist/\nrelease/\nnode_modules\n');
   symlinkSync(
     path.join(projectRoot, 'node_modules'),
@@ -71,6 +78,35 @@ function packageRelease(directory: string, ...args: string[]) {
     cwd: directory,
     encoding: 'utf8',
   });
+}
+
+function githubRelease(directory: string, remoteCommit = git(directory, ['rev-parse', 'HEAD'])) {
+  const fakeBin = mkdtempSync(path.join(tmpdir(), 'agentboard-release-bin-'));
+  repositories.push(fakeBin);
+  const tagObject = git(directory, ['rev-parse', 'refs/tags/v9.9.9']);
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  writeFileSync(
+    path.join(fakeBin, 'git'),
+    `#!/bin/sh\nif [ "$1" = "ls-remote" ]; then\n  printf '${tagObject}\\trefs/tags/v9.9.9\\n${remoteCommit}\\trefs/tags/v9.9.9^{}\\n'\nelse\n  exec "${realGit}" "$@"\nfi\n`
+  );
+  writeFileSync(
+    path.join(fakeBin, 'gh'),
+    '#!/bin/sh\nif [ "$1" = "auth" ]; then exit 0; fi\nprintf "%s\\n" "$@" > "$FAKE_GH_ARGS"\n'
+  );
+  chmodSync(path.join(fakeBin, 'git'), 0o755);
+  chmodSync(path.join(fakeBin, 'gh'), 0o755);
+
+  const argsFile = path.join(directory, 'release', 'gh-args.txt');
+  const result = spawnSync(process.execPath, ['scripts/github-release.js'], {
+    cwd: directory,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH}`,
+      FAKE_GH_ARGS: argsFile,
+    },
+  });
+  return { argsFile, result };
 }
 
 afterEach(() => {
@@ -164,5 +200,67 @@ describe('release identity', () => {
     const stamped = packageRelease(directory, '--stamp');
     expect(stamped.status).toBe(1);
     expect(stamped.stderr).toContain('symbolic link');
+  });
+
+  it('drafts against the exact remote annotated tag with both release artifacts', () => {
+    const directory = releaseRepository();
+    expect(packageRelease(directory, '--stamp').status).toBe(0);
+    expect(packageRelease(directory).status).toBe(0);
+
+    const { argsFile, result } = githubRelease(directory);
+    expect(result.status, result.stderr).toBe(0);
+    const zip = realpathSync(path.join(directory, 'release', 'agentboard-9.9.9.zip'));
+    expect(readFileSync(argsFile, 'utf8').trim().split('\n')).toEqual([
+      'release',
+      'create',
+      'v9.9.9',
+      zip,
+      `${zip}.sha256`,
+      '--repo',
+      'example/agentboard',
+      '--title',
+      'AgentBoard v9.9.9',
+      '--draft',
+      '--verify-tag',
+      '--generate-notes',
+    ]);
+  });
+
+  it('does not call GitHub when the remote tag resolves to different source', () => {
+    const directory = releaseRepository();
+    expect(packageRelease(directory, '--stamp').status).toBe(0);
+    expect(packageRelease(directory).status).toBe(0);
+
+    const { argsFile, result } = githubRelease(directory, '0'.repeat(40));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('does not match the reviewed local tag and HEAD');
+    expect(existsSync(argsFile)).toBe(false);
+  });
+
+  it('does not call GitHub when a retagged HEAD still has the old artifact', () => {
+    const directory = releaseRepository();
+    expect(packageRelease(directory, '--stamp').status).toBe(0);
+    expect(packageRelease(directory).status).toBe(0);
+    writeFileSync(path.join(directory, 'source.txt'), 'retagged source\n');
+    git(directory, ['add', 'source.txt']);
+    git(directory, ['commit', '--quiet', '-m', 'Retagged source']);
+    git(directory, ['tag', '-fa', 'v9.9.9', '-m', 'Retagged v9.9.9']);
+
+    const { argsFile, result } = githubRelease(directory);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('metadata does not match clean tagged HEAD');
+    expect(existsSync(argsFile)).toBe(false);
+  });
+
+  it('does not call GitHub when the ZIP changed after checksum creation', () => {
+    const directory = releaseRepository();
+    expect(packageRelease(directory, '--stamp').status).toBe(0);
+    expect(packageRelease(directory).status).toBe(0);
+    appendFileSync(path.join(directory, 'release', 'agentboard-9.9.9.zip'), 'tampered');
+
+    const { argsFile, result } = githubRelease(directory);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('does not match its SHA-256 sidecar');
+    expect(existsSync(argsFile)).toBe(false);
   });
 });

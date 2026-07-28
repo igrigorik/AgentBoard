@@ -1,183 +1,156 @@
 #!/usr/bin/env node
 
-/**
- * Create GitHub release with built extension zip
- *
- * This script:
- * 1. Verifies release zip exists
- * 2. Checks for gh CLI installation
- * 3. Auto-generates release notes from git commits
- * 4. Creates draft GitHub release with zip attachment
- * 5. Prompts for manual review before publishing
- *
- * WHY: Automates GitHub release creation while maintaining manual control
- * TRADE-OFF: Requires gh CLI, but simplifies release process
- */
+/** Verify one reviewed artifact and create a draft GitHub release. */
 
-import { execSync } from 'child_process';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { RELEASE_METADATA_FILE, resolveLocalReleaseIdentity } from './release-identity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
 
-// Read release identity from package.json so notes, remote checks, and gh all
-// target the same reviewed repository instead of relying on ambient CLI state.
-const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
-const version = pkg.version;
-const tag = `v${version}`;
-const zipFile = path.join(rootDir, `release/agentboard-${version}.zip`);
-const repositoryUrl = pkg.repository?.url;
-let repository;
-try {
-  const url = new URL(repositoryUrl);
-  const pathParts = url.pathname
-    .replace(/\.git$/, '')
-    .split('/')
-    .filter(Boolean);
-  if (
-    url.protocol !== 'https:' ||
-    url.hostname !== 'github.com' ||
-    pathParts.length !== 2 ||
-    !pathParts.every((part) => /^[A-Za-z0-9_.-]+$/.test(part))
-  ) {
-    throw new Error('unsupported repository URL');
+function fail(message) {
+  console.error(`✗ ${message}`);
+  process.exit(1);
+}
+
+function run(command, args, encoding = 'utf8') {
+  return execFileSync(command, args, {
+    cwd: rootDir,
+    encoding,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 20 * 1024 * 1024,
+  });
+}
+
+function readJson(file, label) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    fail(`${label} is missing or invalid: ${path.relative(rootDir, file)}`);
   }
-  repository = pathParts.join('/');
-} catch {
-  console.error('✗ package.json must declare a canonical HTTPS GitHub repository URL');
-  process.exit(1);
-}
-const repositoryRemote = `https://github.com/${repository}.git`;
-
-console.log(`Preparing GitHub release ${tag} for ${repository}...\n`);
-
-// Verify release zip exists
-if (!fs.existsSync(zipFile)) {
-  console.error(`✗ Release zip not found: release/agentboard-${version}.zip`);
-  console.error('  Run `pnpm run release` first to build the release package');
-  process.exit(1);
 }
 
-const zipStats = fs.statSync(zipFile);
-const zipSizeMB = (zipStats.size / 1024 / 1024).toFixed(2);
-console.log(`✓ Found release zip: agentboard-${version}.zip (${zipSizeMB} MB)`);
-
-// Check if gh CLI is installed
-try {
-  execSync('gh --version', { stdio: 'pipe' });
-  console.log('✓ GitHub CLI found');
-} catch (e) {
-  console.error('\n✗ GitHub CLI not found');
-  console.error('  Install: brew install gh (macOS)');
-  console.error('  Or visit: https://cli.github.com/');
-  process.exit(1);
-}
-
-// Check if authenticated with gh
-try {
-  execSync('gh auth status', { stdio: 'pipe' });
-  console.log('✓ GitHub CLI authenticated\n');
-} catch (e) {
-  console.error('\n✗ Not authenticated with GitHub CLI');
-  console.error('  Run: gh auth login');
-  process.exit(1);
-}
-
-// Check if tag already exists locally
-try {
-  execSync(`git rev-parse ${tag}`, { stdio: 'pipe' });
-  console.log(`✓ Git tag ${tag} exists locally`);
-} catch (e) {
-  console.error(`\n✗ Git tag ${tag} not found`);
-  console.error(`  Create tag first: git tag ${tag}`);
-  console.error(`  Or run: git tag ${tag} && git push origin ${tag}`);
-  process.exit(1);
-}
-
-// Check if tag exists on remote
-let tagOnRemote = false;
-try {
-  const remoteCheck = execSync(`git ls-remote --tags "${repositoryRemote}" "refs/tags/${tag}"`, {
-    encoding: 'utf8',
-    stdio: 'pipe',
-  }).trim();
-  tagOnRemote = remoteCheck.length > 0;
-  if (tagOnRemote) {
-    console.log(`✓ Tag ${tag} pushed to remote\n`);
-  } else {
-    console.warn(`⚠ Tag ${tag} not pushed to remote yet`);
-    console.warn(`  Push with: git push origin ${tag}\n`);
-  }
-} catch (e) {
-  console.warn(`⚠ Could not check remote tags\n`);
-}
-
-// Auto-generate release notes from commits since last tag
-let notes = '';
-try {
-  const lastTag = execSync('git describe --tags --abbrev=0 HEAD^', {
-    encoding: 'utf8',
-    stdio: 'pipe',
-  }).trim();
-
-  console.log(`Generating release notes from commits since ${lastTag}...\n`);
-
-  const commits = execSync(`git log ${lastTag}..HEAD --pretty=format:"- %s (%h)"`, {
-    encoding: 'utf8',
-    stdio: 'pipe',
-  }).trim();
-
-  if (commits) {
-    notes = `## What's Changed\n\n${commits}\n\n**Full Changelog**: https://github.com/${repository}/compare/${lastTag}...${tag}`;
-  } else {
-    notes = `Release ${version}\n\nSee commit history for changes.`;
-  }
-} catch (e) {
-  // First release or can't find previous tag
-  console.log('No previous tag found, this might be the first release\n');
-  notes = `Initial release ${version}\n\nChrome extension providing AI-powered browser sidebar with WebMCP tools and MCP server integration.`;
-}
-
-console.log('Release notes preview:');
-console.log('─'.repeat(60));
-console.log(notes);
-console.log('─'.repeat(60));
-console.log('');
-
-console.log('Creating draft release...\n');
-
-// Write notes to temp file to avoid shell escaping issues with newlines
-const notesFile = path.join(rootDir, 'release', '.release-notes.md');
-fs.writeFileSync(notesFile, notes);
-
-try {
-  execSync(
-    `gh release create "${tag}" "${zipFile}" --repo "${repository}" --title "AgentBoard ${tag}" --notes-file "${notesFile}" --draft`,
-    {
-      stdio: 'inherit',
-      cwd: rootDir,
+function repositoryName(repositoryUrl) {
+  try {
+    const url = new URL(repositoryUrl);
+    const parts = url.pathname
+      .replace(/\.git$/, '')
+      .split('/')
+      .filter(Boolean);
+    if (
+      url.protocol !== 'https:' ||
+      url.hostname !== 'github.com' ||
+      parts.length !== 2 ||
+      !parts.every((part) => part !== '.' && part !== '..' && /^[A-Za-z0-9_.-]+$/.test(part))
+    ) {
+      throw new Error('unsupported repository URL');
     }
-  );
-
-  // Clean up temp notes file
-  fs.unlinkSync(notesFile);
-
-  console.log('\n✓ Draft release created successfully!');
-  console.log('\nNext steps:');
-  console.log('  1. Review the draft release on GitHub');
-  console.log('  2. Edit release notes if needed');
-  console.log('  3. Publish the release when ready');
-  console.log(`  4. ${tagOnRemote ? '' : 'Push tag: git push origin ' + tag}`);
-  console.log(`\n  View draft: gh release view ${tag} --repo ${repository} --web`);
-} catch (e) {
-  // Clean up temp notes file on error
-  if (fs.existsSync(notesFile)) {
-    fs.unlinkSync(notesFile);
+    return parts.join('/');
+  } catch {
+    fail('package.json must declare a canonical HTTPS GitHub repository URL');
   }
-  console.error('\n✗ Failed to create GitHub release');
-  console.error(`  Check if release already exists: gh release list --repo ${repository}`);
-  console.error(`  Or if tag exists: gh release view ${tag} --repo ${repository}`);
-  process.exit(1);
 }
+
+const pkg = readJson(path.join(rootDir, 'package.json'), 'package.json');
+let identity;
+try {
+  identity = resolveLocalReleaseIdentity(rootDir, pkg.version);
+} catch (error) {
+  fail(error instanceof Error ? error.message : 'Release identity is invalid.');
+}
+const { version, tag, sourceCommit, tagObject } = identity;
+const repository = repositoryName(pkg.repository?.url);
+const repositoryRemote = `https://github.com/${repository}.git`;
+const zipName = `agentboard-${version}.zip`;
+const zipFile = path.join(rootDir, 'release', zipName);
+const checksumFile = `${zipFile}.sha256`;
+
+let remoteTags;
+try {
+  remoteTags = run('git', [
+    'ls-remote',
+    '--tags',
+    repositoryRemote,
+    `refs/tags/${tag}`,
+    `refs/tags/${tag}^{}`,
+  ]).trim();
+} catch {
+  fail(`Could not read ${tag} from ${repositoryRemote}.`);
+}
+const remoteRefs = new Map(
+  remoteTags
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split(/\s+/, 2).reverse())
+);
+const remoteTagObject = remoteRefs.get(`refs/tags/${tag}`);
+const remoteTagCommit = remoteRefs.get(`refs/tags/${tag}^{}`);
+if (!remoteTagObject || !remoteTagCommit) fail(`Annotated remote tag ${tag} is missing.`);
+if (remoteTagObject !== tagObject || remoteTagCommit !== sourceCommit) {
+  fail(`Remote tag ${tag} does not match the reviewed local tag and HEAD.`);
+}
+
+if (!fs.existsSync(zipFile)) fail(`Release ZIP is missing: release/${zipName}`);
+if (!fs.existsSync(checksumFile)) fail(`Checksum is missing: release/${zipName}.sha256`);
+const checksumLine = fs.readFileSync(checksumFile, 'utf8').trim();
+const checksumMatch = /^([a-f0-9]{64})  (\S+)$/.exec(checksumLine);
+if (!checksumMatch || checksumMatch[2] !== zipName) fail('Checksum sidecar has invalid content.');
+const actualChecksum = createHash('sha256').update(fs.readFileSync(zipFile)).digest('hex');
+if (checksumMatch[1] !== actualChecksum) fail('Release ZIP does not match its SHA-256 sidecar.');
+
+let metadata;
+let manifest;
+try {
+  metadata = JSON.parse(run('unzip', ['-p', zipFile, RELEASE_METADATA_FILE], 'buffer'));
+  manifest = JSON.parse(run('unzip', ['-p', zipFile, 'manifest.json'], 'buffer'));
+} catch {
+  fail('Release ZIP metadata or manifest is missing or invalid.');
+}
+if (
+  metadata.formatVersion !== 1 ||
+  metadata.version !== version ||
+  metadata.tag !== tag ||
+  metadata.sourceCommit !== sourceCommit ||
+  !Array.isArray(metadata.files)
+) {
+  fail('Release ZIP metadata does not match clean tagged HEAD.');
+}
+if (manifest.version !== version) fail(`Release ZIP manifest version does not match ${version}.`);
+
+try {
+  run('gh', ['auth', 'status', '--hostname', 'github.com']);
+} catch {
+  fail('GitHub CLI is missing or not authenticated for github.com.');
+}
+
+console.log(`Creating draft ${repository}@${tag} from ${sourceCommit}`);
+console.log(`ZIP SHA-256: ${actualChecksum}`);
+try {
+  execFileSync(
+    'gh',
+    [
+      'release',
+      'create',
+      tag,
+      zipFile,
+      checksumFile,
+      '--repo',
+      repository,
+      '--title',
+      `AgentBoard ${tag}`,
+      '--draft',
+      '--verify-tag',
+      '--generate-notes',
+    ],
+    { cwd: rootDir, stdio: 'inherit' }
+  );
+} catch {
+  fail(`GitHub rejected draft release ${repository}@${tag}.`);
+}
+
+console.log(`✓ Draft release created for ${tag}`);
+console.log(`  View: gh release view ${tag} --repo ${repository} --web`);
