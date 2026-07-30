@@ -1,6 +1,6 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import { MAX_LIST_PATTERN_LENGTH, type MemoryFilesystem } from './filesystem';
+import { MAX_LIST_PATTERN_LENGTH, MemoryFileError, type MemoryFilesystem } from './filesystem';
 import { MemoryMountError } from './manager';
 import { MEMORY_TOOL_NAMES } from './tool-names';
 
@@ -26,6 +26,16 @@ export function createMemoryTools(
   filesystem: MemoryFilesystem,
   authoritySignal: AbortSignal
 ): Record<string, unknown> {
+  // A digest is only mutation authority after this request's tool closure observed it.
+  // Consume receipts once so snapshot hashes and earlier requests cannot authorize writes.
+  const readRevisions = new Map<string, string>();
+  const consumeReadRevision = (path: string, expectedRevision: string): void => {
+    const readRevision = readRevisions.get(path);
+    readRevisions.delete(path);
+    if (readRevision === undefined) throw new MemoryFileError('REVISION_REQUIRED');
+    if (readRevision !== expectedRevision) throw new MemoryFileError('REVISION_CONFLICT');
+  };
+
   return {
     [MEMORY_TOOL_NAMES.list]: tool({
       description:
@@ -44,38 +54,45 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.read]: tool({
       description:
-        'Read one UTF-8 text file from the selected mounted memory workspace. The result includes a revision required to replace or delete an existing file.',
+        'Read one UTF-8 text file from the selected mounted memory workspace. The result includes a revision that authorizes one subsequent mutation of this exact path in the current request.',
       inputSchema: z.object({ path: relativePath }),
       execute: ({ path }, { abortSignal }) =>
-        runAuthorized(authoritySignal, abortSignal, () => filesystem.readFile(path)),
+        runAuthorized(authoritySignal, abortSignal, async () => {
+          const snapshot = await filesystem.readFile(path);
+          readRevisions.set(path, snapshot.revision);
+          return snapshot;
+        }),
     }),
     [MEMORY_TOOL_NAMES.write]: tool({
       description:
-        'Create or replace MEMORY.md or a file under memory/ in the selected mounted memory workspace. Replacing an existing file requires the exact revision returned by agentboard_read_file. Keep MEMORY.md compact; put selected chronology, supporting detail, and provenance in memory/, using memory/YYYY-MM-DD.md for dated journals.',
+        'Create or replace MEMORY.md or a file under memory/ in the selected mounted memory workspace. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. Keep MEMORY.md compact; put selected chronology, supporting detail, and provenance in memory/, using memory/YYYY-MM-DD.md for dated journals.',
       inputSchema: z.object({
         path: relativePath,
         content: z.string().describe('Complete UTF-8 file content to write'),
         expectedRevision: z
           .string()
           .optional()
-          .describe('Required when replacing an existing file; omit only for a new file'),
+          .describe('Fresh revision for an existing file; omit only when creating a new file'),
       }),
       execute: ({ path, content, expectedRevision }, { abortSignal }) =>
-        runAuthorized(authoritySignal, abortSignal, (isAuthorized) =>
-          filesystem.writeFile(path, content, expectedRevision, isAuthorized)
-        ),
+        runAuthorized(authoritySignal, abortSignal, (isAuthorized) => {
+          if (expectedRevision === undefined) readRevisions.delete(path);
+          else consumeReadRevision(path, expectedRevision);
+          return filesystem.writeFile(path, content, expectedRevision, isAuthorized);
+        }),
     }),
     [MEMORY_TOOL_NAMES.delete]: tool({
       description:
-        'Permanently delete one file under memory/ from the selected mounted memory workspace. Deletion requires the exact revision returned by agentboard_read_file. MEMORY.md and directories cannot be deleted.',
+        'Permanently delete one file under memory/ from the selected mounted memory workspace. Deletion requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. MEMORY.md and directories cannot be deleted.',
       inputSchema: z.object({
         path: relativePath,
-        expectedRevision: z.string().describe('Exact revision returned by agentboard_read_file'),
+        expectedRevision: z.string().describe('Fresh revision returned for this exact path'),
       }),
       execute: ({ path, expectedRevision }, { abortSignal }) =>
-        runAuthorized(authoritySignal, abortSignal, (isAuthorized) =>
-          filesystem.deleteFile(path, expectedRevision, isAuthorized)
-        ),
+        runAuthorized(authoritySignal, abortSignal, (isAuthorized) => {
+          consumeReadRevision(path, expectedRevision);
+          return filesystem.deleteFile(path, expectedRevision, isAuthorized);
+        }),
     }),
   };
 }

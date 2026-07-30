@@ -312,6 +312,36 @@ describe('background stream ownership', () => {
     await Promise.all([firstRequest, secondRequest]);
   });
 
+  it('forwards hidden conversation memory through the owning stream', async () => {
+    const memoryContext = { snapshot: 'PRIVATE_MEMORY_SENTINEL' };
+    mocks.aiClient.streamChat.mockImplementationOnce(
+      async (_agent, _messages, _tab, callbacks, _streamId, suppliedMemoryContext) => {
+        expect(suppliedMemoryContext).toEqual(memoryContext);
+        callbacks.onMemoryContext(memoryContext);
+        callbacks.onFinish('complete');
+      }
+    );
+    const port = createPort('ai-stream-memory-context');
+    mocks.onConnect!(port.port);
+
+    await port.send({
+      type: 'STREAM_CHAT',
+      agentId: 'agent',
+      tabId: 1,
+      memoryContext,
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'STREAM_MEMORY_CONTEXT',
+      memoryContext,
+    });
+    expect(port.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'STREAM_COMPLETE', fullResponse: 'complete' })
+    );
+    expect(port.backgroundDisconnect).not.toHaveBeenCalled();
+  });
+
   it('reports remote tool revocation without closing the sidebar port', async () => {
     let callbacks: Record<string, (...args: any[]) => void> | undefined;
     let resolveStream!: () => void;

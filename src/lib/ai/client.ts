@@ -8,9 +8,12 @@
 import { streamText, CoreMessage } from 'ai';
 import { raceWithAbort } from '../abort';
 import type { AgentConfig } from '../storage/config';
-import type { ToolCall } from '../../types';
+import type { ConversationMemoryContext, ToolCall } from '../../types';
 import { ConfigStorage, ConfigValidationError, configValidationMessage } from '../storage/config';
-import { composeSystemPrompt } from './system-prompt';
+import { MAX_AUTOLOADED_MEMORY_BYTES } from '../memory/filesystem';
+import { getMemoryManager, MemoryMountError, type ResolvedMemory } from '../memory/manager';
+import { createMemoryTools } from '../memory/tools';
+import { composeSystemPrompt, formatMemoryContext } from './system-prompt';
 import { getToolRegistry } from '../webmcp/tool-registry';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
@@ -59,6 +62,7 @@ async function* abortableAsyncIterable<T>(
 
 /** Provider errors may contain prompts, generated text, headers, or proxy internals. */
 function publicAIRequestError(error: unknown): Error {
+  if (error instanceof MemoryMountError) return error;
   const status = getErrorStatus(error);
   const message = error instanceof Error ? error.message.toLowerCase() : '';
   if (
@@ -90,6 +94,47 @@ function publicAIRequestError(error: unknown): Error {
   );
 }
 
+function validateMemoryContext(context: ConversationMemoryContext | undefined): void {
+  if (context === undefined) return;
+  if (typeof context !== 'object' || context === null) {
+    throw new Error('Invalid conversation memory context');
+  }
+  const snapshot = (context as { snapshot?: unknown }).snapshot;
+  if (
+    snapshot !== null &&
+    (typeof snapshot !== 'string' ||
+      new TextEncoder().encode(snapshot).byteLength > MAX_AUTOLOADED_MEMORY_BYTES)
+  ) {
+    throw new Error('Invalid conversation memory context');
+  }
+}
+
+function captureMemoryContext(
+  memory: Exclude<ResolvedMemory, { state: 'unavailable' }>
+): ConversationMemoryContext {
+  return {
+    snapshot: memory.state === 'available' ? (memory.memoryFile?.content ?? '') : null,
+  };
+}
+
+function attachMemoryContext(messages: CoreMessage[], snapshot: string): CoreMessage[] {
+  const userIndex = messages.findIndex(({ role }) => role === 'user');
+  if (userIndex === -1) {
+    throw new Error('Mounted memory requires a user message');
+  }
+
+  const next = [...messages];
+  const memoryContext = formatMemoryContext(snapshot);
+  const userMessage = next[userIndex];
+  const content = userMessage.content;
+  const contextualContent =
+    typeof content === 'string'
+      ? `${memoryContext}\n\n${content}`
+      : [{ type: 'text' as const, text: memoryContext }, ...content];
+  next[userIndex] = { ...userMessage, content: contextualContent } as CoreMessage;
+  return next;
+}
+
 export interface StreamFinishMetadata {
   /** True when the stream ended because the tab's tool set changed mid-stream.
    *  The caller should restart the conversation with fresh tools. */
@@ -110,6 +155,8 @@ export interface StreamCallbacks {
   onFinish: (fullText: string, metadata?: StreamFinishMetadata) => void;
   onError: (error: Error) => void;
   onAbort?: (reason: StreamAbortReason) => void;
+  /** Delivers the immutable memory state established by this conversation's first stream. */
+  onMemoryContext?: (context: ConversationMemoryContext) => void;
 
   // Tool callbacks
   onToolCall?: (toolCall: ToolCall) => void;
@@ -167,13 +214,15 @@ export class AIClient {
    * Stream a chat completion from the specified agent
    * @param tabId - Optional tab ID to scope tools to a specific tab
    * @param streamId - Ownership token required to cancel this specific stream
+   * @param memoryContext - Fixed hidden snapshot returned by this conversation's first stream
    */
   async streamChat(
     agentId: string,
     messages: CoreMessage[],
     tabId: number | undefined,
     callbacks: StreamCallbacks,
-    streamId: string = globalThis.crypto.randomUUID()
+    streamId: string = globalThis.crypto.randomUUID(),
+    memoryContext?: ConversationMemoryContext
   ): Promise<void> {
     const requestSequence = ++this.streamRequestSequence;
     let abortController: AbortController | undefined;
@@ -211,8 +260,64 @@ export class AIClient {
         throw new Error('Configure credentials or a custom endpoint in Settings.');
       }
 
-      // Only a validated newer request may supersede the active provider stream.
-      // The sequence check prevents slower setup from reclaiming ownership later.
+      validateMemoryContext(memoryContext);
+      const establishingMemoryContext = memoryContext === undefined;
+      const memory = await raceWithAbort(
+        getMemoryManager().resolve(agentId, {
+          includeMemoryFile: establishingMemoryContext,
+        }),
+        pendingStream.controller.signal
+      );
+      let capturedMemoryContext: ConversationMemoryContext | undefined;
+      if (establishingMemoryContext) {
+        if (memory.state === 'unavailable') throw memory.error;
+        capturedMemoryContext = captureMemoryContext(memory);
+      }
+      const conversationMemoryContext = memoryContext ?? capturedMemoryContext;
+      if (!conversationMemoryContext) throw new Error('Conversation memory was not initialized');
+
+      const runtime = createModelRuntime(agent);
+      const toolRegistry = getToolRegistry();
+      const toolSnapshot = toolRegistry.captureToolSnapshot(tabId);
+      const memoryEnabled = memory.state === 'available';
+      const allTools = {
+        ...toolSnapshot.tools,
+        ...(memoryEnabled ? createMemoryTools(memory.filesystem, memory.authoritySignal) : {}),
+      };
+      const conversation =
+        conversationMemoryContext.snapshot === null
+          ? messages
+          : attachMemoryContext(messages, conversationMemoryContext.snapshot);
+      const systemPrompt = composeSystemPrompt(agent, {
+        mcpInstructions: toolSnapshot.mcpInstructions,
+        memoryEnabled: memoryEnabled || conversationMemoryContext.snapshot !== null,
+      });
+      const messagesWithSystem: CoreMessage[] = [
+        { role: 'system', content: systemPrompt },
+        ...conversation,
+      ];
+
+      // Register remote authority before ownership changes. Memory closures fail
+      // their own calls after revocation; stale grounding does not cancel generation.
+      const { remoteSession } = toolSnapshot;
+      if (remoteSession.hasContext) {
+        const onRemoteRevoked = () => {
+          (abortController ?? pendingStream.controller).abort();
+          notifyAbort('remote-tools-changed');
+        };
+        remoteSession.signal.addEventListener('abort', onRemoteRevoked, { once: true });
+        removeRemoteRevocationListener = () =>
+          remoteSession.signal.removeEventListener('abort', onRemoteRevoked);
+        if (remoteSession.signal.aborted) onRemoteRevoked();
+      }
+      if (pendingStream.controller.signal.aborted) return;
+
+      if (requestSequence < this.latestAcceptedStreamSequence) {
+        notifyAbort();
+        return;
+      }
+
+      // Only a fully prepared newer request may supersede the active provider stream.
       this.latestAcceptedStreamSequence = requestSequence;
       this.pendingStreams.delete(streamId);
       for (const [pendingId, olderPendingStream] of this.pendingStreams) {
@@ -226,19 +331,6 @@ export class AIClient {
       supersededStream?.notifyAbort();
       abortController = new AbortController();
       this.activeStream = { id: streamId, controller: abortController, notifyAbort };
-
-      const runtime = createModelRuntime(agent);
-      const toolRegistry = getToolRegistry();
-      const toolSnapshot = toolRegistry.captureToolSnapshot(tabId);
-
-      // Build the prompt and tool catalog from one synchronous remote-session snapshot.
-      const systemPrompt = composeSystemPrompt(agent, {
-        mcpInstructions: toolSnapshot.mcpInstructions,
-      });
-      const messagesWithSystem: CoreMessage[] = [
-        { role: 'system', content: systemPrompt },
-        ...messages,
-      ];
 
       // Subscribe to tab-scoped tool changes for the duration of this stream.
       // When tools change (navigation, user toggle, etc.), we stop after the
@@ -255,16 +347,8 @@ export class AIClient {
       }
 
       try {
-        const { tools: allTools, remoteSession } = toolSnapshot;
-        if (remoteSession.hasContext) {
-          const onRemoteRevoked = () => {
-            abortController?.abort();
-            notifyAbort('remote-tools-changed');
-          };
-          remoteSession.signal.addEventListener('abort', onRemoteRevoked, { once: true });
-          removeRemoteRevocationListener = () =>
-            remoteSession.signal.removeEventListener('abort', onRemoteRevoked);
-          if (remoteSession.signal.aborted) onRemoteRevoked();
+        if (capturedMemoryContext !== undefined) {
+          callbacks.onMemoryContext?.(capturedMemoryContext);
         }
 
         const hasTools = Object.keys(allTools).length > 0;

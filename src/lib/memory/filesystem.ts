@@ -364,7 +364,7 @@ export class MemoryFilesystem {
   }
 
   async validateLayout(): Promise<void> {
-    // readMemory() validates the companion MEMORY.md file immediately after this check.
+    // Snapshot capture separately validates MEMORY.md; ordinary turns only need a live root.
     try {
       await getDirectory(this.root, [MEMORY_DIRECTORY]);
     } catch (error) {

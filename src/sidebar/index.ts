@@ -13,7 +13,14 @@ import {
   toolsChangedContinuationMessage,
 } from '../lib/ai/stream-policy';
 import './styles.css';
-import type { ChatMessage, ToolCall, MessageContent, MessagePart, PageContext } from '../types';
+import type {
+  ChatMessage,
+  ConversationMemoryContext,
+  ToolCall,
+  MessageContent,
+  MessagePart,
+  PageContext,
+} from '../types';
 import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
 import { ToolCallBox } from './ToolCallBox';
 import { ReasoningBox } from './ReasoningBox';
@@ -45,6 +52,8 @@ let isLoading = false;
 let connectionRetries = 0;
 const MAX_RETRIES = 3;
 let messageHistory: ChatMessage[] = [];
+let conversationMemoryContext: ConversationMemoryContext | undefined;
+let agentSelectionSequence = 0;
 let currentSession: StreamingSession | null = null;
 let currentStreamPreparation: AbortController | null = null;
 const configStorage = ConfigStorage.getInstance();
@@ -278,7 +287,7 @@ function scrollToBottomIfNeeded(): void {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadConfiguration();
+  await loadAgents();
   setupEventListeners();
   setupMessageListener();
 
@@ -299,9 +308,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     clearConversation();
   });
 
-  // Load agents and set up initial state
-  await loadAgents();
-
   displayConversationNotice("Hello! I'm your AI assistant. How can I help you today?");
 
   // Start health check
@@ -310,11 +316,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize button state
   updateSendButton();
 });
-
-async function loadConfiguration() {
-  // This function is kept for compatibility but agents are loaded separately
-  await loadAgents();
-}
 
 async function loadAgents() {
   try {
@@ -427,7 +428,7 @@ function updateSendButton() {
     sendButton.innerHTML = '➜'; // Heavy round-tipped rightwards arrow
     sendButton.title = 'Send message';
     sendButton.classList.remove('stop-mode');
-    sendButton.disabled = messageInput.value.trim() === '';
+    sendButton.disabled = !currentAgent || messageInput.value.trim() === '';
   }
 }
 
@@ -488,27 +489,30 @@ function setupEventListeners() {
     // Fall through to default text paste
   });
 
-  // Agent switching
+  // Agent switching affects future sends; the active response and conversation
+  // context retain their owners. A sequence fence rejects stale async lookups.
   agentSelect.addEventListener('change', async (e) => {
     const selectedAgentId = (e.target as HTMLSelectElement).value;
+    const selectionSequence = ++agentSelectionSequence;
+    currentAgentId = null;
+    currentAgent = null;
+    updateSendButton();
 
-    if (!selectedAgentId) {
-      currentAgentId = null;
-      currentAgent = null;
-      return;
-    }
+    if (!selectedAgentId) return;
 
     try {
       const agent = await configStorage.getAgent(selectedAgentId);
-      if (agent) {
-        currentAgentId = selectedAgentId;
-        currentAgent = agent;
-
-        addMessage('system', `Switched to ${agent.name}`);
-      }
-    } catch (error) {
+      if (selectionSequence !== agentSelectionSequence) return;
+      if (!agent) throw new Error('Agent not found');
+      currentAgentId = selectedAgentId;
+      currentAgent = agent;
+      addMessage('system', `Switched to ${agent.name}`);
+    } catch {
+      if (selectionSequence !== agentSelectionSequence) return;
       addMessage('error', 'Failed to switch agent');
-      log.error('[Sidebar] Agent switch error:', error);
+      log.error('[Sidebar] Agent switch failed');
+    } finally {
+      if (selectionSequence === agentSelectionSequence) updateSendButton();
     }
   });
 
@@ -542,9 +546,9 @@ function setupEventListeners() {
 async function handleSendMessage() {
   const text = messageInput.value.trim();
 
-  // Require either text or attachments
+  // Require either text or attachments and a fully resolved agent selection.
   if (!text && pendingAttachments.length === 0) return;
-  if (isLoading) return;
+  if (isLoading || !currentAgentId || !currentAgent) return;
 
   // Clear input immediately for better UX
   messageInput.value = '';
@@ -669,6 +673,9 @@ async function streamAIResponse() {
   if (!currentAgentId || !currentAgent) {
     throw new Error('No agent selected');
   }
+  const streamAgentId = currentAgentId;
+  const streamAgent = currentAgent;
+  const streamMemoryContext = conversationMemoryContext;
 
   // Create assistant message placeholder (don't add to history yet)
   const assistantMsg: ChatMessage = {
@@ -676,7 +683,7 @@ async function streamAIResponse() {
     role: 'assistant',
     content: '',
     timestamp: Date.now(),
-    metadata: { agentId: currentAgentId, agentName: currentAgent.name },
+    metadata: { agentId: streamAgentId, agentName: streamAgent.name },
   };
 
   // Page-context preparation is cancellable before a provider-owned port exists.
@@ -758,8 +765,15 @@ async function streamAIResponse() {
 
     session.port.onMessage.addListener((msg) => {
       if (currentSession !== session) return;
-      log.debug('[Sidebar] Received message from port:', msg.type, msg);
+      log.debug('[Sidebar] Received message from port:', msg.type);
       switch (msg.type) {
+        case 'STREAM_MEMORY_CONTEXT': {
+          // The stream that establishes a conversation owns its hidden snapshot even
+          // if the user selects another agent while that response is still running.
+          conversationMemoryContext ??= msg.memoryContext;
+          break;
+        }
+
         case 'STREAM_REASONING_START': {
           // Check if we should merge with the previous reasoning box
           // (i.e., the last child in the messages container is a reasoning wrapper)
@@ -948,11 +962,14 @@ async function streamAIResponse() {
           currentSession = null;
           session.port.disconnect();
 
-          const continuation = selectStreamContinuation({
-            toolsChanged: Boolean(msg.toolsChanged),
-            stepsExhausted: Boolean(msg.stepsExhausted),
-            continuationCount: autoContinuationCount,
-          });
+          const sameAgentSelected = currentAgentId === streamAgentId;
+          const continuation = sameAgentSelected
+            ? selectStreamContinuation({
+                toolsChanged: Boolean(msg.toolsChanged),
+                stepsExhausted: Boolean(msg.stepsExhausted),
+                continuationCount: autoContinuationCount,
+              })
+            : null;
 
           // Auto-continue if tools changed mid-stream (e.g., after navigation).
           // The AI needs to restart with fresh tools to continue the task.
@@ -978,21 +995,23 @@ async function streamAIResponse() {
             break;
           }
 
-          if (msg.toolsChanged) {
+          if (msg.toolsChanged && sameAgentSelected) {
             log.warn('[Sidebar] Max auto-continuations reached, stopping');
+          } else if (!sameAgentSelected && (msg.toolsChanged || msg.stepsExhausted)) {
+            log.info('[Sidebar] Agent changed during response; automatic continuation skipped');
           }
 
           // When the model exhausts its tool step budget, give it one more
           // text-only turn to summarize progress instead of silently stopping.
           if (continuation === 'steps-exhausted') {
             autoContinuationCount++;
-            const limit = currentAgent?.maxSteps ?? DEFAULT_MAX_STEPS;
+            const limit = streamAgent.maxSteps ?? DEFAULT_MAX_STEPS;
             log.info(`[Sidebar] Steps exhausted (${limit}) — requesting wrap-up summary`);
 
             const contMsg: ChatMessage = {
               id: globalThis.crypto.randomUUID(),
               role: 'user',
-              content: stepLimitContinuationMessage(currentAgent?.maxSteps),
+              content: stepLimitContinuationMessage(streamAgent.maxSteps),
               timestamp: Date.now(),
             };
             messageHistory.push(contMsg);
@@ -1108,10 +1127,9 @@ async function streamAIResponse() {
     });
 
     log.debug('[Sidebar] Sending messages to stream:', {
-      agentId: currentAgentId,
-      agentName: currentAgent?.name,
+      agentId: streamAgentId,
+      agentName: streamAgent.name,
       messageCount: messagesToSend.length,
-      messages: messagesToSend,
     });
 
     if (currentSession !== session) {
@@ -1122,8 +1140,9 @@ async function streamAIResponse() {
     try {
       session.port.postMessage({
         type: 'STREAM_CHAT',
-        agentId: currentAgentId,
+        agentId: streamAgentId,
         tabId: attachedTabId || undefined, // Pass the attached tab ID for tool scoping
+        ...(streamMemoryContext && { memoryContext: streamMemoryContext }),
         messages: messagesToSend,
       });
     } catch {
@@ -1200,6 +1219,7 @@ function displayConversationNotice(content: string): void {
 // Add clear conversation functionality
 function clearConversation() {
   messageHistory = [];
+  conversationMemoryContext = undefined;
   messagesContainer.innerHTML = '';
   // Clean up any active or preparing request.
   if (currentSession || currentStreamPreparation) {

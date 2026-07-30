@@ -192,6 +192,12 @@ export interface PageContext {
   title: string;
 }
 
+/** Hidden, clone-safe memory state owned by one live sidebar conversation. */
+export interface ConversationMemoryContext {
+  /** Null records that the conversation began without a mounted MEMORY.md snapshot. */
+  snapshot: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -238,6 +244,7 @@ interface PortStreamChatMessage {
   type: 'STREAM_CHAT';
   agentId: string;
   tabId?: number; // The tab this sidebar is associated with (for tool scoping)
+  memoryContext?: ConversationMemoryContext;
   messages: Array<{
     role: 'user' | 'assistant';
     content: MessageContent;

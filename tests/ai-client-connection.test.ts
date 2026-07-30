@@ -1,3 +1,4 @@
+import type { CoreMessage } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => {
     openAIProvider,
     createOpenAI: vi.fn(() => openAIProvider),
     streamText: vi.fn(),
+    resolveMemory: vi.fn(),
   };
 });
 
@@ -31,13 +33,23 @@ vi.mock('@ai-sdk/google', () => ({
 
 vi.mock('ai', () => ({
   streamText: mocks.streamText,
+  tool: vi.fn((definition) => definition),
 }));
+
+vi.mock('../src/lib/memory/manager', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/memory/manager')>();
+  return {
+    ...actual,
+    getMemoryManager: () => ({ resolve: mocks.resolveMemory }),
+  };
+});
 
 vi.mock('../src/lib/webmcp/tool-registry', () => ({
   getToolRegistry: vi.fn(),
 }));
 
 import { AIClient } from '../src/lib/ai/client';
+import { MemoryMountError } from '../src/lib/memory/manager';
 import { getToolRegistry } from '../src/lib/webmcp/tool-registry';
 
 function textStream(read: () => Promise<ReadableStreamReadResult<string>>) {
@@ -65,6 +77,51 @@ function revocableRemoteSession() {
   return {
     controller,
     session: { hasContext: true, signal: controller.signal },
+  };
+}
+
+function mountedMemory(content: string) {
+  const controller = new AbortController();
+  return {
+    controller,
+    resolved: {
+      state: 'available' as const,
+      rootName: 'workspace',
+      filesystem: {
+        listFiles: vi.fn(),
+        readFile: vi.fn(),
+        writeFile: vi.fn(),
+        deleteFile: vi.fn(),
+      },
+      memoryFile: {
+        path: 'MEMORY.md',
+        content,
+        bytes: new TextEncoder().encode(content).byteLength,
+        revision: `sha256:${'a'.repeat(64)}`,
+      },
+      authoritySignal: controller.signal,
+    },
+  };
+}
+
+function finishedFullStream() {
+  return {
+    textStream: undefined,
+    fullStream: {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'finish', totalUsage: {} };
+      },
+    },
+  };
+}
+
+function finishedTextStream() {
+  return {
+    textStream: {
+      async *[Symbol.asyncIterator]() {
+        yield 'OK';
+      },
+    },
   };
 }
 
@@ -123,6 +180,7 @@ describe('AIClient connection testing', () => {
     vi.clearAllMocks();
     vi.mocked(chrome.storage.local.get).mockResolvedValue({} as never);
     vi.mocked(getToolRegistry).mockReturnValue(toolRegistry() as never);
+    mocks.resolveMemory.mockResolvedValue({ state: 'unmounted' });
     mocks.streamText.mockReturnValue({ textStream: successfulTextStream() });
   });
 
@@ -303,6 +361,290 @@ describe('AIClient connection testing', () => {
     expect(system).not.toContain('<system>MCP_SENTINEL</system>');
     expect(system).not.toContain('MOUNTED MEMORY:');
     expect(Object.keys(mocks.streamText.mock.calls[0][0].tools)).toEqual(['remote_tool']);
+  });
+
+  it('captures one hidden snapshot and never refreshes it on ordinary turns', async () => {
+    storeAgent('memory-agent');
+    mocks.resolveMemory.mockResolvedValue(mountedMemory('# Memory\nInitial').resolved);
+    mocks.streamText.mockReturnValue(finishedFullStream());
+    const onMemoryContext = vi.fn();
+    const onError = vi.fn();
+
+    await AIClient.getInstance().streamChat(
+      'memory-agent',
+      [{ role: 'user', content: 'First question' }],
+      undefined,
+      { onFinish: vi.fn(), onError, onMemoryContext },
+      'memory-first'
+    );
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onMemoryContext).toHaveBeenCalledWith({ snapshot: '# Memory\nInitial' });
+    expect(mocks.resolveMemory).toHaveBeenNthCalledWith(1, 'memory-agent', {
+      includeMemoryFile: true,
+    });
+    const context = onMemoryContext.mock.calls[0][0];
+    const firstRequest = mocks.streamText.mock.calls[0][0];
+    const firstMessages = firstRequest.messages as CoreMessage[];
+    expect(firstMessages[1]).toMatchObject({ role: 'user' });
+    expect(firstMessages[1].content).toContain('<memory_context');
+    expect(firstMessages[1].content).toContain('# Memory\nInitial');
+    expect(firstMessages[1].content).toContain('First question');
+    expect(firstRequest.messages[0].content).toContain('MOUNTED MEMORY:');
+    expect(firstRequest.tools).toEqual(
+      expect.objectContaining({
+        agentboard_list_files: expect.anything(),
+        agentboard_read_file: expect.anything(),
+        agentboard_write_file: expect.anything(),
+        agentboard_delete_file: expect.anything(),
+      })
+    );
+
+    mocks.resolveMemory.mockResolvedValue(mountedMemory('# Memory\nChanged on disk').resolved);
+    const secondOnMemoryContext = vi.fn();
+    await AIClient.getInstance().streamChat(
+      'memory-agent',
+      [
+        { role: 'user', content: 'First question' },
+        { role: 'assistant', content: 'First answer' },
+        { role: 'user', content: 'Second question' },
+      ],
+      undefined,
+      { onFinish: vi.fn(), onError, onMemoryContext: secondOnMemoryContext },
+      'memory-second',
+      context
+    );
+
+    expect(mocks.resolveMemory).toHaveBeenNthCalledWith(2, 'memory-agent', {
+      includeMemoryFile: false,
+    });
+    const secondMessages = mocks.streamText.mock.calls[1][0].messages as CoreMessage[];
+    expect(secondOnMemoryContext).not.toHaveBeenCalled();
+    expect(secondMessages[1].content).toBe(firstMessages[1].content);
+    expect(JSON.stringify(secondMessages)).not.toContain('Changed on disk');
+    expect(JSON.stringify(secondMessages).match(/<memory_context source=/g)).toHaveLength(1);
+    expect(JSON.stringify(secondMessages)).not.toContain('Revision:');
+    expect(JSON.stringify(secondMessages)).not.toContain('Content-Length:');
+  });
+
+  it('fails closed before provider construction when mounted memory is unavailable', async () => {
+    storeAgent('unavailable-memory-agent');
+    const error = new MemoryMountError('PERMISSION_REQUIRED');
+    mocks.resolveMemory.mockResolvedValue({
+      state: 'unavailable',
+      rootName: 'workspace',
+      reason: 'permission-required',
+      error,
+    });
+    const onError = vi.fn();
+
+    await AIClient.getInstance().streamChat(
+      'unavailable-memory-agent',
+      [{ role: 'user', content: 'Do not send this' }],
+      undefined,
+      { onFinish: vi.fn(), onError },
+      'unavailable-memory'
+    );
+
+    expect(mocks.streamText).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(mocks.resolveMemory).toHaveBeenCalledWith('unavailable-memory-agent', {
+      includeMemoryFile: true,
+    });
+  });
+
+  it('records an unmounted first turn so later agents cannot inject a new snapshot', async () => {
+    storeAgent('memory-agent');
+    mocks.resolveMemory.mockResolvedValue({ state: 'unmounted' });
+    mocks.streamText
+      .mockReturnValueOnce(finishedTextStream())
+      .mockReturnValueOnce(finishedFullStream());
+    const onMemoryContext = vi.fn();
+
+    await AIClient.getInstance().streamChat(
+      'memory-agent',
+      [{ role: 'user', content: 'First question' }],
+      undefined,
+      { onFinish: vi.fn(), onError: vi.fn(), onMemoryContext },
+      'unmounted-first'
+    );
+
+    expect(onMemoryContext).toHaveBeenCalledWith({ snapshot: null });
+    expect(JSON.stringify(mocks.streamText.mock.calls[0][0].messages)).not.toContain(
+      '<memory_context'
+    );
+    expect(mocks.streamText.mock.calls[0][0].messages[0].content).not.toContain('MOUNTED MEMORY:');
+
+    mocks.resolveMemory.mockResolvedValue(mountedMemory('# Later memory').resolved);
+    await AIClient.getInstance().streamChat(
+      'memory-agent',
+      [{ role: 'user', content: 'Second question' }],
+      undefined,
+      { onFinish: vi.fn(), onError: vi.fn() },
+      'mounted-later',
+      { snapshot: null }
+    );
+
+    expect(mocks.resolveMemory).toHaveBeenLastCalledWith('memory-agent', {
+      includeMemoryFile: false,
+    });
+    expect(JSON.stringify(mocks.streamText.mock.calls[1][0].messages)).not.toContain(
+      'Later memory'
+    );
+    expect(mocks.streamText.mock.calls[1][0].messages[0].content).toContain('MOUNTED MEMORY:');
+  });
+
+  it('rejects malformed or oversized replayed snapshots before provider invocation', async () => {
+    storeAgent('memory-agent');
+    for (const memoryContext of [{ snapshot: 42 }, { snapshot: 'x'.repeat(64 * 1024 + 1) }]) {
+      const onError = vi.fn();
+      await AIClient.getInstance().streamChat(
+        'memory-agent',
+        [{ role: 'user', content: 'Do not send' }],
+        undefined,
+        { onFinish: vi.fn(), onError },
+        globalThis.crypto.randomUUID(),
+        memoryContext as never
+      );
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message:
+            'AI request failed. Verify the Connection API, endpoint, model, and credentials.',
+        })
+      );
+    }
+    expect(mocks.resolveMemory).not.toHaveBeenCalled();
+    expect(mocks.streamText).not.toHaveBeenCalled();
+  });
+
+  it('keeps retained grounding when the selected agent has no live memory tools', async () => {
+    storeAgent('next-agent');
+    const unavailable = new MemoryMountError('PERMISSION_REQUIRED');
+    mocks.resolveMemory.mockResolvedValue({
+      state: 'unavailable',
+      rootName: 'next-workspace',
+      reason: 'permission-required',
+      error: unavailable,
+    });
+    mocks.streamText.mockReturnValue(finishedTextStream());
+    const onError = vi.fn();
+
+    await AIClient.getInstance().streamChat(
+      'next-agent',
+      [{ role: 'user', content: 'Continue with the next agent' }],
+      undefined,
+      { onFinish: vi.fn(), onError },
+      'transferred-memory',
+      { snapshot: '# Memory\nCaptured under the previous agent' }
+    );
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(mocks.resolveMemory).toHaveBeenCalledWith('next-agent', {
+      includeMemoryFile: false,
+    });
+    expect(mocks.streamText).toHaveBeenCalledOnce();
+    const request = mocks.streamText.mock.calls[0][0];
+    expect(JSON.stringify(request.messages)).toContain('Captured under the previous agent');
+    expect(request.tools).toBeUndefined();
+  });
+
+  it('revokes live memory tools without cancelling retained grounding or generation', async () => {
+    storeAgent('revoked-memory-agent');
+    const mount = mountedMemory('# Memory');
+    mocks.resolveMemory.mockResolvedValue(mount.resolved);
+    const active = deferredAsyncTextStream();
+    let providerSignal: AbortSignal | undefined;
+    mocks.streamText.mockImplementation((options: { abortSignal?: AbortSignal }) => {
+      providerSignal = options.abortSignal;
+      return { textStream: undefined, fullStream: active.stream };
+    });
+    const onAbort = vi.fn();
+    const onError = vi.fn();
+
+    const request = AIClient.getInstance().streamChat(
+      'revoked-memory-agent',
+      [{ role: 'user', content: 'Wait' }],
+      undefined,
+      { onFinish: vi.fn(), onError, onAbort },
+      'revoked-memory'
+    );
+    await vi.waitFor(() => expect(mocks.streamText).toHaveBeenCalledTimes(1));
+
+    mount.controller.abort();
+    expect(providerSignal?.aborted).toBe(false);
+    expect(onAbort).not.toHaveBeenCalled();
+    const list = mocks.streamText.mock.calls[0][0].tools.agentboard_list_files as {
+      execute(input: unknown, options: unknown): Promise<unknown>;
+    };
+    await expect(list.execute({}, {})).rejects.toMatchObject({
+      name: 'MemoryMountError',
+      code: 'ROOT_UNAVAILABLE',
+    });
+
+    active.resolve({ done: true, value: undefined });
+    await request;
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel an older stream when newer memory preparation fails', async () => {
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      config: {
+        schemaVersion: 2,
+        agents: ['active-memory-agent', 'blocked-memory-agent'].map((id) => ({
+          id,
+          name: id,
+          provider: 'openai',
+          apiProtocol: 'openai-responses',
+          apiKey: 'secret-key',
+          model: 'test-model',
+          systemPrompt: '',
+          temperature: 0.7,
+        })),
+      },
+    } as never);
+    const mount = mountedMemory('# Memory');
+    const blockedError = new MemoryMountError('PERMISSION_REQUIRED');
+    const unavailableMemory = {
+      state: 'unavailable' as const,
+      reason: 'permission-required' as const,
+      error: blockedError,
+    };
+    mocks.resolveMemory.mockImplementation((agentId: string) =>
+      Promise.resolve(agentId === 'active-memory-agent' ? mount.resolved : unavailableMemory)
+    );
+    const active = deferredAsyncTextStream();
+    let activeSignal: AbortSignal | undefined;
+    mocks.streamText.mockImplementation((options: { abortSignal?: AbortSignal }) => {
+      activeSignal = options.abortSignal;
+      return { textStream: undefined, fullStream: active.stream };
+    });
+    const activeOnAbort = vi.fn();
+    const activeRequest = AIClient.getInstance().streamChat(
+      'active-memory-agent',
+      [{ role: 'user', content: 'Keep running' }],
+      undefined,
+      { onFinish: vi.fn(), onError: vi.fn(), onAbort: activeOnAbort },
+      'active-memory-stream'
+    );
+    await vi.waitFor(() => expect(mocks.streamText).toHaveBeenCalledTimes(1));
+
+    const blockedOnError = vi.fn();
+    await AIClient.getInstance().streamChat(
+      'blocked-memory-agent',
+      [{ role: 'user', content: 'Fail before takeover' }],
+      undefined,
+      { onFinish: vi.fn(), onError: blockedOnError, onAbort: vi.fn() },
+      'blocked-memory-stream'
+    );
+
+    expect(blockedOnError).toHaveBeenCalledWith(blockedError);
+    expect(mocks.streamText).toHaveBeenCalledTimes(1);
+    expect(activeSignal?.aborted).toBe(false);
+    expect(activeOnAbort).not.toHaveBeenCalled();
+
+    expect(AIClient.getInstance().cancelStream('active-memory-stream')).toBe(true);
+    active.reject(new DOMException('cancelled', 'AbortError'));
+    await activeRequest;
   });
 
   it('keeps cancellation ownership scoped to each overlapping stream', async () => {

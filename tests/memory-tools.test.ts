@@ -28,20 +28,110 @@ describe('mounted memory tools', () => {
     const read = executable(tools, MEMORY_TOOL_NAMES.read);
     const remove = executable(tools, MEMORY_TOOL_NAMES.delete);
 
-    const created = (await write.execute(
-      { path: 'memory/durable.md', content: 'durable fact' },
-      {}
-    )) as { revision: string };
+    await write.execute({ path: 'memory/durable.md', content: 'durable fact' }, {});
     await expect(list.execute({ path: 'memory', pattern: 'dur*.md' }, {})).resolves.toMatchObject({
       entries: [{ path: 'memory/durable.md', type: 'file' }],
       truncated: false,
     });
+    const current = (await read.execute(
+      { path: 'memory/durable.md', agentId: 'another-agent', root: '/tmp' },
+      {}
+    )) as { content: string; revision: string };
+    expect(current.content).toBe('durable fact');
     await expect(
-      read.execute({ path: 'memory/durable.md', agentId: 'another-agent', root: '/tmp' }, {})
-    ).resolves.toMatchObject({ content: 'durable fact' });
-    await expect(
-      remove.execute({ path: 'memory/durable.md', expectedRevision: created.revision }, {})
+      remove.execute({ path: 'memory/durable.md', expectedRevision: current.revision }, {})
     ).resolves.toEqual({ path: 'memory/durable.md', deleted: true });
+  });
+
+  it('requires a path-bound, single-use read from the same request before mutation', async () => {
+    const root = new FakeMemoryDirectoryHandle('private-root');
+    await initializeMemoryRoot(root);
+    const filesystem = new MemoryFilesystem(root);
+    const tools = createMemoryTools(filesystem, new AbortController().signal);
+    const write = executable(tools, MEMORY_TOOL_NAMES.write);
+    const read = executable(tools, MEMORY_TOOL_NAMES.read);
+    const remove = executable(tools, MEMORY_TOOL_NAMES.delete);
+
+    const createdA = (await write.execute({ path: 'memory/a.md', content: 'same bytes' }, {})) as {
+      revision: string;
+    };
+    await write.execute({ path: 'memory/b.md', content: 'same bytes' }, {});
+
+    await expect(
+      remove.execute({ path: 'memory/a.md', expectedRevision: createdA.revision }, {})
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+
+    const readA = (await read.execute({ path: 'memory/a.md' }, {})) as { revision: string };
+    await expect(
+      remove.execute({ path: 'memory/b.md', expectedRevision: readA.revision }, {})
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+    await expect(filesystem.readFile('memory/b.md')).resolves.toMatchObject({
+      content: 'same bytes',
+    });
+
+    await expect(
+      write.execute(
+        { path: 'memory/a.md', content: 'updated', expectedRevision: readA.revision },
+        {}
+      )
+    ).resolves.toMatchObject({ content: 'updated' });
+    await expect(
+      remove.execute({ path: 'memory/a.md', expectedRevision: readA.revision }, {})
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+
+    const nextRequestTools = createMemoryTools(filesystem, new AbortController().signal);
+    await expect(
+      executable(nextRequestTools, MEMORY_TOOL_NAMES.delete).execute(
+        { path: 'memory/b.md', expectedRevision: readA.revision },
+        {}
+      )
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+  });
+
+  it('preserves an external edit that races a fresh read', async () => {
+    const root = new FakeMemoryDirectoryHandle('private-root');
+    await initializeMemoryRoot(root);
+    const filesystem = new MemoryFilesystem(root);
+    const tools = createMemoryTools(filesystem, new AbortController().signal);
+    const read = executable(tools, MEMORY_TOOL_NAMES.read);
+    const write = executable(tools, MEMORY_TOOL_NAMES.write);
+    await write.execute({ path: 'memory/race.md', content: 'before' }, {});
+    const current = (await read.execute({ path: 'memory/race.md' }, {})) as {
+      revision: string;
+    };
+
+    await root.writeExternal('memory/race.md', 'external edit');
+    await expect(
+      write.execute(
+        { path: 'memory/race.md', content: 'stale rewrite', expectedRevision: current.revision },
+        {}
+      )
+    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    await expect(filesystem.readFile('memory/race.md')).resolves.toMatchObject({
+      content: 'external edit',
+    });
+  });
+
+  it('consumes a mismatched read receipt before rejecting the mutation', async () => {
+    const root = new FakeMemoryDirectoryHandle('private-root');
+    await initializeMemoryRoot(root);
+    const tools = createMemoryTools(new MemoryFilesystem(root), new AbortController().signal);
+    const read = executable(tools, MEMORY_TOOL_NAMES.read);
+    const write = executable(tools, MEMORY_TOOL_NAMES.write);
+    const current = (await read.execute({ path: 'MEMORY.md' }, {})) as { revision: string };
+
+    await expect(
+      write.execute(
+        { path: 'MEMORY.md', content: '# Changed', expectedRevision: `sha256:${'0'.repeat(64)}` },
+        {}
+      )
+    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    await expect(
+      write.execute(
+        { path: 'MEMORY.md', content: '# Changed', expectedRevision: current.revision },
+        {}
+      )
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
   });
 
   it('rejects every captured tool closure after its authority is revoked', async () => {

@@ -67,6 +67,11 @@ export type ResolvedMemory =
       error: MemoryMountError;
     };
 
+export interface ResolveMemoryOptions {
+  /** Ordinary turns need live tools but must not refresh the conversation snapshot. */
+  includeMemoryFile?: boolean;
+}
+
 function mapFilesystemFailure(error: unknown): MemoryMountError {
   if (!(error instanceof MemoryFileError)) return new MemoryMountError('ROOT_UNAVAILABLE');
   if (error.code === 'FILE_TOO_LARGE') return new MemoryMountError('MEMORY_TOO_LARGE');
@@ -180,7 +185,10 @@ export class MemoryManager {
     this.revoke(agentId);
   }
 
-  async resolve(agentId: string): Promise<ResolvedMemory> {
+  async resolve(
+    agentId: string,
+    { includeMemoryFile = true }: ResolveMemoryOptions = {}
+  ): Promise<ResolvedMemory> {
     const authorityEpoch = this.captureAuthorityEpoch(agentId);
     let binding;
     try {
@@ -203,7 +211,6 @@ export class MemoryManager {
       }
       return { state: 'unmounted' };
     }
-
     this.beginBoundResolution(agentId);
     try {
       if (!this.isAuthorityEpochCurrent(agentId, authorityEpoch)) {
@@ -220,7 +227,7 @@ export class MemoryManager {
       const filesystem = new MemoryFilesystem(binding.handle);
       try {
         await filesystem.validateLayout();
-        const memoryFile = await filesystem.readMemory();
+        const memoryFile = includeMemoryFile ? await filesystem.readMemory() : undefined;
         const authoritySignal = await this.authoritySignal(agentId, binding.handle, authorityEpoch);
         if (!authoritySignal) return this.bindingChanged(rootName);
         return {

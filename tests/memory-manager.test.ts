@@ -53,6 +53,25 @@ describe('MemoryManager', () => {
     });
   });
 
+  it('resolves live tools without rereading the conversation snapshot', async () => {
+    const manager = new MemoryManager(new InMemoryBindingRepository());
+    const root = new FakeMemoryDirectoryHandle('workspace');
+    await manager.connect('agent', root);
+    const getFileHandle = vi.spyOn(root, 'getFileHandle');
+
+    await expect(manager.resolve('agent', { includeMemoryFile: false })).resolves.toMatchObject({
+      state: 'available',
+      rootName: 'workspace',
+    });
+    expect(getFileHandle).not.toHaveBeenCalled();
+
+    await expect(manager.resolve('agent')).resolves.toMatchObject({
+      state: 'available',
+      memoryFile: { path: 'MEMORY.md' },
+    });
+    expect(getFileHandle).toHaveBeenCalledWith('MEMORY.md', { create: false });
+  });
+
   it('keeps concurrent resolutions of a never-mounted agent stateless', async () => {
     const repository = new InMemoryBindingRepository();
     const manager = new MemoryManager(repository);

@@ -6,6 +6,7 @@
 import log from '../lib/logger';
 import { raceWithAbort } from '../lib/abort';
 import { AIClient, type StreamCallbacks } from '../lib/ai/client';
+import { MemoryMountError } from '../lib/memory/manager';
 import {
   ConfigStorage,
   ConfigValidationError,
@@ -673,7 +674,7 @@ chrome.runtime.onConnect.addListener((port) => {
     activeStreams.set(connectionId, connection);
 
     port.onMessage.addListener(async (msg: PortMessage) => {
-      log.debug('[Background] Received message on port:', msg.type, msg);
+      log.debug('[Background] Received message on port:', msg.type);
       if (msg.type === 'STREAM_CHAT') {
         if (activeStreams.get(connectionId) !== connection) {
           log.error('[Background] Superseded connection ignored');
@@ -703,7 +704,7 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           await raceWithAbort(toolsReady, preparation.signal);
           if (!isCurrentStream()) return;
-          const { agentId, tabId, messages } = msg;
+          const { agentId, tabId, messages, memoryContext } = msg;
 
           // Convert messages to CoreMessage format
           const coreMessages: CoreMessage[] = messages.map(
@@ -714,13 +715,16 @@ chrome.runtime.onConnect.addListener((port) => {
               }) as CoreMessage
           );
 
-          log.debug(
-            '[Background] Calling streamChat with messages:',
-            coreMessages,
-            'for tab:',
-            tabId
-          );
+          log.debug('[Background] Calling streamChat', {
+            messageCount: coreMessages.length,
+            tabId,
+          });
           const streamCallbacks: StreamCallbacks = {
+            onMemoryContext: (context) => {
+              if (isCurrentStream()) {
+                port.postMessage({ type: 'STREAM_MEMORY_CONTEXT', memoryContext: context });
+              }
+            },
             // Text block callbacks for interleaved display
             onTextBlockStart: (blockId) => {
               if (isCurrentStream()) {
@@ -821,17 +825,27 @@ chrome.runtime.onConnect.addListener((port) => {
               });
               finishCurrentStream();
             },
-            onError: () => {
+            onError: (error) => {
               if (!isCurrentStream()) return;
               log.error('[Background] AI stream failed');
               port.postMessage({
                 type: 'STREAM_ERROR',
-                error: 'AI request failed. Check the agent connection settings and try again.',
+                error:
+                  error instanceof MemoryMountError
+                    ? error.message
+                    : 'AI request failed. Check the agent connection settings and try again.',
               });
               finishCurrentStream();
             },
           };
-          await aiClient.streamChat(agentId, coreMessages, tabId, streamCallbacks, streamId);
+          await aiClient.streamChat(
+            agentId,
+            coreMessages,
+            tabId,
+            streamCallbacks,
+            streamId,
+            memoryContext
+          );
           // Superseded and user-cancelled streams return without an error callback.
           finishCurrentStream();
         } catch (error) {
