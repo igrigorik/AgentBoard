@@ -9,12 +9,8 @@ import { streamText, CoreMessage } from 'ai';
 import { raceWithAbort } from '../abort';
 import type { AgentConfig } from '../storage/config';
 import type { ToolCall } from '../../types';
-import {
-  ConfigStorage,
-  ConfigValidationError,
-  configValidationMessage,
-  resolveSystemPrompt,
-} from '../storage/config';
+import { ConfigStorage, ConfigValidationError, configValidationMessage } from '../storage/config';
+import { composeSystemPrompt } from './system-prompt';
 import { getToolRegistry } from '../webmcp/tool-registry';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
@@ -236,14 +232,13 @@ export class AIClient {
       const toolSnapshot = toolRegistry.captureToolSnapshot(tabId);
 
       // Build the prompt and tool catalog from one synchronous remote-session snapshot.
-      const systemParts = [resolveSystemPrompt(agent), toolSnapshot.mcpInstructions].filter(
-        Boolean
-      );
-      const systemPrompt = systemParts.join('\n\n');
-
-      const messagesWithSystem: CoreMessage[] = systemPrompt
-        ? [{ role: 'system', content: systemPrompt }, ...messages]
-        : messages;
+      const systemPrompt = composeSystemPrompt(agent, {
+        mcpInstructions: toolSnapshot.mcpInstructions,
+      });
+      const messagesWithSystem: CoreMessage[] = [
+        { role: 'system', content: systemPrompt },
+        ...messages,
+      ];
 
       // Subscribe to tab-scoped tool changes for the duration of this stream.
       // When tools change (navigation, user toggle, etc.), we stop after the

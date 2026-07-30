@@ -4,6 +4,7 @@ import {
   MAX_AUTO_CONTINUATIONS,
   selectStreamContinuation,
   stepLimitContinuationMessage,
+  toolsChangedContinuationMessage,
 } from '../src/lib/ai/stream-policy';
 
 describe('stream policy', () => {
@@ -52,9 +53,14 @@ describe('stream policy', () => {
     ).toBeNull();
   });
 
-  it('builds the production wrap-up instruction from configured or default limits', () => {
+  it('builds fixed product-authored continuation notices without external data', () => {
+    const toolsChanged = toolsChangedContinuationMessage();
+    expect(toolsChanged).toContain('not authored by the user');
+    expect(toolsChanged).toContain('available tools were refreshed');
+
     expect(stepLimitContinuationMessage(15)).toContain('all 15 tool steps');
     expect(stepLimitContinuationMessage(undefined)).toContain('all 10 tool steps');
     expect(stepLimitContinuationMessage(15)).toContain('Do NOT call any more tools');
+    expect(stepLimitContinuationMessage(15)).toContain('not authored by the user');
   });
 });

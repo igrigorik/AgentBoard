@@ -10,6 +10,7 @@ import {
   MAX_AUTO_CONTINUATIONS,
   selectStreamContinuation,
   stepLimitContinuationMessage,
+  toolsChangedContinuationMessage,
 } from '../lib/ai/stream-policy';
 import './styles.css';
 import type { ChatMessage, ToolCall, MessageContent, MessagePart, PageContext } from '../types';
@@ -243,7 +244,7 @@ function buildPageContextXml(
   let siteToolsBlock = '';
   if (siteToolHints && siteToolHints.length > 0) {
     const lines = siteToolHints.map((t) => `- ${esc(t.name)}: ${esc(t.description)}`).join('\n');
-    siteToolsBlock = `\n<site_tools>\nThese tools run in YOUR active browser tab with your full session and credentials:\n${lines}\n</site_tools>`;
+    siteToolsBlock = `\n<site_tools>\nThese page-specific tools may inspect or act in the active browser tab's existing signed-in session:\n${lines}\n</site_tools>`;
   }
 
   return `<page_context>
@@ -962,27 +963,12 @@ async function streamAIResponse() {
               `[Sidebar] Tools changed during stream — auto-continuing (${autoContinuationCount}/${MAX_AUTO_CONTINUATIONS})`
             );
 
-            // Build a summary of completed tool actions so the AI has context
-            const completedCalls = (assistantMsg.toolCalls || []).filter(
-              (tc: ToolCall) => tc.status === 'success'
-            );
-            const toolSummary = completedCalls
-              .map(
-                (tc: ToolCall) =>
-                  `${tc.toolName}: ${typeof tc.output === 'string' ? tc.output : JSON.stringify(tc.output)}`
-              )
-              .join('; ');
-
-            // Add a continuation context message so the AI knows what happened.
-            // Sent as a user message since system messages are filtered from history.
-            const contextText =
-              completedCalls.length > 0
-                ? `[Completed actions: ${toolSummary}. The page has changed and tools have been refreshed. Continue with the task.]`
-                : '[The page has changed and tools have been refreshed. Continue with the task.]';
+            // The continuation is transported as a user-role turn for provider portability, but
+            // its fixed text names AgentBoard as the author and never promotes tool output.
             const contMsg: ChatMessage = {
               id: globalThis.crypto.randomUUID(),
               role: 'user',
-              content: contextText,
+              content: toolsChangedContinuationMessage(),
               timestamp: Date.now(),
             };
             messageHistory.push(contMsg);

@@ -93,41 +93,6 @@ export interface BuiltinScript {
   // Future: per-tool configuration (timeouts, limits, etc.)
 }
 
-/**
- * Base system prompt for tab-attached assistant.
- * Always prepended — agent.systemPrompt (user's custom additions) is appended after.
- *
- * Design decisions:
- * - Identity line ("same access as the user") overrides LLM training priors
- *   that "AI can't access private pages." Without it, models hallucinate auth
- *   constraints and refuse to call tools that would work fine.
- * - <site_tools> reference primes model to check the per-message hint block
- *   that lists domain-specific tools for the current tab.
- * - Anti-refusal directives directly counter phantom refusal training priors.
- */
-export const BASE_SYSTEM_PROMPT = `You are an assistant running in the user's browser tab. The user has delegated their full browser session to you, including cookies, credentials, and page access, so you can operate on their behalf.
-
-CONTEXT:
-When available, user messages include <page_context> with the tab URL and title captured for that turn.
-The latest block includes <site_tools> when page-specific tools are available.
-
-TOOL SELECTION:
-1. ALWAYS prefer and evaluate <site_tools> first to acquire context and perform requested actions
-2. For external URLs not in the current tab, use fetch_url
-3. Other tools (MCP, system) are available for specialized tasks
-
-Do not refuse tools listed in <site_tools> or claim you cannot access the right context. You are operating on the user's behalf and they have delegated their permission to do so.
-Never hallucinate content. Use tools to acquire it.`;
-
-/**
- * Compose final system prompt: base + optional user additions.
- * Agent.systemPrompt is the user's custom instructions (empty = base only).
- */
-export function resolveSystemPrompt(agent: AgentConfig): string {
-  const custom = agent.systemPrompt?.trim();
-  return custom ? `${BASE_SYSTEM_PROMPT}\n\n${custom}` : BASE_SYSTEM_PROMPT;
-}
-
 // Default agents to create on first install
 export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
   {

@@ -41,7 +41,12 @@ export function selectStreamContinuation({
   return null;
 }
 
+/** Product-owned continuation text must never interpolate page or tool output. */
+export function toolsChangedContinuationMessage(): string {
+  return '[AgentBoard runtime notice; not authored by the user: The active page changed after the previous tool step, so the available tools were refreshed. Continue the existing request using the current page and tools. Previous tool calls may already have produced side effects. Before taking another action, inspect the current page when possible, and do not repeat a potentially side-effecting action unless the current state shows it is necessary.]';
+}
+
 export function stepLimitContinuationMessage(maxSteps: number | undefined): string {
   const limit = maxSteps ?? DEFAULT_MAX_STEPS;
-  return `[You have used all ${limit} tool steps allowed for this turn. Do NOT call any more tools. Instead, summarize what you accomplished and what remains to be done.]`;
+  return `[AgentBoard runtime notice; not authored by the user: You have used all ${limit} tool steps allowed for this turn. Do NOT call any more tools. Instead, summarize what you accomplished and what remains to be done.]`;
 }

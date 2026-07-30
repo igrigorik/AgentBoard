@@ -165,6 +165,10 @@ describe('sidebar model history', () => {
     expect(firstPayload.messages[0].content).toContain('https://video.example/watch/a');
     expect(firstPayload.messages[0].content).toContain('<title>Video A</title>');
     expect(firstPayload.messages[0].content).toContain('video_a_tool');
+    expect(firstPayload.messages[0].content).toContain(
+      "active browser tab's existing signed-in session"
+    );
+    expect(firstPayload.messages[0].content).not.toContain('full session and credentials');
     await vi.waitFor(() => expect(ports[0].disconnect).toHaveBeenCalledOnce());
 
     currentHints = [{ name: 'video_b_tool', description: 'Tool available on video B' }];
