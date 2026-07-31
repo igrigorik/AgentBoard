@@ -4,12 +4,11 @@
  */
 
 import log from '../logger';
-import { tool } from 'ai';
-import { z } from 'zod';
-import { jsonSchemaToZod } from '../schema/jsonschema-to-zod';
+import { tool, jsonSchema } from 'ai';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { RemoteMCPSession, RemoteMCPToolCapability } from './manager';
 import type { JSONSchema7 } from 'json-schema';
+import { normalizeToolInputSchema } from '../schema/normalize-tool-input-schema';
 
 /**
  * Convert an MCP tool to AI SDK tool format
@@ -20,27 +19,16 @@ export function convertMCPToAISDKTool(
 ) {
   const { tool: mcpTool } = capability;
 
-  // Convert the input schema
-  let zodSchema;
-  try {
-    zodSchema = mcpTool.inputSchema
-      ? jsonSchemaToZod(mcpTool.inputSchema as JSONSchema7)
-      : z.object({});
-  } catch (error) {
-    log.error(`Failed to convert schema for "${mcpTool.name}":`, error);
-    // Fallback to empty object schema
-    zodSchema = z.object({});
-  }
-
   const toolDefinition = {
     description: mcpTool.description || `Tool: ${mcpTool.name}`,
-    inputSchema: zodSchema,
-    execute: async (
-      args: z.infer<typeof zodSchema>,
-      { abortSignal }: { abortSignal?: AbortSignal } = {}
-    ) => {
+    // Server-provided JSON Schema is passed through verbatim; see
+    // normalizeToolInputSchema for why the Zod round-trip was removed.
+    inputSchema: jsonSchema<unknown>(normalizeToolInputSchema(mcpTool.inputSchema) as JSONSchema7),
+    execute: async (args: unknown, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       // MCP protocol expects an object for arguments, even if empty.
-      const processedArgs = args === undefined || args === null ? {} : args;
+      const processedArgs = (
+        args !== null && typeof args === 'object' && !Array.isArray(args) ? args : {}
+      ) as Record<string, unknown>;
 
       try {
         const result = await session.executeTool(capability, processedArgs, abortSignal);
