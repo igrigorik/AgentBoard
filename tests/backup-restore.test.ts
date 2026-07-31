@@ -74,6 +74,7 @@ describe('backup schema boundary', () => {
       callback?.();
       return Promise.resolve();
     });
+    vi.mocked(chrome.runtime.sendMessage).mockResolvedValue({ success: true });
   });
 
   it('wires recovery controls without reading configuration', async () => {
@@ -240,6 +241,35 @@ describe('backup schema boundary', () => {
     });
   });
 
+  it('clears device-local memory bindings before imported agent IDs take effect', async () => {
+    const prepared = prepareBackupImport(
+      backup('2.0', {
+        schemaVersion: 2,
+        agents: [currentAgent({ endpoint: 'https://replacement.example.test/v1' })],
+      })
+    );
+
+    await applyPreparedBackup(prepared);
+
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({
+      type: 'MEMORY_BINDINGS_RESET',
+    });
+    expect(vi.mocked(chrome.runtime.sendMessage).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(chrome.storage.local.set).mock.invocationCallOrder[0]
+    );
+  });
+
+  it('fails closed before importing when local memory bindings cannot be reset', async () => {
+    vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ success: false });
+    const prepared = prepareBackupImport(
+      backup('2.0', { schemaVersion: 2, agents: [currentAgent()] })
+    );
+
+    await expect(applyPreparedBackup(prepared)).rejects.toThrow('Failed to save restored settings');
+
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
   it('serializes the combined import against stale config mutations', async () => {
     const initialConfig: StorageConfig = {
       schemaVersion: 2,
@@ -359,6 +389,7 @@ describe('backup schema boundary', () => {
 
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
     expect(chrome.storage.local.clear).not.toHaveBeenCalled();
+    expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
   });
 
   it('does not clear, stage, or retry after the combined write fails', async () => {
@@ -402,6 +433,9 @@ describe('backup schema boundary', () => {
     expect(exported.commands).toEqual(commands);
     expect(exported.config.agents[0]).not.toHaveProperty('openaiCompatible');
     expect(exported.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(Object.keys(exported).sort()).toEqual(
+      ['commands', 'config', 'exportedBy', 'extensionVersion', 'timestamp', 'version'].sort()
+    );
     expect(chrome.storage.local.get).toHaveBeenCalledWith(['config', 'slashCommands']);
   });
 });

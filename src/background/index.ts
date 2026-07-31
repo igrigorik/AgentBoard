@@ -6,7 +6,7 @@
 import log from '../lib/logger';
 import { raceWithAbort } from '../lib/abort';
 import { AIClient, type StreamCallbacks } from '../lib/ai/client';
-import { MemoryMountError } from '../lib/memory/manager';
+import { getMemoryManager, MemoryMountError } from '../lib/memory/manager';
 import {
   ConfigStorage,
   ConfigValidationError,
@@ -33,23 +33,11 @@ interface StreamingConnection {
 // AI client and streaming management
 const aiClient = AIClient.getInstance();
 const configStorage = ConfigStorage.getInstance();
+const memoryManager = getMemoryManager();
 const activeStreams = new Map<string, StreamingConnection>();
 
 // WebMCP tab management
 const webmcp = getTabManager();
-
-// Log available agents for debugging
-async function logAvailableAgents() {
-  try {
-    const agents = await aiClient.getAvailableAgents();
-    log.info(
-      '[Background] Available agents:',
-      agents.map((a) => `${a.name} (${a.provider})`)
-    );
-  } catch (error) {
-    log.error('[Background] Failed to get available agents:', error);
-  }
-}
 
 // Create or recreate context menu - needs to happen on every service worker start
 async function setupContextMenu() {
@@ -78,16 +66,12 @@ async function setupContextMenu() {
 }
 
 // Extension installation/update lifecycle
-chrome.runtime.onInstalled.addListener(async (details) => {
+chrome.runtime.onInstalled.addListener((details) => {
   log.info('[Background] Extension installed/updated:', details.reason);
-
-  // Log available agents after installation/update
-  logAvailableAgents();
 });
 
-// Setup context menu and log agents on service worker startup
-logAvailableAgents();
-setupContextMenu();
+// Setup context menu on service worker startup
+void setupContextMenu();
 
 // Configure side panel behavior - DON'T auto-open on click since we need to set path first
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch((error) => {
@@ -302,6 +286,13 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
+function isOptionsPageSender(sender: chrome.runtime.MessageSender): boolean {
+  return (
+    sender.id === chrome.runtime.id &&
+    sender.url === chrome.runtime.getURL('src/options/index.html')
+  );
+}
+
 // Message handler for communication with sidebar and options
 chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendResponse) => {
   log.debug('Background received message:', request.type);
@@ -378,6 +369,37 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
 
     case 'PING':
       sendResponse({ pong: true });
+      return false;
+
+    case 'MEMORY_BINDINGS_RESET':
+      if (!isOptionsPageSender(sender)) {
+        sendResponse({ success: false });
+        return false;
+      }
+      // Imported agent IDs are untrusted, so no existing local capability may
+      // follow an ID across the import boundary. Revoke before and after deletion.
+      memoryManager.revokeAll();
+      void memoryManager.pruneBindings(new Set()).then(
+        () => {
+          memoryManager.revokeAll();
+          sendResponse({ success: true });
+        },
+        () => {
+          memoryManager.revokeAll();
+          sendResponse({ success: false });
+        }
+      );
+      return true;
+
+    case 'MEMORY_BINDING_CHANGED':
+      if (!isOptionsPageSender(sender)) {
+        sendResponse({ success: false });
+        return false;
+      }
+      // Options owns the user gesture and IndexedDB mutation; this worker owns
+      // live model closures and must retire them before acknowledging the change.
+      memoryManager.revoke(request.agentId);
+      sendResponse({ success: true });
       return false;
 
     case 'WEBMCP_CALL_TOOL': {
@@ -892,12 +914,9 @@ const toolsReady = (async () => {
 
 // Listen for config changes from Options page
 configStorage.onChange(
-  (newConfig: StorageConfig) => {
+  async (newConfig: StorageConfig) => {
     webmcp.setRelayLogLevel(newConfig.logLevel);
-    log.debug(
-      '[Background] Config updated - available agents:',
-      newConfig.agents.map((agent) => `${agent.name} (${agent.provider})`)
-    );
+    log.debug('[Background] Configuration updated');
 
     const toolRegistry = getToolRegistry();
 
@@ -912,10 +931,19 @@ configStorage.onChange(
         });
     }
     void toolRegistry.loadRemoteTools(newConfig);
+    try {
+      // ConfigStorage serializes async change callbacks, so stale reconciliations
+      // cannot overtake a newer configuration.
+      await memoryManager.pruneBindings(new Set(newConfig.agents.map(({ id }) => id)));
+    } catch {
+      memoryManager.revokeAll();
+      log.error('[Background] Memory connection reconciliation failed');
+    }
   },
   (error) => {
     getToolRegistry().revokeRemoteTools();
-    log.error('[Background] Invalid configuration revoked remote MCP tools:', error.code);
+    memoryManager.revokeAll();
+    log.error('[Background] Invalid configuration revoked runtime capabilities:', error.code);
   }
 );
 

@@ -344,6 +344,79 @@ header h1 {
   font-weight: 600;
 }
 
+.agent-memory-section {
+  min-width: 0;
+  margin: 4px 0 20px;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.agent-memory-section legend {
+  padding: 0 6px;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.agent-memory-section code {
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.agent-memory-details {
+  margin: 10px 0 12px;
+  color: #666;
+  font-size: 12px;
+}
+
+.agent-memory-details summary {
+  width: fit-content;
+  color: #374151;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.agent-memory-details ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0 18px;
+}
+
+.agent-memory-status {
+  display: grid;
+  gap: 2px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8f9fa;
+}
+
+.agent-memory-status strong {
+  color: #4b5563;
+}
+
+.agent-memory-status strong[data-tone='connected'] {
+  color: #047857;
+}
+
+.agent-memory-status strong[data-tone='error'] {
+  color: #b91c1c;
+}
+
+.agent-memory-status span {
+  color: #666;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.agent-memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 /* Input validation states - only show after user interaction */
 input:user-invalid,
 textarea:user-invalid,

@@ -324,18 +324,36 @@ describe('MemoryManager', () => {
     });
   });
 
-  it('renews a persisted handle permission without selecting the folder again', async () => {
+  it('prepares a persisted handle so permission can be requested from a later user gesture', async () => {
     const manager = new MemoryManager(new InMemoryBindingRepository());
     const root = new FakeMemoryDirectoryHandle('renewed-root');
     await manager.connect('agent', root);
     root.setPermission('prompt');
     root.setRequestedPermission('granted');
 
-    await manager.renewPermission('agent');
+    const renewPermission = await manager.preparePermissionRenewal('agent');
+    await renewPermission();
 
     await expect(manager.resolve('agent')).resolves.toMatchObject({
       state: 'available',
       rootName: 'renewed-root',
+    });
+  });
+
+  it('rejects a prepared permission request after the agent binding changes', async () => {
+    const manager = new MemoryManager(new InMemoryBindingRepository());
+    const previousRoot = new FakeMemoryDirectoryHandle('previous-root');
+    const currentRoot = new FakeMemoryDirectoryHandle('current-root');
+    await manager.connect('agent', previousRoot);
+    previousRoot.setPermission('prompt');
+    previousRoot.setRequestedPermission('granted');
+    const renewPreviousPermission = await manager.preparePermissionRenewal('agent');
+    await manager.connect('agent', currentRoot);
+
+    await expect(renewPreviousPermission()).rejects.toMatchObject({ code: 'BINDING_CHANGED' });
+    await expect(manager.resolve('agent')).resolves.toMatchObject({
+      state: 'available',
+      rootName: 'current-root',
     });
   });
 

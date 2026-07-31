@@ -139,7 +139,12 @@
             <p class="section-description">
               Backup files are plaintext and can contain API keys, authentication tokens, endpoints,
               model IDs, system prompts, executable user scripts, and commands. Store them as
-              secrets.
+              secrets. Exports never include Local Memory connections or files.
+            </p>
+            <p class="section-description">
+              Importing settings removes every Local Memory connection on this device before the
+              imported agents become active. It never deletes folders or files; reconnect them
+              afterward.
             </p>
 
             <div class="backup-actions">
@@ -372,6 +377,87 @@
                 placeholder="Add custom instructions here... (leave empty to use defaults)"
               ></textarea>
             </div>
+
+            <fieldset
+              id="agent-memory-section"
+              class="agent-memory-section hidden"
+              aria-busy="false"
+            >
+              <legend>Local Memory <span class="field-label-qualifier">Optional</span></legend>
+              <p class="field-hint" id="agent-memory-description">
+                Connect a dedicated folder without secrets for durable memory. Each conversation
+                captures <code>MEMORY.md</code> once. That snapshot stays with the conversation and
+                may be sent to another agent’s AI endpoint if you switch agents. File tools use the
+                folder connected to the currently selected agent.
+              </p>
+
+              <details class="agent-memory-details">
+                <summary>File access and sharing</summary>
+                <ul>
+                  <li>
+                    AgentBoard can read bounded UTF-8 files and send their contents, relative names,
+                    and entry types to the selected AI endpoint.
+                  </li>
+                  <li>
+                    It can create or update <code>MEMORY.md</code> and files under
+                    <code>memory/</code>, and delete individual files under
+                    <code>memory/</code> after reading their current version. Connecting creates
+                    <code>MEMORY.md</code> and <code>memory/</code> when missing; conversations are
+                    never saved automatically.
+                  </li>
+                  <li>
+                    Connecting the same folder to multiple agents shares live file changes across
+                    their selected endpoints. Parent and child folder overlaps are rejected.
+                  </li>
+                  <li>
+                    <code>MEMORY.md</code> is limited to 64 KiB, other reads to 256 KiB, and
+                    listings to 200 matching entries.
+                  </li>
+                  <li>
+                    Folder connections stay on this device, are excluded from settings backups, and
+                    are removed by settings imports.
+                  </li>
+                </ul>
+              </details>
+
+              <div
+                id="agent-memory-status"
+                class="agent-memory-status"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <strong id="agent-memory-state">Not connected</strong>
+                <span id="agent-memory-detail">Save this agent before connecting a folder.</span>
+              </div>
+              <div
+                class="agent-memory-actions"
+                role="group"
+                aria-label="Local Memory actions"
+                aria-describedby="agent-memory-description"
+              >
+                <button
+                  id="agent-memory-connect"
+                  type="button"
+                  class="button button-secondary"
+                  disabled
+                >
+                  Connect folder
+                </button>
+                <button
+                  id="agent-memory-disconnect"
+                  type="button"
+                  class="button button-danger hidden"
+                  disabled
+                >
+                  Disconnect
+                </button>
+              </div>
+              <p class="field-hint">
+                Disconnecting or deleting the agent removes only this connection. It never deletes
+                the folder or its files.
+              </p>
+            </fieldset>
 
             <div class="form-row">
               <div class="form-group">

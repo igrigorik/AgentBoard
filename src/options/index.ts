@@ -29,6 +29,7 @@ import {
 } from './card-component';
 import { providerForApiProtocol } from '../lib/ai/protocol';
 import { protocolBadgeLabel } from './agent-protocol';
+import { AgentMemoryControls } from './agent-memory';
 import {
   agentToEditorState,
   defaultAgentEditorState,
@@ -41,15 +42,17 @@ import type { ExtensionMessage } from '../types';
 
 // Get config storage instance
 const configStorage = ConfigStorage.getInstance();
+let agentMemoryControls: AgentMemoryControls;
 let editingAgentId: string | null = null;
 let connectionTestGeneration = 0;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
-  setupEventListeners();
-  // Recovery must remain operable even when configuration-dependent rendering fails.
+  // Recovery must remain operable even when the editor DOM or configuration is unavailable.
   await initializeBackupRestore();
   try {
+    agentMemoryControls = new AgentMemoryControls(document);
+    setupEventListeners();
     await renderAgents();
     await loadLogLevel();
     await loadMCPConfig();
@@ -139,6 +142,8 @@ function createAgentCard(agent: AgentConfig): HTMLElement {
 }
 
 function setupEventListeners() {
+  agentMemoryControls.initialize();
+
   // Create agent button
   document.getElementById('create-agent')?.addEventListener('click', () => openCreateModal());
 
@@ -180,6 +185,7 @@ function agentForm(): HTMLFormElement {
 function resetAgentEditorOnClose(): void {
   editingAgentId = null;
   connectionTestGeneration += 1;
+  void agentMemoryControls.show(null);
 }
 
 function setAgentModalTitle(title: string): void {
@@ -193,6 +199,7 @@ function openCreateModal() {
   const form = agentForm();
   setAgentModalTitle('New Agent');
   renderAgentEditor(form, defaultAgentEditorState());
+  void agentMemoryControls.show(null);
   setupModalFooter({
     modalId: 'agent-modal',
     onSave: saveAgent,
@@ -213,12 +220,17 @@ async function openEditModal(agentId: string) {
   const form = agentForm();
   setAgentModalTitle('Edit Agent');
   renderAgentEditor(form, agentToEditorState(agent));
+  void agentMemoryControls.show(agentId);
   setupModalFooter({
     modalId: 'agent-modal',
     onSave: saveAgent,
     onTest: testCurrentAgent,
     onDelete: () => {
-      if (window.confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) {
+      if (
+        window.confirm(
+          `Delete agent "${agent.name}"? Its Local Memory connection will be removed, but no local files will be deleted. This cannot be undone.`
+        )
+      ) {
         void deleteAgent(agentId);
       }
     },
@@ -313,6 +325,7 @@ async function testCurrentAgent() {
 
 async function deleteAgent(agentId: string) {
   try {
+    await agentMemoryControls.removeBinding(agentId);
     await configStorage.deleteAgent(agentId);
     showStatus('Agent deleted successfully', 'success');
 

@@ -125,6 +125,15 @@ export interface GetSiteToolHintsMessage {
   tabId: number;
 }
 
+export interface MemoryBindingChangedMessage {
+  type: 'MEMORY_BINDING_CHANGED';
+  agentId: string;
+}
+
+export interface MemoryBindingsResetMessage {
+  type: 'MEMORY_BINDINGS_RESET';
+}
+
 // Union type for all possible extension messages
 export type ExtensionMessage =
   | GetConfigMessage
@@ -145,7 +154,9 @@ export type ExtensionMessage =
   | WebMCPGetToolsMessage
   | WebMCPToolsChangedMessage
   | WebMCPScriptsUpdatedMessage
-  | GetSiteToolHintsMessage;
+  | GetSiteToolHintsMessage
+  | MemoryBindingChangedMessage
+  | MemoryBindingsResetMessage;
 
 // Response wrapper for message handlers
 export interface MessageResponse<T = unknown> {

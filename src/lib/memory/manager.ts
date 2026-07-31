@@ -43,7 +43,7 @@ function memoryMountErrorMessage(code: MemoryMountErrorCode): string {
     case 'MEMORY_TOO_LARGE':
       return 'MEMORY.md exceeds AgentBoard’s 64 KiB limit.';
     case 'NESTED_ROOT':
-      return 'Choose the same workspace or a separate folder; parent and child memory folders cannot be connected to different agents.';
+      return 'Choose the same folder or a separate folder; parent and child memory folders cannot be connected to different agents.';
     case 'BINDING_CHANGED':
       return 'The agent’s memory folder changed. Send the request again.';
     default:
@@ -71,6 +71,8 @@ export interface ResolveMemoryOptions {
   /** Ordinary turns need live tools but must not refresh the conversation snapshot. */
   includeMemoryFile?: boolean;
 }
+
+export type MemoryPermissionRenewal = () => Promise<void>;
 
 function mapFilesystemFailure(error: unknown): MemoryMountError {
   if (!(error instanceof MemoryFileError)) return new MemoryMountError('ROOT_UNAVAILABLE');
@@ -165,8 +167,11 @@ export class MemoryManager {
     }
   }
 
-  /** Renew a persisted handle only from a visible user-activated extension page. */
-  async renewPermission(agentId: string): Promise<void> {
+  /**
+   * Load the persisted handle before a user gesture. Invoking the returned function
+   * calls requestPermission before its first await, then rejects if the binding changed.
+   */
+  async preparePermissionRenewal(agentId: string): Promise<MemoryPermissionRenewal> {
     let binding;
     try {
       binding = await this.repository.get(agentId);
@@ -175,14 +180,34 @@ export class MemoryManager {
     }
     if (!binding) throw new MemoryMountError('ROOT_UNAVAILABLE');
 
-    let permission: PermissionState;
-    try {
-      permission = await binding.handle.requestPermission({ mode: 'readwrite' });
-    } catch {
-      permission = 'denied';
-    }
-    if (permission !== 'granted') throw new MemoryMountError('PERMISSION_REQUIRED');
-    this.revoke(agentId);
+    const requestedHandle = binding.handle;
+    return async () => {
+      let permission: PermissionState;
+      try {
+        permission = await requestedHandle.requestPermission({ mode: 'readwrite' });
+      } catch {
+        permission = 'denied';
+      }
+      if (permission !== 'granted') throw new MemoryMountError('PERMISSION_REQUIRED');
+
+      let currentBinding;
+      try {
+        currentBinding = await this.repository.get(agentId);
+      } catch {
+        throw new MemoryMountError('BINDING_STORAGE_UNAVAILABLE');
+      }
+
+      let stillBound = false;
+      try {
+        stillBound =
+          currentBinding !== undefined &&
+          (await currentBinding.handle.isSameEntry(requestedHandle));
+      } catch {
+        // A handle that cannot prove identity cannot renew the current binding.
+      }
+      if (!stillBound) throw new MemoryMountError('BINDING_CHANGED');
+      this.revoke(agentId);
+    };
   }
 
   async resolve(

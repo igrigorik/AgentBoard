@@ -7,7 +7,7 @@ import log from '../lib/logger';
 import { ConfigStorage, parseStorageConfig, type StorageConfig } from '../lib/storage/config';
 import { validateCommandStorage } from '../lib/commands/storage';
 import { runStorageOperation } from '../lib/storage/operation-queue';
-import type { CommandStorage } from '../types';
+import type { CommandStorage, ExtensionMessage, MessageResponse } from '../types';
 
 export const BACKUP_VERSION = '2.0' as const;
 const LEGACY_BACKUP_VERSION = '1.0' as const;
@@ -175,6 +175,12 @@ export function prepareBackupImport(value: unknown): PreparedBackup {
   return { config: parsed.config, commands };
 }
 
+async function resetMemoryBindingsForImport(): Promise<void> {
+  const message = { type: 'MEMORY_BINDINGS_RESET' } satisfies ExtensionMessage;
+  const response = (await chrome.runtime.sendMessage(message)) as MessageResponse | undefined;
+  if (!response?.success) throw new Error('Failed to reset Local Memory connections');
+}
+
 /**
  * Chrome storage has no transaction API. One validated two-key set is the
  * narrowest commit boundary and avoids the destructive empty-state window.
@@ -188,6 +194,9 @@ export async function applyPreparedBackup(data: PreparedBackup): Promise<void> {
       const parsed = parseStorageConfig(snapshot.config);
       if (parsed.migrated) throw new Error('Invalid prepared backup configuration');
       const commands = validateCommandStorage(snapshot.commands);
+      // Imported IDs are untrusted. Clear device-local capabilities only after
+      // validation, but before the imported configuration can make those IDs active.
+      await resetMemoryBindingsForImport();
       await chrome.storage.local.set({
         config: parsed.config,
         slashCommands: commands,

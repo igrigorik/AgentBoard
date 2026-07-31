@@ -9,12 +9,20 @@ const mocks = vi.hoisted(() => ({
   configStorage: {
     onChange: vi.fn(),
   },
+  configChange: undefined as ((config: unknown) => void | Promise<void>) | undefined,
+  configError: undefined as ((error: { code: string }) => void) | undefined,
   toolRegistry: {
     registerSystemTools: vi.fn(),
     loadRemoteTools: vi.fn(),
     revokeRemoteTools: vi.fn(),
   },
+  memoryManager: {
+    pruneBindings: vi.fn().mockResolvedValue(undefined),
+    revoke: vi.fn(),
+    revokeAll: vi.fn(),
+  },
   tabManager: {
+    setRelayLogLevel: vi.fn(),
     ensureContentScriptReady: vi.fn(),
     getAllRegistries: vi.fn(),
     getToolRegistry: vi.fn(),
@@ -40,6 +48,14 @@ const remoteToolsReady = new Promise<void>((resolve) => {
 vi.mock('../src/lib/ai/client', () => ({
   AIClient: { getInstance: () => mocks.aiClient },
 }));
+
+vi.mock('../src/lib/memory/manager', () => {
+  class MemoryMountError extends Error {}
+  return {
+    getMemoryManager: () => mocks.memoryManager,
+    MemoryMountError,
+  };
+});
 
 vi.mock('../src/lib/storage/config', () => {
   class ConfigValidationError extends Error {
@@ -116,6 +132,10 @@ function createPort(name: string): MockPort {
 
 beforeAll(async () => {
   mocks.aiClient.getAvailableAgents.mockResolvedValue([]);
+  mocks.configStorage.onChange.mockImplementation((onChange, onError) => {
+    mocks.configChange = onChange;
+    mocks.configError = onError;
+  });
   mocks.toolRegistry.registerSystemTools.mockResolvedValue(undefined);
   mocks.toolRegistry.loadRemoteTools.mockReturnValue(remoteToolsReady);
   mocks.tabManager.getAllRegistries.mockReturnValue(new Map());
@@ -163,13 +183,114 @@ beforeAll(async () => {
 });
 
 describe('background response privacy', () => {
-  it('revokes remote MCP authority when changed configuration is invalid', () => {
-    const onChangeCall = mocks.configStorage.onChange.mock.calls[0];
-    const onError = onChangeCall?.[1] as ((error: { code: string }) => void) | undefined;
+  const optionsSender = (): chrome.runtime.MessageSender => ({
+    id: chrome.runtime.id,
+    url: chrome.runtime.getURL('src/options/index.html'),
+  });
 
-    onError?.({ code: 'FUTURE_SCHEMA' });
+  it('revokes runtime authority when changed configuration is invalid', () => {
+    mocks.configError?.({ code: 'FUTURE_SCHEMA' });
 
     expect(mocks.toolRegistry.revokeRemoteTools).toHaveBeenCalledTimes(1);
+    expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('prunes bindings that no longer belong to a configured agent', async () => {
+    const onChange = mocks.configChange as
+      | ((config: {
+          agents: Array<{ id: string; name: string; provider: string }>;
+          logLevel: string;
+          builtinScripts?: unknown[];
+        }) => void | Promise<void>)
+      | undefined;
+
+    onChange?.({
+      agents: [{ id: 'remaining-agent', name: 'Remaining', provider: 'openai' }],
+      logLevel: 'warn',
+    });
+
+    await vi.waitFor(() =>
+      expect(mocks.memoryManager.pruneBindings).toHaveBeenCalledWith(new Set(['remaining-agent']))
+    );
+  });
+
+  it('revokes memory authority when configuration reconciliation fails', async () => {
+    mocks.memoryManager.revokeAll.mockClear();
+    mocks.memoryManager.pruneBindings.mockRejectedValueOnce(new Error('private binding failure'));
+
+    await mocks.configChange?.({ agents: [], logLevel: 'warn' });
+
+    expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes worker-held memory authority after an Options binding change', () => {
+    const sendResponse = vi.fn();
+
+    const keepChannelOpen = mocks.onMessage!(
+      { type: 'MEMORY_BINDING_CHANGED', agentId: 'agent-1' },
+      optionsSender(),
+      sendResponse
+    );
+
+    expect(keepChannelOpen).toBe(false);
+    expect(mocks.memoryManager.revoke).toHaveBeenCalledWith('agent-1');
+    expect(sendResponse).toHaveBeenCalledWith({ success: true });
+  });
+
+  it('revokes and removes every local binding before acknowledging a settings import', async () => {
+    mocks.memoryManager.revokeAll.mockClear();
+    mocks.memoryManager.pruneBindings.mockClear();
+    const sendResponse = vi.fn();
+
+    const keepChannelOpen = mocks.onMessage!(
+      { type: 'MEMORY_BINDINGS_RESET' },
+      optionsSender(),
+      sendResponse
+    );
+
+    expect(keepChannelOpen).toBe(true);
+    expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ success: true }));
+    expect(mocks.memoryManager.pruneBindings).toHaveBeenCalledWith(new Set());
+    expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(2);
+    expect(mocks.memoryManager.revokeAll.mock.invocationCallOrder[1]).toBeLessThan(
+      sendResponse.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('revokes again when an import binding reset fails partway through', async () => {
+    mocks.memoryManager.revokeAll.mockClear();
+    mocks.memoryManager.pruneBindings.mockRejectedValueOnce(new Error('private binding failure'));
+    const sendResponse = vi.fn();
+
+    mocks.onMessage!({ type: 'MEMORY_BINDINGS_RESET' }, optionsSender(), sendResponse);
+
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ success: false }));
+    expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(2);
+    expect(mocks.memoryManager.revokeAll.mock.invocationCallOrder[1]).toBeLessThan(
+      sendResponse.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('rejects memory lifecycle mutations from non-Options senders', () => {
+    mocks.memoryManager.revoke.mockClear();
+    mocks.memoryManager.pruneBindings.mockClear();
+    const sendResponse = vi.fn();
+    const sender = {
+      id: chrome.runtime.id,
+      url: chrome.runtime.getURL('src/content-scripts/relay.js'),
+      tab: { id: 1 },
+    } as chrome.runtime.MessageSender;
+
+    expect(
+      mocks.onMessage!({ type: 'MEMORY_BINDING_CHANGED', agentId: 'agent-1' }, sender, sendResponse)
+    ).toBe(false);
+    expect(mocks.onMessage!({ type: 'MEMORY_BINDINGS_RESET' }, sender, sendResponse)).toBe(false);
+
+    expect(mocks.memoryManager.revoke).not.toHaveBeenCalled();
+    expect(mocks.memoryManager.pruneBindings).not.toHaveBeenCalled();
+    expect(sendResponse).toHaveBeenNthCalledWith(1, { success: false });
+    expect(sendResponse).toHaveBeenNthCalledWith(2, { success: false });
   });
 
   it('replaces WebMCP refresh failures with a fixed response', async () => {
