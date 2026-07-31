@@ -58,6 +58,15 @@ jobs:
         with:
           chrome-version: stable
 
+      # Ubuntu 24.04+ runner images restrict unprivileged user namespaces
+      # (kernel.apparmor_restrict_unprivileged_userns=1), which breaks Chrome's
+      # namespace sandbox and aborts on the non-setuid SUID fallback helper.
+      # Re-allow user namespaces so headless Chrome runs fully sandboxed.
+      # See https://github.com/actions/runner-images/issues/10015
+      - name: Allow Chrome user-namespace sandbox
+        if: matrix.node-version == '22.x'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Run read-page browser tests
         if: matrix.node-version == '22.x'
         run: pnpm run test:browser:built
