@@ -278,8 +278,12 @@ async function main() {
       '--password-store=basic',
       '--use-mock-keychain',
       '--remote-debugging-pipe',
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
+      // Chromium builds that self-identify as a stable/beta channel silently
+      // ignore --load-extension (branded Chrome since 137, and the channel-
+      // stamped Chromium snapshot builds CI installs since ~151). Load the
+      // unpacked extension over CDP instead — the sanctioned automation path.
+      // Requires Chromium / Chrome for Testing 126+.
+      '--enable-unsafe-extension-debugging',
       `--user-data-dir=${profileDirectory}`,
       'about:blank',
     ],
@@ -303,6 +307,13 @@ async function main() {
   };
 
   try {
+    try {
+      await cdp.send('Extensions.loadUnpacked', { path: extensionPath });
+    } catch {
+      throw new Error(
+        'Could not load the built extension over CDP. Use Chromium or Chrome for Testing 126+ (set CHROME_FOR_TESTING_BIN).'
+      );
+    }
     let worker;
     try {
       worker = await waitFor(async () => {
@@ -315,9 +326,7 @@ async function main() {
         );
       }, 'extension service worker');
     } catch {
-      throw new Error(
-        'AgentBoard service worker did not load. Use Chromium or Chrome for Testing (set CHROME_FOR_TESTING_BIN); branded Chrome 137+ disables --load-extension.'
-      );
+      throw new Error('AgentBoard service worker did not start after the extension loaded.');
     }
     const extensionId = new URL(worker.url).host;
 
