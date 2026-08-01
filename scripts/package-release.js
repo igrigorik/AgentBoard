@@ -15,8 +15,9 @@ import archiver from 'archiver';
 import {
   RELEASE_METADATA_FILE,
   RELEASE_SOURCE_FILES,
-  resolveLocalReleaseIdentity,
-} from './release-identity.js';
+  releaseMetadataBytes,
+} from './release-contract.js';
+import { resolveLocalReleaseIdentity } from './release-identity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
@@ -76,30 +77,6 @@ function snapshotDist() {
   return files;
 }
 
-function inventory(files) {
-  return files.map((file) => ({
-    path: file.path,
-    size: file.bytes.byteLength,
-    sha256: createHash('sha256').update(file.bytes).digest('hex'),
-  }));
-}
-
-function metadataBytes(identity, files) {
-  return Buffer.from(
-    `${JSON.stringify(
-      {
-        formatVersion: 1,
-        version: identity.version,
-        tag: identity.tag,
-        sourceCommit: identity.sourceCommit,
-        files: inventory(files),
-      },
-      null,
-      2
-    )}\n`
-  );
-}
-
 function taggedFile(sourceCommit, file) {
   try {
     return execFileSync('git', ['show', `${sourceCommit}:${file}`], { cwd: rootDir });
@@ -130,7 +107,7 @@ if (manifest.version !== identity.version) {
   );
 }
 
-const expectedMetadata = metadataBytes(identity, files);
+const expectedMetadata = releaseMetadataBytes(identity, files);
 const metadataPath = path.join(distDir, RELEASE_METADATA_FILE);
 if (stampOnly) {
   fs.writeFileSync(metadataPath, expectedMetadata);
