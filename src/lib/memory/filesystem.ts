@@ -125,7 +125,7 @@ function isTypeMismatch(error: unknown): boolean {
   return nativeErrorName(error) === 'TypeMismatchError';
 }
 
-function parsePath(path: string, allowRoot: boolean): string[] {
+function parsePath(path: string, allowRoot: boolean, allowTrailingSlash = false): string[] {
   if (typeof path !== 'string' || path.includes('\0') || path.includes('\\')) {
     throw new MemoryFileError('INVALID_PATH');
   }
@@ -135,6 +135,9 @@ function parsePath(path: string, allowRoot: boolean): string[] {
   }
 
   const segments = path.split('/');
+  if (allowTrailingSlash && segments.length > 1 && segments[segments.length - 1] === '') {
+    segments.pop();
+  }
   if (
     segments.some(
       (segment) => !segment || segment === '.' || segment === '..' || segment.length > 255
@@ -320,7 +323,9 @@ export class MemoryFilesystem {
   constructor(readonly root: MemoryDirectoryHandle) {}
 
   async listFiles(path = '.', pattern?: string): Promise<MemoryListResult> {
-    const segments = parsePath(path, true);
+    // A single trailing slash is harmless directory notation. Normalize it only
+    // for this read-only operation; file paths remain exact mutation authority.
+    const segments = parsePath(path, true, true);
     const basenamePattern = validatePattern(pattern);
     const directory = await getDirectory(this.root, segments);
     const entries: MemoryListEntry[] = [];

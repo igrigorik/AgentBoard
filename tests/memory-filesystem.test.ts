@@ -28,10 +28,12 @@ describe('MemoryFilesystem', () => {
 
     const filesystem = new MemoryFilesystem(root);
     expect((await filesystem.readMemory())?.content).toBe('# Existing\n');
-    expect((await filesystem.listFiles()).entries).toEqual([
+    const rootListing = await filesystem.listFiles();
+    expect(rootListing.entries).toEqual([
       { path: 'MEMORY.md', type: 'file' },
       { path: 'memory', type: 'directory' },
     ]);
+    expect(await filesystem.listFiles('.')).toEqual(rootListing);
   });
 
   it('reads the whole root but confines writes to current memory paths', async () => {
@@ -64,8 +66,22 @@ describe('MemoryFilesystem', () => {
   it('rejects invalid paths, patterns, and file/directory type mismatches', async () => {
     const { filesystem } = await setupMemory();
 
-    for (const path of ['/memory/a.md', '../outside.md', 'memory//a.md', 'memory\\a.md']) {
+    for (const path of [
+      '/memory/a.md',
+      '../outside.md',
+      'memory//a.md',
+      'memory/a.md/',
+      'memory\\a.md',
+    ]) {
       await expectMemoryError(filesystem.readFile(path), 'INVALID_PATH');
+    }
+    await expectMemoryError(filesystem.writeFile('memory/a.md/', 'invalid'), 'INVALID_PATH');
+    await expectMemoryError(
+      filesystem.deleteFile('memory/a.md/', `sha256:${'0'.repeat(64)}`),
+      'INVALID_PATH'
+    );
+    for (const path of ['/memory/', 'memory//', 'memory/./', 'memory/../', './']) {
+      await expectMemoryError(filesystem.listFiles(path), 'INVALID_PATH');
     }
     for (const pattern of ['', 'memory/*.md', 'memory\\*.md', '\0', 'x'.repeat(256)]) {
       await expectMemoryError(filesystem.listFiles('memory', pattern), 'INVALID_PATTERN');
@@ -81,6 +97,7 @@ describe('MemoryFilesystem', () => {
     await filesystem.writeFile('memory/archive/2026-07-03.md', 'nested');
     await filesystem.writeFile('memory/UPPER.MD', 'upper');
 
+    expect(await filesystem.listFiles('memory/')).toEqual(await filesystem.listFiles('memory'));
     await expect(filesystem.listFiles('memory', '2026-07-??.md')).resolves.toMatchObject({
       entries: [
         { path: 'memory/2026-07-01.md', type: 'file' },

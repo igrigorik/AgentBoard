@@ -124,6 +124,11 @@ describe('composeSystemPrompt', () => {
     expect(result).not.toContain('selected agent changes');
     expect(result).not.toContain("current agent's file tools");
     expect(result).toContain('MEMORY.md is the compact durable index');
+    expect(result).toContain('supporting detail in the memory directory');
+    expect(result).toContain('use memory to list the journal directory');
+    expect(result).toContain('omit path to list the mounted root');
+    expect(result).toContain('Read, write, and delete paths must not end with a slash');
+    expect(result).not.toMatch(/memory\/(?:\s|,)/);
     expect(result).toContain('Journals are not loaded automatically');
     expect(result).toContain('visible file-tool calls');
     expect(result).toContain('Never save routine turns, transcripts, credentials');

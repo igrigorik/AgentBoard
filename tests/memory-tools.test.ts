@@ -5,6 +5,7 @@ import { createMemoryTools } from '../src/lib/memory/tools';
 import { FakeMemoryDirectoryHandle } from './helpers/memory-handles';
 
 type ExecutableTool = {
+  description: string;
   execute: (
     input: Record<string, unknown>,
     options: { abortSignal?: AbortSignal }
@@ -28,8 +29,10 @@ describe('mounted memory tools', () => {
     const read = executable(tools, MEMORY_TOOL_NAMES.read);
     const remove = executable(tools, MEMORY_TOOL_NAMES.delete);
 
+    expect(list.description).toContain('Use memory to list the journal directory');
     await write.execute({ path: 'memory/durable.md', content: 'durable fact' }, {});
-    await expect(list.execute({ path: 'memory', pattern: 'dur*.md' }, {})).resolves.toMatchObject({
+    await expect(list.execute({ path: 'memory/', pattern: 'dur*.md' }, {})).resolves.toMatchObject({
+      path: 'memory',
       entries: [{ path: 'memory/durable.md', type: 'file' }],
       truncated: false,
     });
@@ -62,6 +65,12 @@ describe('mounted memory tools', () => {
     ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
 
     const readA = (await read.execute({ path: 'memory/a.md' }, {})) as { revision: string };
+    await expect(
+      write.execute(
+        { path: 'memory/a.md/', content: 'alias', expectedRevision: readA.revision },
+        {}
+      )
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
     await expect(
       remove.execute({ path: 'memory/b.md', expectedRevision: readA.revision }, {})
     ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });

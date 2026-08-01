@@ -4,10 +4,13 @@ import { MAX_LIST_PATTERN_LENGTH, MemoryFileError, type MemoryFilesystem } from 
 import { MemoryMountError } from './manager';
 import { MEMORY_TOOL_NAMES } from './tool-names';
 
-const relativePath = z
-  .string()
-  .max(512)
-  .describe('Root-relative path inside the selected mounted memory workspace');
+const relativePath = z.string().max(512);
+const directoryPath = relativePath.describe(
+  'Root-relative directory such as memory. Omit for the mounted root; . also means root. One trailing slash is accepted and normalized.'
+);
+const filePath = relativePath.describe(
+  'Exact root-relative file path without a leading or trailing slash or empty, dot, or parent segments.'
+);
 
 async function runAuthorized<T>(
   authoritySignal: AbortSignal,
@@ -39,9 +42,9 @@ export function createMemoryTools(
   return {
     [MEMORY_TOOL_NAMES.list]: tool({
       description:
-        'List one directory in the selected mounted memory workspace. Returns at most 200 matching immediate entries and reports when matching results were truncated. Use root-relative paths; omit path for the root. The optional pattern is a case-sensitive basename glob with only * and ?; it does not recurse.',
+        'List one directory in the selected mounted memory workspace. Returns at most 200 matching immediate entries and reports when matching results were truncated. Use memory to list the journal directory and omit path for the mounted root. The optional pattern is a case-sensitive basename glob with only * and ?; it does not recurse.',
       inputSchema: z.object({
-        path: relativePath.optional().describe('Directory to list (default: the mounted root)'),
+        path: directoryPath.optional(),
         pattern: z
           .string()
           .min(1)
@@ -54,8 +57,8 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.read]: tool({
       description:
-        'Read one UTF-8 text file from the selected mounted memory workspace. The result includes a revision that authorizes one subsequent mutation of this exact path in the current request.',
-      inputSchema: z.object({ path: relativePath }),
+        'Read one UTF-8 text file from the selected mounted memory workspace using its exact root-relative path, such as MEMORY.md or memory/YYYY-MM-DD.md. The result includes a revision that authorizes one subsequent mutation of this exact path in the current request.',
+      inputSchema: z.object({ path: filePath }),
       execute: ({ path }, { abortSignal }) =>
         runAuthorized(authoritySignal, abortSignal, async () => {
           const snapshot = await filesystem.readFile(path);
@@ -65,9 +68,9 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.write]: tool({
       description:
-        'Create or replace MEMORY.md or a file under memory/ in the selected mounted memory workspace. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. Keep MEMORY.md compact; put selected chronology, supporting detail, and provenance in memory/, using memory/YYYY-MM-DD.md for dated journals.',
+        'Create or replace MEMORY.md or a file under the memory directory in the selected mounted memory workspace. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. Keep MEMORY.md compact; put selected chronology, supporting detail, and provenance in the memory directory, using memory/YYYY-MM-DD.md for dated journals.',
       inputSchema: z.object({
-        path: relativePath,
+        path: filePath,
         content: z.string().describe('Complete UTF-8 file content to write'),
         expectedRevision: z
           .string()
@@ -83,9 +86,9 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.delete]: tool({
       description:
-        'Permanently delete one file under memory/ from the selected mounted memory workspace. Deletion requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. MEMORY.md and directories cannot be deleted.',
+        'Permanently delete one file under the memory directory from the selected mounted memory workspace. Deletion requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. MEMORY.md and directories cannot be deleted.',
       inputSchema: z.object({
-        path: relativePath,
+        path: filePath,
         expectedRevision: z.string().describe('Fresh revision returned for this exact path'),
       }),
       execute: ({ path, expectedRevision }, { abortSignal }) =>
