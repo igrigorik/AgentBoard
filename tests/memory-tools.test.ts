@@ -29,7 +29,12 @@ describe('mounted memory tools', () => {
     const read = executable(tools, MEMORY_TOOL_NAMES.read);
     const remove = executable(tools, MEMORY_TOOL_NAMES.delete);
 
-    expect(list.description).toContain('Use memory to list the journal directory');
+    expect(list.description).toContain('Use memory to list the memory directory');
+    expect(read.description).toContain('memory/topic.md');
+    expect(read.description).toContain('memory/YYYY-MM-DD.md');
+    expect(write.description).toContain('compact core of stable facts');
+    expect(write.description).toContain('useful journal pointers');
+    expect(write.description).toContain('journals may be topical or dated');
     await write.execute({ path: 'memory/durable.md', content: 'durable fact' }, {});
     await expect(list.execute({ path: 'memory/', pattern: 'dur*.md' }, {})).resolves.toMatchObject({
       path: 'memory',
