@@ -32,6 +32,9 @@ describe('mounted memory tools', () => {
     expect(list.description).toContain('Use memory to list the memory directory');
     expect(read.description).toContain('memory/topic.md');
     expect(read.description).toContain('memory/YYYY-MM-DD.md');
+    expect(read.description).toContain('retains a single-use revision receipt');
+    expect(write.description).toContain('applies its retained revision automatically');
+    expect(remove.description).toContain('applies its retained revision automatically');
     expect(write.description).toContain('compact core of stable facts');
     expect(write.description).toContain('useful journal pointers');
     expect(write.description).toContain('journals may be topical or dated');
@@ -46,9 +49,10 @@ describe('mounted memory tools', () => {
       {}
     )) as { content: string; revision: string };
     expect(current.content).toBe('durable fact');
-    await expect(
-      remove.execute({ path: 'memory/durable.md', expectedRevision: current.revision }, {})
-    ).resolves.toEqual({ path: 'memory/durable.md', deleted: true });
+    await expect(remove.execute({ path: 'memory/durable.md' }, {})).resolves.toEqual({
+      path: 'memory/durable.md',
+      deleted: true,
+    });
   });
 
   it('requires a path-bound, single-use read from the same request before mutation', async () => {
@@ -60,45 +64,34 @@ describe('mounted memory tools', () => {
     const read = executable(tools, MEMORY_TOOL_NAMES.read);
     const remove = executable(tools, MEMORY_TOOL_NAMES.delete);
 
-    const createdA = (await write.execute({ path: 'memory/a.md', content: 'same bytes' }, {})) as {
-      revision: string;
-    };
+    await write.execute({ path: 'memory/a.md', content: 'same bytes' }, {});
     await write.execute({ path: 'memory/b.md', content: 'same bytes' }, {});
 
-    await expect(
-      remove.execute({ path: 'memory/a.md', expectedRevision: createdA.revision }, {})
-    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+    await expect(remove.execute({ path: 'memory/a.md' }, {})).rejects.toMatchObject({
+      code: 'REVISION_REQUIRED',
+    });
 
-    const readA = (await read.execute({ path: 'memory/a.md' }, {})) as { revision: string };
+    await read.execute({ path: 'memory/a.md' }, {});
     await expect(
-      write.execute(
-        { path: 'memory/a.md/', content: 'alias', expectedRevision: readA.revision },
-        {}
-      )
-    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
-    await expect(
-      remove.execute({ path: 'memory/b.md', expectedRevision: readA.revision }, {})
-    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+      write.execute({ path: 'memory/a.md/', content: 'alias' }, {})
+    ).rejects.toMatchObject({ code: 'INVALID_PATH' });
+    await expect(remove.execute({ path: 'memory/b.md' }, {})).rejects.toMatchObject({
+      code: 'REVISION_REQUIRED',
+    });
     await expect(filesystem.readFile('memory/b.md')).resolves.toMatchObject({
       content: 'same bytes',
     });
 
     await expect(
-      write.execute(
-        { path: 'memory/a.md', content: 'updated', expectedRevision: readA.revision },
-        {}
-      )
+      write.execute({ path: 'memory/a.md', content: 'updated' }, {})
     ).resolves.toMatchObject({ content: 'updated' });
-    await expect(
-      remove.execute({ path: 'memory/a.md', expectedRevision: readA.revision }, {})
-    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+    await expect(remove.execute({ path: 'memory/a.md' }, {})).rejects.toMatchObject({
+      code: 'REVISION_REQUIRED',
+    });
 
     const nextRequestTools = createMemoryTools(filesystem, new AbortController().signal);
     await expect(
-      executable(nextRequestTools, MEMORY_TOOL_NAMES.delete).execute(
-        { path: 'memory/b.md', expectedRevision: readA.revision },
-        {}
-      )
+      executable(nextRequestTools, MEMORY_TOOL_NAMES.delete).execute({ path: 'memory/b.md' }, {})
     ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
   });
 
@@ -110,42 +103,39 @@ describe('mounted memory tools', () => {
     const read = executable(tools, MEMORY_TOOL_NAMES.read);
     const write = executable(tools, MEMORY_TOOL_NAMES.write);
     await write.execute({ path: 'memory/race.md', content: 'before' }, {});
-    const current = (await read.execute({ path: 'memory/race.md' }, {})) as {
-      revision: string;
-    };
+    await read.execute({ path: 'memory/race.md' }, {});
 
     await root.writeExternal('memory/race.md', 'external edit');
     await expect(
-      write.execute(
-        { path: 'memory/race.md', content: 'stale rewrite', expectedRevision: current.revision },
-        {}
-      )
+      write.execute({ path: 'memory/race.md', content: 'stale rewrite' }, {})
     ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    await expect(
+      write.execute({ path: 'memory/race.md', content: 'second stale rewrite' }, {})
+    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
     await expect(filesystem.readFile('memory/race.md')).resolves.toMatchObject({
       content: 'external edit',
     });
   });
 
-  it('consumes a mismatched read receipt before rejecting the mutation', async () => {
+  it('applies the retained revision without a model-supplied token', async () => {
     const root = new FakeMemoryDirectoryHandle('private-root');
     await initializeMemoryRoot(root);
-    const tools = createMemoryTools(new MemoryFilesystem(root), new AbortController().signal);
+    const filesystem = new MemoryFilesystem(root);
+    const tools = createMemoryTools(filesystem, new AbortController().signal);
     const read = executable(tools, MEMORY_TOOL_NAMES.read);
     const write = executable(tools, MEMORY_TOOL_NAMES.write);
-    const current = (await read.execute({ path: 'MEMORY.md' }, {})) as { revision: string };
 
+    await read.execute({ path: 'MEMORY.md' }, {});
     await expect(
-      write.execute(
-        { path: 'MEMORY.md', content: '# Changed', expectedRevision: `sha256:${'0'.repeat(64)}` },
-        {}
-      )
-    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
-    await expect(
-      write.execute(
-        { path: 'MEMORY.md', content: '# Changed', expectedRevision: current.revision },
-        {}
-      )
-    ).rejects.toMatchObject({ code: 'REVISION_REQUIRED' });
+      write.execute({ path: 'MEMORY.md', content: '# Updated\n' }, {})
+    ).resolves.toMatchObject({
+      path: 'MEMORY.md',
+      content: '# Updated\n',
+      created: false,
+    });
+    await expect(filesystem.readFile('MEMORY.md')).resolves.toMatchObject({
+      content: '# Updated\n',
+    });
   });
 
   it('rejects every captured tool closure after its authority is revoked', async () => {

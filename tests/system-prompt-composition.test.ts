@@ -146,6 +146,9 @@ describe('composeSystemPrompt', () => {
     expect(result).toContain('read the live MEMORY.md and relevant journals');
     expect(result).toContain('not proof of current disk contents');
     expect(result).toContain('read that exact path in the current request');
+    expect(result).toContain('AgentBoard applies the retained revision automatically');
+    expect(result).not.toContain('pass the returned revision');
+    expect(result).toContain('Create a new file without reading it first');
     expect(result).toContain('initial memory context and earlier requests never count');
     expect(result).toContain('On conflict, reread and recompute');
     expect(result).toContain('Never claim that memory was saved, updated, or deleted');

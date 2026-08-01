@@ -32,11 +32,11 @@ export function createMemoryTools(
   // A digest is only mutation authority after this request's tool closure observed it.
   // Consume receipts once so snapshot hashes and earlier requests cannot authorize writes.
   const readRevisions = new Map<string, string>();
-  const consumeReadRevision = (path: string, expectedRevision: string): void => {
+  const consumeReadRevision = (path: string): string => {
     const readRevision = readRevisions.get(path);
     readRevisions.delete(path);
     if (readRevision === undefined) throw new MemoryFileError('REVISION_REQUIRED');
-    if (readRevision !== expectedRevision) throw new MemoryFileError('REVISION_CONFLICT');
+    return readRevision;
   };
 
   return {
@@ -57,7 +57,7 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.read]: tool({
       description:
-        'Read one UTF-8 text file from the selected Local Memory folder using its exact root-relative path, such as MEMORY.md, memory/topic.md, or memory/YYYY-MM-DD.md. The result includes a revision that authorizes one subsequent mutation of this exact path in the current request.',
+        'Read one UTF-8 text file from the selected Local Memory folder using its exact root-relative path, such as MEMORY.md, memory/topic.md, or memory/YYYY-MM-DD.md. AgentBoard retains a single-use revision receipt that authorizes one subsequent mutation of this exact path in the current request.',
       inputSchema: z.object({ path: filePath }),
       execute: ({ path }, { abortSignal }) =>
         runAuthorized(authoritySignal, abortSignal, async () => {
@@ -68,34 +68,25 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.write]: tool({
       description:
-        'Create or replace MEMORY.md or a journal file under the memory directory in the selected Local Memory folder. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. Keep MEMORY.md as the compact core of stable facts worth having available in every conversation plus useful journal pointers. Use journal files for deeper context, supporting detail, reasoning, chronology, and provenance; journals may be topical or dated.',
+        'Create or replace MEMORY.md or a journal file under the memory directory in the selected Local Memory folder. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request; AgentBoard applies its retained revision automatically. Keep MEMORY.md as the compact core of stable facts worth having available in every conversation plus useful journal pointers. Use journal files for deeper context, supporting detail, reasoning, chronology, and provenance; journals may be topical or dated.',
       inputSchema: z.object({
         path: filePath,
         content: z.string().describe('Complete UTF-8 file content to write'),
-        expectedRevision: z
-          .string()
-          .optional()
-          .describe('Fresh revision for an existing file; omit only when creating a new file'),
       }),
-      execute: ({ path, content, expectedRevision }, { abortSignal }) =>
+      execute: ({ path, content }, { abortSignal }) =>
         runAuthorized(authoritySignal, abortSignal, (isAuthorized) => {
-          if (expectedRevision === undefined) readRevisions.delete(path);
-          else consumeReadRevision(path, expectedRevision);
+          const expectedRevision = readRevisions.has(path) ? consumeReadRevision(path) : undefined;
           return filesystem.writeFile(path, content, expectedRevision, isAuthorized);
         }),
     }),
     [MEMORY_TOOL_NAMES.delete]: tool({
       description:
-        'Permanently delete one journal file under the memory directory from the selected Local Memory folder. Deletion requires a fresh agentboard_read_file call for the exact path in this request and its returned revision. MEMORY.md and directories cannot be deleted.',
-      inputSchema: z.object({
-        path: filePath,
-        expectedRevision: z.string().describe('Fresh revision returned for this exact path'),
-      }),
-      execute: ({ path, expectedRevision }, { abortSignal }) =>
-        runAuthorized(authoritySignal, abortSignal, (isAuthorized) => {
-          consumeReadRevision(path, expectedRevision);
-          return filesystem.deleteFile(path, expectedRevision, isAuthorized);
-        }),
+        'Permanently delete one journal file under the memory directory from the selected Local Memory folder. Deletion requires a fresh agentboard_read_file call for the exact path in this request; AgentBoard applies its retained revision automatically. MEMORY.md and directories cannot be deleted.',
+      inputSchema: z.object({ path: filePath }),
+      execute: ({ path }, { abortSignal }) =>
+        runAuthorized(authoritySignal, abortSignal, (isAuthorized) =>
+          filesystem.deleteFile(path, consumeReadRevision(path), isAuthorized)
+        ),
     }),
   };
 }
