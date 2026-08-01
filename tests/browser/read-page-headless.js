@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+
+import { CdpPipe, findChrome, waitFor } from './chrome-harness.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const harnessPath = path.join(repositoryRoot, 'tests/browser/read-page.html');
@@ -11,148 +14,171 @@ const compiledToolPath = path.join(repositoryRoot, 'dist/tools/agentboard_read_p
 const resultPattern = /AGENTBOARD_BROWSER_RESULT:([A-Za-z0-9+/=]+):END/;
 const maxOutputCharacters = 20 * 1024 * 1024;
 
-function findChrome() {
-  const candidates = [
-    process.env.CHROME_BIN,
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    process.env.PROGRAMFILES &&
-      path.join(process.env.PROGRAMFILES, 'Google/Chrome/Application/chrome.exe'),
-    process.env['PROGRAMFILES(X86)'] &&
-      path.join(process.env['PROGRAMFILES(X86)'], 'Google/Chrome/Application/chrome.exe'),
-  ].filter(Boolean);
-
-  return candidates.find((candidate) => existsSync(candidate));
-}
-
-function readResults(chrome, profileDirectory) {
-  return new Promise((resolve, reject) => {
-    const detached = process.platform !== 'win32';
-    const browser = spawn(
-      chrome,
-      [
-        '--headless=new',
-        '--allow-file-access-from-files',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-breakpad',
-        '--disable-client-side-phishing-detection',
-        '--disable-component-extensions-with-background-pages',
-        '--disable-crash-reporter',
-        '--disable-default-apps',
-        '--disable-dev-shm-usage',
-        '--disable-extensions',
-        '--disable-gpu',
-        '--disable-hang-monitor',
-        '--disable-renderer-backgrounding',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--no-default-browser-check',
-        '--no-first-run',
-        '--password-store=basic',
-        '--use-mock-keychain',
-        '--virtual-time-budget=3000',
-        '--dump-dom',
-        `--user-data-dir=${profileDirectory}`,
-        pathToFileURL(harnessPath).href,
-      ],
-      { detached, stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-
-    let stdout = '';
-    let stderr = '';
-    let result = null;
-    let failure = null;
-    let settled = false;
-    let forceTimer = null;
-    let settlementTimer = null;
-
-    function signalBrowser(signal) {
-      try {
-        if (detached && browser.pid) process.kill(-browser.pid, signal);
-        else browser.kill(signal);
-      } catch {
-        // The process may have exited between the state check and the signal.
-      }
+async function startHarnessServer() {
+  const routes = new Map([
+    [
+      '/tests/browser/read-page.html',
+      { body: readFileSync(harnessPath), contentType: 'text/html; charset=utf-8' },
+    ],
+    [
+      '/dist/tools/agentboard_read_page.js',
+      { body: readFileSync(compiledToolPath), contentType: 'text/javascript; charset=utf-8' },
+    ],
+  ]);
+  const server = http.createServer((request, response) => {
+    const route = routes.get(new URL(request.url || '/', 'http://127.0.0.1').pathname);
+    if (request.method !== 'GET' || !route) {
+      response.writeHead(404).end();
+      return;
     }
-
-    function settle() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadlineTimer);
-      if (forceTimer) clearTimeout(forceTimer);
-      if (settlementTimer) clearTimeout(settlementTimer);
-      if (result) resolve(result);
-      else reject(failure || new Error('Headless Chrome stopped without a test result.'));
-    }
-
-    function stopBrowser(signal = 'SIGTERM') {
-      signalBrowser(signal);
-      if (!forceTimer) {
-        forceTimer = setTimeout(() => signalBrowser('SIGKILL'), 1000);
-      }
-      if (!settlementTimer) {
-        // A failed OS-level kill must not leave CI waiting forever for `close`.
-        settlementTimer = setTimeout(settle, 2500);
-      }
-    }
-
-    function fail(error) {
-      if (failure || result) return;
-      failure = error instanceof Error ? error : new Error(String(error));
-      stopBrowser('SIGKILL');
-    }
-
-    const deadlineTimer = setTimeout(() => {
-      fail(
-        new Error(`Headless Chrome did not produce a test result within 30 seconds.\n${stderr}`)
-      );
-    }, 30000);
-
-    function inspectOutput() {
-      if (result || failure) return;
-      if (stdout.length > maxOutputCharacters) {
-        fail(new Error('Headless Chrome output exceeded the 20 MB safety limit.'));
-        return;
-      }
-
-      const marker = stdout.match(resultPattern);
-      if (!marker) return;
-
-      try {
-        const payload = JSON.parse(Buffer.from(marker[1], 'base64').toString('utf8'));
-        if (payload.error) throw new Error(payload.error);
-        result = payload.results;
-        stopBrowser();
-      } catch (error) {
-        fail(error);
-      }
-    }
-
-    browser.stdout.setEncoding('utf8');
-    browser.stderr.setEncoding('utf8');
-    browser.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      inspectOutput();
+    response.writeHead(200, {
+      'content-type': route.contentType,
+      'cache-control': 'no-store',
     });
-    browser.stderr.on('data', (chunk) => {
-      stderr = `${stderr}${chunk}`.slice(-20000);
-    });
-    browser.on('error', fail);
-    browser.on('close', (code, signal) => {
-      if (!result && !failure) {
-        failure = new Error(
-          `Headless Chrome exited before producing a result (code ${code}, signal ${signal}).\n${stderr}\n${stdout}`
-        );
-      }
-      settle();
+    response.end(route.body);
+  });
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
     });
   });
+  const address = server.address();
+  assert(address && typeof address === 'object');
+  return {
+    url: `http://127.0.0.1:${address.port}/tests/browser/read-page.html`,
+    close: () =>
+      new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections();
+      }),
+  };
+}
+
+async function readResults(chrome, profileDirectory, harnessUrl) {
+  // Chrome for Testing 151 stopped terminating reliably with --dump-dom, so the
+  // harness now uses the same bounded CDP pipe as the MV3 browser gates.
+  const detached = process.platform !== 'win32';
+  const browser = spawn(
+    chrome,
+    [
+      '--headless=new',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-breakpad',
+      '--disable-client-side-phishing-detection',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-crash-reporter',
+      '--disable-default-apps',
+      '--disable-dev-shm-usage',
+      '--disable-extensions',
+      '--disable-gpu',
+      '--disable-hang-monitor',
+      '--disable-renderer-backgrounding',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--no-default-browser-check',
+      '--no-first-run',
+      '--password-store=basic',
+      '--remote-debugging-pipe',
+      '--use-mock-keychain',
+      `--user-data-dir=${profileDirectory}`,
+      'about:blank',
+    ],
+    { detached, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] }
+  );
+  const closed = new Promise((resolve) => browser.once('close', resolve));
+  const cdp = new CdpPipe(browser);
+  let stderr = '';
+  browser.stderr.setEncoding('utf8');
+  browser.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-20_000);
+  });
+
+  const signalBrowser = (signal) => {
+    try {
+      if (detached && browser.pid) process.kill(-browser.pid, signal);
+      else browser.kill(signal);
+    } catch {
+      // Chromium may already have exited.
+    }
+  };
+  const stopBrowser = async () => {
+    signalBrowser('SIGTERM');
+    const forceTimer = setTimeout(() => signalBrowser('SIGKILL'), 1_000);
+    let settlementTimer;
+    await Promise.race([
+      closed,
+      new Promise((resolve) => {
+        settlementTimer = setTimeout(resolve, 2_500);
+      }),
+    ]);
+    clearTimeout(forceTimer);
+    clearTimeout(settlementTimer);
+  };
+
+  const collectResults = async () => {
+    const target = await waitFor(async () => {
+      const { targetInfos } = await cdp.send('Target.getTargets');
+      return targetInfos.find(({ type }) => type === 'page');
+    }, 'headless page target');
+    const { sessionId } = await cdp.send('Target.attachToTarget', {
+      targetId: target.targetId,
+      flatten: true,
+    });
+    await cdp.send('Runtime.enable', {}, sessionId);
+    await cdp.send('Page.enable', {}, sessionId);
+    await cdp.send('Page.navigate', { url: harnessUrl }, sessionId);
+
+    const output = await waitFor(
+      async () => {
+        const evaluation = await cdp.send(
+          'Runtime.evaluate',
+          {
+            expression: `document.querySelector('#agentboard-browser-result')?.textContent || ''`,
+            returnByValue: true,
+          },
+          sessionId
+        );
+        const value = evaluation.result?.value;
+        return typeof value === 'string' && resultPattern.test(value) ? value : false;
+      },
+      'read_page browser result',
+      30_000
+    );
+    if (output.length > maxOutputCharacters) {
+      throw new Error('Headless Chrome output exceeded the 20 MB safety limit.');
+    }
+
+    const marker = output.match(resultPattern);
+    if (!marker) throw new Error('Headless Chrome returned an invalid test result.');
+    const payload = JSON.parse(Buffer.from(marker[1], 'base64').toString('utf8'));
+    if (payload.error) throw new Error(payload.error);
+    return payload.results;
+  };
+
+  let deadlineTimer;
+  try {
+    return await Promise.race([
+      collectResults(),
+      new Promise((_, reject) => {
+        deadlineTimer = setTimeout(
+          () =>
+            reject(new Error('Headless Chrome did not produce a test result within 30 seconds.')),
+          30_000
+        );
+      }),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}\n${stderr}`);
+  } finally {
+    clearTimeout(deadlineTimer);
+    await stopBrowser();
+  }
 }
 
 const verifiers = {
@@ -215,8 +241,10 @@ if (!existsSync(compiledToolPath)) {
 }
 
 const profileDirectory = mkdtempSync(path.join(tmpdir(), 'agentboard-headless-chrome-'));
+let harnessServer;
 try {
-  const results = await readResults(chrome, profileDirectory);
+  harnessServer = await startHarnessServer();
+  const results = await readResults(chrome, profileDirectory, harnessServer.url);
   for (const [scenario, verify] of Object.entries(verifiers)) {
     assert.ok(results[scenario], `missing ${scenario} result`);
     verify(results[scenario]);
@@ -224,5 +252,6 @@ try {
   }
   console.log(`\n${Object.keys(verifiers).length} headless Chromium scenarios passed`);
 } finally {
+  await harnessServer?.close();
   rmSync(profileDirectory, { recursive: true, force: true });
 }

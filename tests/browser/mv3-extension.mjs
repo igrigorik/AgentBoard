@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { CdpPipe, findChrome, waitFor } from './chrome-harness.mjs';
+
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = path.join(repositoryRoot, 'dist');
 const profileDirectory = mkdtempSync(path.join(tmpdir(), 'agentboard-mv3-chrome-'));
-const timeoutMs = 20_000;
 const webMCPFixturePath = '/webmcp-execution';
 const webMCPNavigationDestinationPath = '/webmcp-navigation-destination';
 const webMCPToolName = 'agentboard_browser_e2e';
@@ -99,82 +100,6 @@ function webMCPNavigationDestinationHtml() {
 </html>`;
 }
 
-function findChrome() {
-  const candidates = [
-    process.env.CHROME_FOR_TESTING_BIN,
-    process.env.CHROME_BIN,
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    process.env.PROGRAMFILES &&
-      path.join(process.env.PROGRAMFILES, 'Google/Chrome/Application/chrome.exe'),
-    process.env['PROGRAMFILES(X86)'] &&
-      path.join(process.env['PROGRAMFILES(X86)'], 'Google/Chrome/Application/chrome.exe'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => existsSync(candidate));
-}
-
-class CdpPipe {
-  constructor(process) {
-    this.process = process;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.buffer = Buffer.alloc(0);
-
-    process.stdio[4].on('data', (chunk) => this.receive(chunk));
-    process.on('close', () => {
-      for (const { reject } of this.pending.values()) reject(new Error('Chromium exited'));
-      this.pending.clear();
-    });
-  }
-
-  receive(chunk) {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    for (;;) {
-      const separator = this.buffer.indexOf(0);
-      if (separator === -1) return;
-      const payload = this.buffer.subarray(0, separator).toString('utf8');
-      this.buffer = this.buffer.subarray(separator + 1);
-      if (!payload) continue;
-
-      const message = JSON.parse(payload);
-      if (!message.id) continue;
-      const pending = this.pending.get(message.id);
-      if (!pending) continue;
-      this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(`CDP ${pending.method} failed`));
-      else pending.resolve(message.result ?? {});
-    }
-  }
-
-  send(method, params = {}, sessionId) {
-    const id = this.nextId++;
-    const message = { id, method, params, ...(sessionId && { sessionId }) };
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
-      this.process.stdio[3].write(`${JSON.stringify(message)}\0`);
-    });
-  }
-}
-
-async function waitFor(check, label, deadline = timeoutMs) {
-  const started = Date.now();
-  let lastError;
-  while (Date.now() - started < deadline) {
-    try {
-      const result = await check();
-      if (result) return result;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`Timed out waiting for ${label}${lastError ? ' after a transient failure' : ''}`);
-}
-
 async function startWireServer() {
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -187,10 +112,7 @@ async function startWireServer() {
       response.end(webMCPFixtureHtml());
       return;
     }
-    if (
-      request.method === 'GET' &&
-      requestUrl.pathname === webMCPNavigationDestinationPath
-    ) {
+    if (request.method === 'GET' && requestUrl.pathname === webMCPNavigationDestinationPath) {
       response.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
@@ -245,7 +167,7 @@ async function startWireServer() {
 }
 
 async function main() {
-  const chrome = findChrome();
+  const chrome = findChrome({ forExtension: true });
   if (!chrome) throw new Error('Chrome or Chromium is required for MV3 browser tests');
   const requiredBuiltFiles = [
     'manifest.json',

@@ -107,11 +107,16 @@
       },
     ];
 
-    document.modelContext = {
-      registerTool(tool) {
-        window.registeredReadPage = tool;
+    // Chrome 151 exposes a getter-only native modelContext. An own property keeps
+    // this fixture deterministic without registering the synthetic tool natively.
+    Object.defineProperty(document, 'modelContext', {
+      configurable: true,
+      value: {
+        registerTool(tool) {
+          window.registeredReadPage = tool;
+        },
       },
-    };
+    });
   </script>
   <script src="../../dist/tools/agentboard_read_page.js"></script>
   <script>

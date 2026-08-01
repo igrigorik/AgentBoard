@@ -7,6 +7,7 @@ A switchboard for AI in your browser: wire in any model, script WebMCP tools, co
 - **Multi agent**: Configure as many profiles as you want and switch mid-conversation.
 - **Your connection**: OpenAI-style Responses or legacy Chat Completions, Anthropic Messages, Google Generative AI, or a compatible proxy endpoint.
 - **Your settings**: System prompts, temperature, thinking settings.
+- **Your memory**: Optionally connect a local folder to an agent for deliberate, durable memory.
 - **Your keys**: Bring your own API keys. No lock-in, no upselling.
 - **Your tools**: Script WebMCP tools for page interactions. Connect remote MCP servers.
 - **Your commands**: Template prompts with arguments; type `/analyze`, not paragraphs.
@@ -100,6 +101,10 @@ Choose the contract implemented by the endpoint, not the company that produced t
 ```
 
 Configure as many profiles as you want. Switch mid-conversation. Current settings and exports use schema v2 with required `schemaVersion: 2` and per-agent `apiProtocol`. Released v1 settings and v1 backups are migrated once; a v1 backup envelope containing already-migrated v2 settings after a rollback is also accepted. Older releases ignore `apiProtocol` and may infer a different transport, so a safe rollback that preserves routing requires a pre-migration export or an explicit reverse migration.
+
+## Optional Local Memory
+
+By default, conversations are ephemeral. Connect a folder in Settings to let an agent save and recall useful facts across conversations; changes appear as visible tool calls, backups exclude the folder and its connection, and disconnecting never deletes your files. See the [Privacy Policy](PRIVACY.md) for data-sharing details.
 
 ## MCP tools
 
