@@ -86,62 +86,204 @@ body {
 
 /* Header */
 .sidebar-header {
-  padding: 12px 16px;
+  position: relative;
+  z-index: 20;
+  display: flex;
+  flex: 0 0 40px;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  padding: 2px 6px 2px 10px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-secondary);
+}
+
+.agent-switcher {
+  position: relative;
+  flex: 1 1 280px;
+  min-width: 0;
+  max-width: 280px;
+}
+
+.agent-switcher-trigger {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-}
-
-.sidebar-header h1 {
-  font-size: 16px;
-  font-weight: 600;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  list-style: none;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text-primary);
-}
-
-.agent-selector select {
-  padding: 4px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 13px;
   cursor: pointer;
-  max-width: 200px;
 }
 
-.agent-selector select:focus {
-  outline: none;
-  border-color: var(--border-focus);
+.agent-switcher-trigger:hover,
+.agent-switcher[open] .agent-switcher-trigger {
+  background: var(--bg-tertiary);
 }
 
-.agent-selector select:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.agent-switcher-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.agent-switcher-trigger:focus-visible,
+.settings-button:focus-visible,
+.agent-switcher-option:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.agent-switcher-trigger[aria-disabled='true'] {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: 0.65;
+}
+
+.agent-switcher-trigger[aria-disabled='true']:hover {
+  background: transparent;
+}
+
+.agent-dot,
+.agent-option-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--agent-color, var(--text-secondary));
+}
+
+.agent-switcher-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-switcher-chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  color: var(--text-secondary);
+}
+
+.agent-switcher[open] .agent-switcher-chevron {
+  transform: rotate(180deg);
+}
+
+.agent-switcher-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: -2px;
+  width: min(300px, calc(100vw - 20px));
+  max-height: min(360px, calc(100vh - 56px));
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
+}
+
+.agent-switcher-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-switcher-option:hover,
+.agent-switcher-option:focus-visible {
+  background: var(--bg-tertiary);
+}
+
+.agent-switcher-option[aria-current='true'] {
+  background: var(--accent-teal-bg-hover);
+}
+
+.agent-option-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-option-name,
+.agent-option-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-option-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.agent-option-model {
+  margin-top: 1px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+
+.agent-option-check {
+  flex: 0 0 16px;
+  visibility: hidden;
+  color: var(--accent-teal);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.agent-switcher-option[aria-current='true'] .agent-option-check {
+  visibility: visible;
 }
 
 .settings-button {
-  background: none;
-  border: none;
+  display: grid;
+  flex: 0 0 36px;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text-secondary);
-  font-size: 16px;
   cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+}
+
+.settings-button svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+}
+
+.settings-button path {
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
 }
 
 .settings-button:hover {
   color: var(--text-primary);
   background: var(--bg-tertiary);
-}
-
-.settings-button:active {
-  transform: scale(0.95);
 }
 
 /* Chat Container */

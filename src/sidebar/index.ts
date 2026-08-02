@@ -26,6 +26,7 @@ import { ToolCallBox } from './ToolCallBox';
 import { ReasoningBox } from './ReasoningBox';
 import { TextBox } from './TextBox';
 import { StreamingMarkdownRenderer } from './StreamingMarkdownRenderer';
+import { AgentSwitcher } from './AgentSwitcher';
 import { CommandRegistry, CommandProcessor, createBuiltinCommands } from '../lib/commands';
 
 // Streaming session interface to encapsulate all streaming state
@@ -42,7 +43,10 @@ interface StreamingSession {
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
 const messageInput = document.getElementById('message-input') as HTMLTextAreaElement;
 const sendButton = document.getElementById('send-button') as HTMLButtonElement;
-const agentSelect = document.getElementById('agent-select') as HTMLSelectElement;
+const agentSwitcher = new AgentSwitcher(
+  document.getElementById('agent-switcher') as HTMLDetailsElement,
+  (agentId) => void selectAgent(agentId)
+);
 const settingsButton = document.getElementById('settings-button') as HTMLButtonElement;
 
 // State
@@ -329,42 +333,22 @@ async function loadAgents() {
     const agents = await configStorage.getAgents();
     const defaultAgent = await configStorage.getDefaultAgent();
 
-    // Clear and populate agent selector
-    agentSelect.innerHTML = '';
-
     if (agents.length === 0) {
-      agentSelect.innerHTML = '<option value="">No agents configured - Go to Settings</option>';
-      agentSelect.disabled = true;
+      agentSwitcher.setAgents([]);
       messageInput.disabled = true;
       messageInput.placeholder = 'Configure an agent in settings to start chatting...';
       sendButton.disabled = true;
       return;
     }
 
-    // Enable UI
-    agentSelect.disabled = false;
+    const selectedAgent = defaultAgent ?? agents[0];
+    currentAgentId = selectedAgent.id;
+    currentAgent = selectedAgent;
+    agentSwitcher.setAgents(agents, selectedAgent.id);
+
     messageInput.disabled = false;
     messageInput.placeholder = 'Ask anything. Use /help for available commands.';
     updateSendButton();
-
-    // Populate agents
-    agents.forEach((agent) => {
-      const option = document.createElement('option');
-      option.value = agent.id;
-      option.textContent = agent.name;
-      agentSelect.appendChild(option);
-    });
-
-    // Set current agent (default or first available)
-    if (defaultAgent) {
-      currentAgentId = defaultAgent.id;
-      currentAgent = defaultAgent;
-      agentSelect.value = defaultAgent.id;
-    } else if (agents.length > 0) {
-      currentAgentId = agents[0].id;
-      currentAgent = agents[0];
-      agentSelect.value = agents[0].id;
-    }
 
     log.info('[Sidebar] Loaded agents:', agents.length, 'Current agent:', currentAgent?.name);
   } catch (error) {
@@ -443,6 +427,31 @@ function updateSendButton() {
   }
 }
 
+// Agent switching affects future sends without cancelling the active response.
+// Clear the bootstrap before the async lookup so late callbacks cannot cross agents.
+async function selectAgent(selectedAgentId: string): Promise<void> {
+  const selectionSequence = ++agentSelectionSequence;
+  invalidateWorkspaceContext();
+  currentAgentId = null;
+  currentAgent = null;
+  updateSendButton();
+
+  try {
+    const agent = await configStorage.getAgent(selectedAgentId);
+    if (selectionSequence !== agentSelectionSequence) return;
+    if (!agent) throw new Error('Agent not found');
+    currentAgentId = selectedAgentId;
+    currentAgent = agent;
+    addMessage('system', `Switched to ${agent.name}`);
+  } catch {
+    if (selectionSequence !== agentSelectionSequence) return;
+    addMessage('error', 'Failed to switch agent');
+    log.error('[Sidebar] Agent switch failed');
+  } finally {
+    if (selectionSequence === agentSelectionSequence) updateSendButton();
+  }
+}
+
 function setupEventListeners() {
   // Send message or cancel on button click
   sendButton.addEventListener('click', () => {
@@ -498,34 +507,6 @@ function setupEventListeners() {
     }
 
     // Fall through to default text paste
-  });
-
-  // Agent switching affects future sends without cancelling the active response.
-  // Clear the bootstrap before the async lookup so late callbacks cannot cross agents.
-  agentSelect.addEventListener('change', async (e) => {
-    const selectedAgentId = (e.target as HTMLSelectElement).value;
-    const selectionSequence = ++agentSelectionSequence;
-    invalidateWorkspaceContext();
-    currentAgentId = null;
-    currentAgent = null;
-    updateSendButton();
-
-    if (!selectedAgentId) return;
-
-    try {
-      const agent = await configStorage.getAgent(selectedAgentId);
-      if (selectionSequence !== agentSelectionSequence) return;
-      if (!agent) throw new Error('Agent not found');
-      currentAgentId = selectedAgentId;
-      currentAgent = agent;
-      addMessage('system', `Switched to ${agent.name}`);
-    } catch {
-      if (selectionSequence !== agentSelectionSequence) return;
-      addMessage('error', 'Failed to switch agent');
-      log.error('[Sidebar] Agent switch failed');
-    } finally {
-      if (selectionSequence === agentSelectionSequence) updateSendButton();
-    }
   });
 
   // Auto-resize textarea and update button state

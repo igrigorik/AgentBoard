@@ -124,7 +124,13 @@ describe('sidebar model history', () => {
     window.location.hash = '#tab=123';
     document.body.innerHTML = `
       <main id="app">
-        <select id="agent-select"></select>
+        <details id="agent-switcher">
+          <summary class="agent-switcher-trigger">
+            <span class="agent-dot"></span>
+            <span class="agent-switcher-label"></span>
+          </summary>
+          <div class="agent-switcher-menu"></div>
+        </details>
         <button id="settings-button"></button>
         <div id="messages"></div>
         <textarea id="message-input"></textarea>

@@ -94,6 +94,15 @@ function sendMessage(text: string): void {
   sendButton.click();
 }
 
+function chooseAgent(agentId: string): void {
+  (document.querySelector('.agent-switcher-trigger') as HTMLButtonElement).click();
+  const option = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('.agent-switcher-option')
+  ).find(({ dataset }) => dataset.agentId === agentId);
+  if (!option) throw new Error(`Missing agent option ${agentId}`);
+  option.click();
+}
+
 function failureCount(): number {
   return (document.getElementById('messages')?.textContent?.match(/Failed to send message/g) || [])
     .length;
@@ -130,7 +139,13 @@ describe('sidebar stream lifecycle ownership', () => {
     window.location.hash = '#tab=123';
     document.body.innerHTML = `
       <main id="app">
-        <select id="agent-select"></select>
+        <details id="agent-switcher">
+          <summary class="agent-switcher-trigger">
+            <span class="agent-dot"></span>
+            <span class="agent-switcher-label"></span>
+          </summary>
+          <div class="agent-switcher-menu"></div>
+        </details>
         <button id="settings-button"></button>
         <div id="messages"></div>
         <textarea id="message-input"></textarea>
@@ -291,7 +306,7 @@ describe('sidebar stream lifecycle ownership', () => {
     await import('../src/sidebar/index');
     document.dispatchEvent(new Event('DOMContentLoaded'));
     await vi.waitFor(() =>
-      expect((document.getElementById('agent-select') as HTMLSelectElement).options).toHaveLength(2)
+      expect(document.querySelectorAll('.agent-switcher-option')).toHaveLength(2)
     );
 
     sendMessage('First turn');
@@ -343,9 +358,7 @@ describe('sidebar stream lifecycle ownership', () => {
     ports[2].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'After clear answer' });
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
 
-    const select = document.getElementById('agent-select') as HTMLSelectElement;
-    select.value = 'agent-2';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    chooseAgent('agent-2');
     await vi.waitFor(() => expect(configStorage.getAgent).toHaveBeenCalledWith('agent-2'));
 
     sendMessage('After agent change');
@@ -367,8 +380,7 @@ describe('sidebar stream lifecycle ownership', () => {
     ports[3].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Finished' });
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
 
-    select.value = 'agent-1';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    chooseAgent('agent-1');
     await vi.waitFor(() => expect(configStorage.getAgent).toHaveBeenCalledWith('agent-1'));
     sendMessage('Back to agent A');
     await vi.waitFor(() => expect(ports[4]?.postMessage).toHaveBeenCalledOnce());
@@ -478,7 +490,7 @@ describe('sidebar stream lifecycle ownership', () => {
     await import('../src/sidebar/index');
     document.dispatchEvent(new Event('DOMContentLoaded'));
     await vi.waitFor(() =>
-      expect((document.getElementById('agent-select') as HTMLSelectElement).options).toHaveLength(2)
+      expect(document.querySelectorAll('.agent-switcher-option')).toHaveLength(2)
     );
 
     sendMessage('Establish agent A context');
@@ -488,11 +500,9 @@ describe('sidebar stream lifecycle ownership', () => {
     configStorage.getAgent.mockReturnValueOnce(
       new Promise<typeof secondAgent>((resolve) => (resolveSecond = resolve))
     );
-    const select = document.getElementById('agent-select') as HTMLSelectElement;
     const input = document.getElementById('message-input') as HTMLTextAreaElement;
     const button = document.getElementById('send-button') as HTMLButtonElement;
-    select.value = 'agent-2';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    chooseAgent('agent-2');
     expect(ports[0].disconnect).not.toHaveBeenCalled();
 
     const agentAContext = {
@@ -538,10 +548,8 @@ describe('sidebar stream lifecycle ownership', () => {
     configStorage.getAgent
       .mockReturnValueOnce(new Promise<typeof agent>((resolve) => (resolveOlder = resolve)))
       .mockReturnValueOnce(new Promise<typeof secondAgent>((resolve) => (resolveLatest = resolve)));
-    select.value = 'agent-1';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    select.value = 'agent-2';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    chooseAgent('agent-1');
+    chooseAgent('agent-2');
     resolveOlder(agent);
     await Promise.resolve();
     expect(button.disabled).toBe(true);
@@ -557,8 +565,7 @@ describe('sidebar stream lifecycle ownership', () => {
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
 
     configStorage.getAgent.mockRejectedValueOnce(new Error('lookup failed'));
-    select.value = 'agent-1';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    chooseAgent('agent-1');
     await vi.waitFor(() => expect(document.body.textContent).toContain('Failed to switch agent'));
     input.value = 'Must not use stale agent B';
     input.dispatchEvent(new Event('input', { bubbles: true }));

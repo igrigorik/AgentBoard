@@ -12,12 +12,24 @@
 <body>
   <div id="app">
     <header class="sidebar-header">
-      <div class="agent-selector">
-        <select id="agent-select">
-          <option value="">No agents configured</option>
-        </select>
-      </div>
-      <button id="settings-button" class="settings-button" title="Open Settings">⚙</button>
+      <details id="agent-switcher" class="agent-switcher">
+        <summary id="agent-switcher-trigger" class="agent-switcher-trigger">
+          <span class="agent-dot" aria-hidden="true"></span>
+          <span class="agent-switcher-label">No agents configured</span>
+          <svg class="agent-switcher-chevron" viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M5.5 7.5 10 12l4.5-4.5Z" />
+          </svg>
+        </summary>
+        <div id="agent-switcher-menu" class="agent-switcher-menu"></div>
+      </details>
+      <button id="settings-button" class="settings-button" type="button" title="Open Settings"
+        aria-label="Open Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 15.25A3.25 3.25 0 1 0 12 8.75a3.25 3.25 0 0 0 0 6.5Z" />
+          <path
+            d="M19.4 13.5a7.7 7.7 0 0 0 .05-3l1.62-1.25-2-3.46-1.95.78a7.7 7.7 0 0 0-2.6-1.5L14.2 3h-4l-.32 2.07a7.7 7.7 0 0 0-2.6 1.5L5.33 5.8l-2 3.46 1.62 1.25a7.7 7.7 0 0 0 .05 3l-1.67 1.28 2 3.46 2-.8a7.7 7.7 0 0 0 2.55 1.47L10.2 21h4l.32-2.08a7.7 7.7 0 0 0 2.55-1.47l2 .8 2-3.46-1.67-1.29Z" />
+        </svg>
+      </button>
     </header>
 
     <main class="chat-container">
