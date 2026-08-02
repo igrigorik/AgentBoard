@@ -138,8 +138,8 @@
             <h3>Backup & Restore</h3>
             <p class="section-description">
               Backup files are plaintext and can contain API keys, authentication tokens, endpoints,
-              model IDs, system prompts, executable user scripts, and commands. Store them as
-              secrets. Exports never include Local Workspace connections or files.
+              model IDs, executable user scripts, and commands. Store them as secrets. Exports never
+              include Local Workspace connections or files.
             </p>
             <p class="section-description">
               Importing settings removes every Local Workspace connection on this device before the
@@ -367,17 +367,6 @@
               <span class="api-key-hint" id="agent-api-key-hint" aria-live="polite"></span>
             </div>
 
-            <div class="form-group">
-              <label for="agent-system-prompt">Custom Instructions</label>
-              <span class="field-hint">Appended to the built-in system prompt.</span>
-              <textarea
-                id="agent-system-prompt"
-                name="systemPrompt"
-                rows="4"
-                placeholder="Add custom instructions here... (leave empty to use defaults)"
-              ></textarea>
-            </div>
-
             <fieldset
               id="agent-memory-section"
               class="agent-memory-section hidden"
@@ -385,11 +374,12 @@
             >
               <legend>Local Workspace <span class="field-label-qualifier">Optional</span></legend>
               <p class="field-hint" id="agent-memory-description">
-                Connect a folder to bootstrap each new chat from
-                <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>USER.md</code>,
-                <code>AGENTS.md</code>, and <code>MEMORY.md</code>. Their contents are sent to this
-                agent’s configured AI service. Switching agents keeps the chat history and loads the
-                selected agent’s workspace.
+                Without a workspace, this agent uses AgentBoard’s built-in behavior. Connect a
+                folder to bootstrap each new chat from <code>IDENTITY.md</code>,
+                <code>SOUL.md</code>, <code>USER.md</code>, <code>AGENTS.md</code>, and
+                <code>MEMORY.md</code>. Their contents are sent to this agent’s configured AI
+                service. Switching agents keeps the chat history and loads the selected agent’s
+                workspace.
               </p>
 
               <details class="agent-memory-details">

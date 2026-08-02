@@ -6,8 +6,8 @@ A switchboard for AI in your browser: wire in any model, script WebMCP tools, co
 
 - **Multi agent**: Configure as many profiles as you want and switch mid-conversation.
 - **Your connection**: OpenAI-style Responses or legacy Chat Completions, Anthropic Messages, Google Generative AI, or a compatible proxy endpoint.
-- **Your settings**: System prompts, temperature, thinking settings.
-- **Your memory**: Optionally connect a local folder to an agent for deliberate, durable memory.
+- **Your settings**: Models, endpoints, temperature, and thinking settings.
+- **Your workspace**: Optionally connect a local folder for agent behavior and durable memory.
 - **Your keys**: Bring your own API keys. No lock-in, no upselling.
 - **Your tools**: Script WebMCP tools for page interactions. Connect remote MCP servers.
 - **Your commands**: Template prompts with arguments; type `/analyze`, not paragraphs.
@@ -76,7 +76,6 @@ Choose the contract implemented by the endpoint, not the company that produced t
   apiProtocol: "google-generative-ai",
   model: "your-google-model",
   apiKey: "your-api-key",
-  systemPrompt: "You are a helpful assistant.",
   reasoning: {
     enabled: true,
     google: {
@@ -95,16 +94,15 @@ Choose the contract implemented by the endpoint, not the company that produced t
   apiProtocol: "openai-chat-completions",
   endpoint: "http://localhost:11434/v1",
   model: "llama3.1:70b",
-  systemPrompt: "You are a coding assistant.",
   temperature: 0.7
 }
 ```
 
 Configure as many profiles as you want. Switch mid-conversation. Current settings and exports use schema v2 with required `schemaVersion: 2` and per-agent `apiProtocol`. Released v1 settings and v1 backups are migrated once; a v1 backup envelope containing already-migrated v2 settings after a rollback is also accepted. Older releases ignore `apiProtocol` and may infer a different transport, so a safe rollback that preserves routing requires a pre-migration export or an explicit reverse migration.
 
-## Optional Local Memory
+## Optional Local Workspace
 
-By default, conversations are ephemeral. Connect a folder in Settings to let an agent save and recall useful facts across conversations; changes appear as visible tool calls, backups exclude the folder and its connection, and disconnecting never deletes your files. See the [Privacy Policy](PRIVACY.md) for data-sharing details.
+Without a workspace, an agent uses AgentBoard’s built-in behavior. Connect a folder in Settings to bootstrap each new chat from portable files for identity, persona, user context, operating guidance, and memory. Memory changes appear as visible tool calls, backups exclude the folder and its connection, and disconnecting never deletes your files. See the [Privacy Policy](PRIVACY.md) for data-sharing details.
 
 ## MCP tools
 
@@ -189,7 +187,7 @@ Fast interactions with expansion templates.
 
 AgentBoard has no operated telemetry or AI proxy, but configured features are not local-only. When you send a chat, the selected AI endpoint receives the conversation plus URL and title snapshots captured for its user turns; switching agents can therefore send the existing in-memory conversation and its page-context snapshots to the newly selected endpoint. URLs may contain sensitive paths, query parameters, fragments, document identifiers, or tokens. AI endpoints can also receive attachments, tool definitions, tool arguments, and tool results. Remote MCP servers receive MCP protocol traffic and authorization tokens. Credential-free URL fetches contact the requested website. The built-in YouTube transcript tool contacts YouTube Innertube and caption endpoints; its same-origin Innertube request and explicit caption request can include browser YouTube/Google session credentials. User WebMCP scripts run with page-level capabilities defined by their source.
 
-Settings are stored in `chrome.storage.local`. Conversation traffic is kept in memory rather than extension storage. AgentBoard's application logger and relay diagnostics discard caller-supplied values; generated page-tool registration wrappers and browser/provider code log independently and may include their own errors. Settings exports are plaintext and can contain AI credentials, MCP tokens, endpoint URLs, system prompts, and executable user scripts; treat every backup as a secret.
+Settings are stored in `chrome.storage.local`. Conversation traffic is kept in memory rather than extension storage. AgentBoard's application logger and relay diagnostics discard caller-supplied values; generated page-tool registration wrappers and browser/provider code log independently and may include their own errors. Settings exports are plaintext and can contain AI credentials, MCP tokens, endpoint URLs, and executable user scripts; treat every backup as a secret.
 
 OpenAI Responses requests include `store: false`, but that does not guarantee Zero Data Retention or disable provider/proxy logging, abuse monitoring, retention, or prompt caching. See [PRIVACY.md](PRIVACY.md) for the complete boundary and deletion guidance.
 

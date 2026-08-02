@@ -17,9 +17,9 @@ function legacyAgent(overrides: Record<string, unknown> = {}): Record<string, un
     provider: 'openai',
     model: 'opaque-model',
     openaiCompatible: true,
-    systemPrompt: '',
     temperature: 0.7,
-    maxTokens: 1000,
+    systemPrompt: 'retired custom instructions',
+    ignoredLegacyField: true,
     ...overrides,
   };
 }
@@ -31,7 +31,6 @@ function currentAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     provider: 'openai',
     apiProtocol: 'openai-responses',
     model: 'opaque-model',
-    systemPrompt: '',
     temperature: 0.7,
     ...overrides,
   };
@@ -105,7 +104,8 @@ describe('backup schema boundary', () => {
       agents: [expect.objectContaining({ apiProtocol: 'openai-responses' })],
     });
     expect(prepared.config.agents[0]).not.toHaveProperty('openaiCompatible');
-    expect(prepared.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(prepared.config.agents[0]).not.toHaveProperty('systemPrompt');
+    expect(prepared.config.agents[0]).not.toHaveProperty('ignoredLegacyField');
     expect(prepared.commands).toEqual(commands);
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
     expect(chrome.storage.local.clear).not.toHaveBeenCalled();
@@ -163,22 +163,30 @@ describe('backup schema boundary', () => {
     });
   });
 
-  it('accepts retired maxTokens in a v2 backup and strips it before import', async () => {
+  it('drops unknown fields before importing a current backup', async () => {
     const prepared = prepareBackupImport(
       backup('2.0', {
         schemaVersion: 2,
-        agents: [{ ...currentAgent(), maxTokens: 1000 }],
+        agents: [
+          {
+            ...currentAgent(),
+            systemPrompt: 'retired custom instructions',
+            ignoredAgentField: true,
+          },
+        ],
       })
     );
 
-    expect(prepared.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(prepared.config.agents[0]).not.toHaveProperty('systemPrompt');
+    expect(prepared.config.agents[0]).not.toHaveProperty('ignoredAgentField');
 
     await applyPreparedBackup(prepared);
 
     const written = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as {
       config: StorageConfig;
     };
-    expect(written.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(written.config.agents[0]).not.toHaveProperty('systemPrompt');
+    expect(written.config.agents[0]).not.toHaveProperty('ignoredAgentField');
     expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
     expect(chrome.storage.local.clear).not.toHaveBeenCalled();
   });
@@ -408,8 +416,15 @@ describe('backup schema boundary', () => {
   it('exports only a canonical current v2 envelope', async () => {
     const config = {
       schemaVersion: 2,
-      agents: [{ ...currentAgent(), maxTokens: 1000 }],
+      agents: [
+        {
+          ...currentAgent(),
+          systemPrompt: 'retired custom instructions',
+          ignoredAgentField: true,
+        },
+      ],
       logLevel: 'warn',
+      ignoredConfigField: true,
     } as unknown as StorageConfig;
     vi.mocked(chrome.storage.local.get).mockImplementation((keys, callback) => {
       const requested = keys as unknown;
@@ -432,7 +447,9 @@ describe('backup schema boundary', () => {
     });
     expect(exported.commands).toEqual(commands);
     expect(exported.config.agents[0]).not.toHaveProperty('openaiCompatible');
-    expect(exported.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(exported.config.agents[0]).not.toHaveProperty('systemPrompt');
+    expect(exported.config.agents[0]).not.toHaveProperty('ignoredAgentField');
+    expect(exported.config).not.toHaveProperty('ignoredConfigField');
     expect(Object.keys(exported).sort()).toEqual(
       ['commands', 'config', 'exportedBy', 'extensionVersion', 'timestamp', 'version'].sort()
     );

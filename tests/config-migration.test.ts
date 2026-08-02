@@ -9,7 +9,6 @@ function legacy(overrides: LegacyAgent = {}): LegacyAgent {
     name: 'Agent',
     provider: 'openai',
     model: 'model',
-    systemPrompt: '',
     temperature: 0.7,
     maxTokens: 1000,
     ...overrides,

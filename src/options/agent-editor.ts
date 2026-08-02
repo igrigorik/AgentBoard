@@ -17,7 +17,6 @@ export interface AgentEditorState {
   model: string;
   endpoint: string;
   apiKey: string;
-  systemPrompt: string;
   temperature: number;
   maxSteps: number;
   isDefault: boolean;
@@ -40,7 +39,6 @@ const DEFAULT_EDITOR_STATE: AgentEditorState = {
   model: '',
   endpoint: '',
   apiKey: '',
-  systemPrompt: '',
   temperature: 0.7,
   maxSteps: 10,
   isDefault: false,
@@ -72,7 +70,6 @@ export function agentToEditorState(agent: AgentConfig): AgentEditorState {
   state.model = agent.model;
   state.endpoint = agent.endpoint ?? '';
   state.apiKey = agent.apiKey ?? '';
-  state.systemPrompt = agent.systemPrompt;
   state.temperature = agent.temperature;
   state.maxSteps = agent.maxSteps ?? 10;
   state.isDefault = agent.isDefault ?? false;
@@ -176,7 +173,6 @@ export function readAgentDraft(form: HTMLFormElement): AgentDraft {
     model: formString(data, 'model').trim(),
     endpoint: endpoint || undefined,
     apiProtocol,
-    systemPrompt: formString(data, 'systemPrompt'),
     temperature: Number.parseFloat(formString(data, 'temperature')),
     maxSteps: Number.parseInt(formString(data, 'maxSteps'), 10),
     isDefault: data.has('isDefault'),
@@ -240,7 +236,6 @@ export function renderAgentEditor(form: HTMLFormElement, state: AgentEditorState
   setValue(form, 'agent-model', state.model);
   setValue(form, 'agent-endpoint', state.endpoint);
   setValue(form, 'agent-api-key', state.apiKey);
-  setValue(form, 'agent-system-prompt', state.systemPrompt);
   setValue(form, 'agent-temperature', state.temperature.toString());
   setValue(form, 'agent-max-steps', state.maxSteps.toString());
   requiredControl<HTMLInputElement>(form, 'agent-is-default').checked = state.isDefault;

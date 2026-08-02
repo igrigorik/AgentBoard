@@ -19,7 +19,6 @@ function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     apiProtocol: 'openai-responses',
     model: 'opaque-model',
     apiKey: 'secret-key',
-    systemPrompt: '',
     temperature: 0.7,
     ...overrides,
   };
@@ -45,7 +44,6 @@ describe('agent editor state projection', () => {
       apiProtocol: 'openai-chat-completions',
       endpoint: 'https://proxy.example.test/v1',
       apiKey: undefined,
-      systemPrompt: 'Be concise.',
       temperature: 0.2,
       maxSteps: 7,
       isDefault: true,
@@ -66,7 +64,6 @@ describe('agent editor state projection', () => {
       model: 'opaque-model',
       endpoint: 'https://proxy.example.test/v1',
       apiProtocol: 'openai-chat-completions',
-      systemPrompt: 'Be concise.',
       temperature: 0.2,
       maxSteps: 7,
       isDefault: true,

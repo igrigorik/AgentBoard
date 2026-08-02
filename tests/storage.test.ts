@@ -17,7 +17,6 @@ function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     provider: 'openai',
     apiProtocol: 'openai-responses',
     model: 'model',
-    systemPrompt: '',
     temperature: 0.7,
     ...overrides,
   };
@@ -44,11 +43,46 @@ function useStorage(initial: Stored, readDelay = 0): Stored {
   return state;
 }
 
+function useStorageWithDeferredFirstRead(initial: Stored): {
+  state: Stored;
+  readStarted: Promise<void>;
+  releaseRead: () => void;
+} {
+  const state = initial;
+  let markReadStarted!: () => void;
+  const readStarted = new Promise<void>((resolve) => {
+    markReadStarted = resolve;
+  });
+  let releaseRead!: () => void;
+  const readGate = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  let deferRead = true;
+  vi.mocked(chrome.storage.local.get).mockImplementation(async () => {
+    const snapshot = structuredClone(state);
+    if (deferRead) {
+      deferRead = false;
+      markReadStarted();
+      await readGate;
+    }
+    return snapshot;
+  });
+  vi.mocked(chrome.storage.local.set).mockImplementation(async (items) => {
+    Object.assign(state, structuredClone(items));
+  });
+  return { state, readStarted, releaseRead };
+}
+
 describe('schema-v2 parser', () => {
-  it('fully migrates every v1 agent while preserving harmless unknown fields', () => {
+  it('fully migrates every v1 agent while dropping unknown fields', () => {
     const legacy = {
       agents: [
-        { ...agent(), apiProtocol: undefined, openaiCompatible: true },
+        {
+          ...agent(),
+          apiProtocol: undefined,
+          openaiCompatible: true,
+          systemPrompt: 'retired custom instructions',
+        },
         { ...agent({ id: 'agent-2', provider: 'anthropic' }), apiProtocol: undefined },
       ],
       defaultAgentId: 'agent-2',
@@ -62,7 +96,8 @@ describe('schema-v2 parser', () => {
       'anthropic-messages',
     ]);
     expect(parsed.config.agents[0]).not.toHaveProperty('openaiCompatible');
-    expect(parsed.config).toHaveProperty('harmless.retained', true);
+    expect(parsed.config.agents[0]).not.toHaveProperty('systemPrompt');
+    expect(parsed.config).not.toHaveProperty('harmless');
   });
 
   it.each([
@@ -99,11 +134,92 @@ describe('schema-v2 parser', () => {
     }
   );
 
-  it('accepts and strips retired maxTokens from current v2 data', () => {
-    const parsed = parseStorageConfig(current({ agents: [{ ...agent(), maxTokens: 1234 }] }));
+  it('projects every recognized field and drops unknown keys at every config level', () => {
+    const parsed = parseStorageConfig({
+      schemaVersion: 2,
+      agents: [
+        {
+          ...agent(),
+          description: 'Connection metadata',
+          apiKey: '',
+          endpoint: 'https://proxy.example.test/v1',
+          maxSteps: 7,
+          isDefault: false,
+          reasoning: {
+            enabled: true,
+            autoExpand: false,
+            collapseDelay: 0,
+            openai: {
+              reasoningEffort: 'high',
+              reasoningSummary: 'detailed',
+              ignoredOpenAI: true,
+            },
+            anthropic: { thinkingBudgetTokens: 1000, ignoredAnthropic: true },
+            google: { thinkingBudget: -1, includeThoughts: false, ignoredGoogle: true },
+            ignoredReasoning: true,
+          },
+          systemPrompt: 'retired custom instructions',
+          ignoredAgent: true,
+        },
+      ],
+      defaultAgentId: 'agent-1',
+      mcpConfig: {
+        mcpServers: {
+          primary: {
+            transport: 'http',
+            url: 'https://mcp.example.test',
+            authToken: '',
+            ignoredServer: true,
+          },
+        },
+        ignoredMcp: true,
+      },
+      userScripts: [{ id: 'user-script', code: '', enabled: false, ignoredScript: true }],
+      builtinScripts: [{ id: 'builtin-script', enabled: false, ignoredBuiltin: true }],
+      logLevel: 'silent',
+      ignoredConfig: true,
+    });
 
     expect(parsed.migrated).toBe(false);
-    expect(parsed.config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(parsed.config).toEqual({
+      schemaVersion: 2,
+      agents: [
+        {
+          id: 'agent-1',
+          name: 'Agent',
+          description: 'Connection metadata',
+          provider: 'openai',
+          apiKey: '',
+          model: 'model',
+          endpoint: 'https://proxy.example.test/v1',
+          apiProtocol: 'openai-responses',
+          temperature: 0.7,
+          maxSteps: 7,
+          isDefault: false,
+          reasoning: {
+            enabled: true,
+            autoExpand: false,
+            collapseDelay: 0,
+            openai: { reasoningEffort: 'high', reasoningSummary: 'detailed' },
+            anthropic: { thinkingBudgetTokens: 1000 },
+            google: { thinkingBudget: -1, includeThoughts: false },
+          },
+        },
+      ],
+      defaultAgentId: 'agent-1',
+      mcpConfig: {
+        mcpServers: {
+          primary: {
+            transport: 'http',
+            url: 'https://mcp.example.test',
+            authToken: '',
+          },
+        },
+      },
+      userScripts: [{ id: 'user-script', code: '', enabled: false }],
+      builtinScripts: [{ id: 'builtin-script', enabled: false }],
+      logLevel: 'silent',
+    });
   });
 
   it('canonicalizes a blank current-v2 endpoint as absent', () => {
@@ -241,27 +357,27 @@ describe('ConfigStorage', () => {
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
-  it('strips retired fields from current v2 reads without rewriting storage', async () => {
+  it('drops unknown fields from current v2 reads without rewriting storage', async () => {
     useStorage({
-      config: current({ agents: [{ ...agent(), maxTokens: 0 }] }),
+      config: current({ agents: [{ ...agent(), ignoredAgent: true }] }),
     });
 
     const config = await storage.get();
 
     expect(config.schemaVersion).toBe(2);
-    expect(config.agents[0]).not.toHaveProperty('maxTokens');
+    expect(config.agents[0]).not.toHaveProperty('ignoredAgent');
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
-  it('strips retired fields before an explicit config mutation is persisted', async () => {
+  it('drops unknown fields before an explicit config mutation is persisted', async () => {
     const state = useStorage({ config: current() });
 
     await storage.set({
-      agents: [{ ...agent(), maxTokens: 1234 }],
+      agents: [{ ...agent(), ignoredAgent: true }],
     } as never);
 
     expect(chrome.storage.local.set).toHaveBeenCalledTimes(1);
-    expect((state.config as { agents: unknown[] }).agents[0]).not.toHaveProperty('maxTokens');
+    expect((state.config as { agents: unknown[] }).agents[0]).not.toHaveProperty('ignoredAgent');
   });
 
   it('migrates v1 exactly once and a second read does not write', async () => {
@@ -396,6 +512,37 @@ describe('ConfigStorage', () => {
     await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1));
   });
 
+  it('onChange drops an older queued snapshot after malformed config revokes authority', async () => {
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
+    });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
+    });
+    const callback = vi.fn();
+    const onError = vi.fn();
+    storage.onChange(callback, onError);
+
+    listener?.({ config: { newValue: current() } }, 'local');
+    listener?.({ config: { newValue: { schemaVersion: 3, agents: [] } } }, 'local');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(callback).not.toHaveBeenCalled();
+
+    listener?.(
+      { config: { newValue: current({ agents: [agent({ name: 'Recovered' })] }) } },
+      'local'
+    );
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1));
+    expect(callback).toHaveBeenCalledWith(
+      expect.objectContaining({ agents: [expect.objectContaining({ name: 'Recovered' })] })
+    );
+  });
+
   it('onChange persists v1 before delivering the resulting v2 snapshot', async () => {
     const state = useStorage({
       config: { agents: [{ ...agent(), apiProtocol: undefined, openaiCompatible: true }] },
@@ -424,6 +571,75 @@ describe('ConfigStorage', () => {
         agents: [expect.objectContaining({ apiProtocol: 'openai-responses' })],
       })
     );
+  });
+
+  it('onChange does not let a delayed v1 migration overwrite a newer valid config', async () => {
+    const legacy = {
+      agents: [{ ...agent({ name: 'Legacy' }), apiProtocol: undefined }],
+      defaultAgentId: 'agent-1',
+    };
+    const { state, readStarted, releaseRead } = useStorageWithDeferredFirstRead({
+      config: legacy,
+    });
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
+    });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
+    });
+    const callback = vi.fn();
+    storage.onChange(callback);
+
+    listener?.({ config: { newValue: legacy } }, 'local');
+    await readStarted;
+    const newer = current({ agents: [agent({ name: 'Newer' })] });
+    state.config = newer;
+    listener?.({ config: { newValue: newer } }, 'local');
+    releaseRead();
+    await storage.get();
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1));
+
+    expect(callback.mock.calls.map(([config]) => config.agents[0].name)).toEqual(['Newer']);
+    expect(state.config).toEqual(newer);
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
+  it('onChange does not let a delayed v1 migration recover a newer invalid config', async () => {
+    const legacy = {
+      agents: [{ ...agent({ name: 'Legacy' }), apiProtocol: undefined }],
+      defaultAgentId: 'agent-1',
+    };
+    const { state, readStarted, releaseRead } = useStorageWithDeferredFirstRead({
+      config: legacy,
+    });
+    const addListener = vi.fn();
+    Object.defineProperty(chrome.storage, 'onChanged', {
+      configurable: true,
+      value: { addListener },
+    });
+    let listener: Parameters<typeof chrome.storage.onChanged.addListener>[0] | undefined;
+    addListener.mockImplementation((fn) => {
+      listener = fn;
+    });
+    const callback = vi.fn();
+    const onError = vi.fn();
+    storage.onChange(callback, onError);
+
+    listener?.({ config: { newValue: legacy } }, 'local');
+    await readStarted;
+    const future = { schemaVersion: 3, agents: [] };
+    state.config = future;
+    listener?.({ config: { newValue: future } }, 'local');
+    releaseRead();
+    await expect(storage.get()).rejects.toThrow('UNSUPPORTED_SCHEMA_VERSION');
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(callback).not.toHaveBeenCalled();
+    expect(state.config).toEqual(future);
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
   it('onChange continues after a consumer error handler throws', async () => {

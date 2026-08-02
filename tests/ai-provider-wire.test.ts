@@ -133,7 +133,6 @@ function createAgent(
     model: 'opaque-model',
     endpoint,
     apiProtocol,
-    systemPrompt: '',
     temperature: 0.7,
     ...overrides,
   };

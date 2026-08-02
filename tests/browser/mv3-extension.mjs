@@ -311,15 +311,21 @@ async function main() {
           model: 'opaque-model',
           endpoint: wire.endpoint,
           openaiCompatible: true,
-          systemPrompt: '',
+          systemPrompt: 'retired custom instructions',
           temperature: 0.7,
           maxTokens: 1000,
           maxSteps: 10,
           isDefault: true,
           reasoning: {
             enabled: true,
-            openai: { reasoningEffort: 'medium', reasoningSummary: 'detailed' },
+            openai: {
+              reasoningEffort: 'medium',
+              reasoningSummary: 'detailed',
+              ignoredProviderField: true,
+            },
+            ignoredReasoningField: true,
           },
+          ignoredAgentField: true,
         },
         {
           id: 'native-anthropic',
@@ -327,7 +333,6 @@ async function main() {
           provider: 'anthropic',
           apiKey: 'test-key',
           model: 'native-model',
-          systemPrompt: '',
           temperature: 0.7,
           maxSteps: 10,
           isDefault: false,
@@ -335,6 +340,7 @@ async function main() {
       ],
       defaultAgentId: 'legacy-chat',
       logLevel: 'warn',
+      ignoredConfigField: true,
     };
     await evaluate(`chrome.storage.local.set({ config: ${JSON.stringify(legacyConfig)} })`);
     const migrated = await waitFor(async () => {
@@ -349,8 +355,13 @@ async function main() {
     );
     assert.equal(migrated.agents[0].apiProtocol, 'openai-chat-completions');
     assert.equal(Object.hasOwn(migrated.agents[0], 'openaiCompatible'), false);
+    assert.equal(Object.hasOwn(migrated.agents[0], 'systemPrompt'), false);
     assert.equal(Object.hasOwn(migrated.agents[0], 'maxTokens'), false);
-    console.log('✓ migrated one schema-v1 config write to schema v2');
+    assert.equal(Object.hasOwn(migrated.agents[0], 'ignoredAgentField'), false);
+    assert.equal(Object.hasOwn(migrated.agents[0].reasoning, 'ignoredReasoningField'), false);
+    assert.equal(Object.hasOwn(migrated.agents[0].reasoning.openai, 'ignoredProviderField'), false);
+    assert.equal(Object.hasOwn(migrated, 'ignoredConfigField'), false);
+    console.log('✓ migrated one schema-v1 config write to canonical schema v2');
 
     await reloadOptions();
     await waitFor(
@@ -398,6 +409,7 @@ async function main() {
     );
     assert.equal(await evaluate(`document.querySelector('#agent-api-key')?.required`), false);
     assert.equal(await evaluate(`document.querySelector('#agent-max-tokens')`), null);
+    assert.equal(await evaluate(`document.querySelector('#agent-system-prompt')`), null);
     assert.equal(
       await evaluate(
         `document.querySelector('#agent-openai-api-mode')?.getAttribute('aria-describedby')`

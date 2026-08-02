@@ -181,7 +181,6 @@ async function executeAIIntegrationTarget(
     model: target.model,
     endpoint: target.endpoint,
     apiProtocol: target.apiProtocol,
-    systemPrompt: '',
     temperature: 0.7,
   };
   const runtime = createModelRuntime(agent);

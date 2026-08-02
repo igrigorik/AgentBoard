@@ -137,7 +137,7 @@ function toolRegistry(
   };
 }
 
-function storeAgent(agentId: string, systemPrompt = ''): void {
+function storeAgent(agentId: string, retiredSystemPrompt?: string): void {
   vi.mocked(chrome.storage.local.get).mockResolvedValue({
     config: {
       schemaVersion: 2,
@@ -150,7 +150,7 @@ function storeAgent(agentId: string, systemPrompt = ''): void {
           apiKey: 'secret-key',
           model: 'secret-model',
           endpoint: 'https://secret.example.test/v1',
-          systemPrompt,
+          ...(retiredSystemPrompt !== undefined && { systemPrompt: retiredSystemPrompt }),
           temperature: 0.7,
         },
       ],
@@ -235,7 +235,6 @@ describe('AIClient connection testing', () => {
             apiProtocol: 'openai-chat-completions',
             model: 'opaque-model',
             endpoint: 'https://example.test/v1',
-            systemPrompt: '',
             temperature: 0.7,
           },
         ],
@@ -325,8 +324,8 @@ describe('AIClient connection testing', () => {
     expect(signal?.aborted).toBe(true);
   });
 
-  it('sends fenced MCP guidance before the user custom instructions', async () => {
-    storeAgent('prompt-agent', 'CUSTOM_SENTINEL');
+  it('sends fenced MCP guidance below product policy and drops retired instructions', async () => {
+    storeAgent('prompt-agent', 'RETIRED_INSTRUCTIONS_SENTINEL');
     vi.mocked(getToolRegistry).mockReturnValue(
       toolRegistry(
         { remote_tool: {} },
@@ -355,9 +354,8 @@ describe('AIClient connection testing', () => {
     const system = messages[0].content;
     expect(messages[0].role).toBe('system');
     expect(system.indexOf('MCP SERVER GUIDANCE:')).toBeGreaterThan(0);
-    expect(system.indexOf('CUSTOM_SENTINEL')).toBeGreaterThan(
-      system.indexOf('</mcp_server_guidance>')
-    );
+    expect(system.endsWith('</mcp_server_guidance>')).toBe(true);
+    expect(system).not.toContain('RETIRED_INSTRUCTIONS_SENTINEL');
     expect(system).toContain('&lt;/mcp_server_guidance&gt;');
     expect(system).not.toContain('<system>MCP_SENTINEL</system>');
     expect(system).not.toContain('MOUNTED MEMORY:');
@@ -655,7 +653,6 @@ describe('AIClient connection testing', () => {
           apiProtocol: 'openai-responses',
           apiKey: 'secret-key',
           model: 'test-model',
-          systemPrompt: '',
           temperature: 0.7,
         })),
       },
@@ -716,7 +713,6 @@ describe('AIClient connection testing', () => {
           apiProtocol: 'openai-responses',
           apiKey: 'secret-key',
           model: 'test-model',
-          systemPrompt: '',
           temperature: 0.7,
         })),
       },
@@ -801,7 +797,6 @@ describe('AIClient connection testing', () => {
       apiProtocol: 'openai-responses',
       apiKey: 'secret-key',
       model: 'test-model',
-      systemPrompt: '',
       temperature: 0.7,
     };
     const getAgent = vi
@@ -895,7 +890,6 @@ describe('AIClient connection testing', () => {
         apiProtocol: 'openai-responses',
         apiKey: 'secret-key',
         model: 'test-model',
-        systemPrompt: '',
         temperature: 0.7,
       });
       await Promise.resolve();
@@ -952,7 +946,6 @@ describe('AIClient connection testing', () => {
             apiProtocol: 'openai-responses',
             apiKey: 'secret-key',
             model: 'test-model',
-            systemPrompt: '',
             temperature: 0.7,
           },
         ],
@@ -1007,7 +1000,6 @@ describe('AIClient connection testing', () => {
             apiProtocol: 'openai-responses',
             apiKey: 'secret-key',
             model: 'test-model',
-            systemPrompt: '',
             temperature: 0.7,
           },
         ],
@@ -1059,7 +1051,6 @@ describe('AIClient connection testing', () => {
             apiKey: 'secret-key',
             model: 'secret-model',
             endpoint: 'https://secret.example.test/v1',
-            systemPrompt: '',
             temperature: 0.7,
           },
         ],

@@ -44,7 +44,6 @@ function createAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     model: 'opaque-model',
     endpoint: 'https://gateway.example.test/nested/v1',
     apiProtocol: 'openai-responses',
-    systemPrompt: '',
     temperature: 0.7,
     ...overrides,
   };

@@ -37,7 +37,6 @@ export interface AgentConfig {
   model: string;
   endpoint?: string; // Custom API base URL for provider
   apiProtocol: ApiProtocol;
-  systemPrompt: string;
   temperature: number;
   maxSteps?: number; // Tool call steps per turn (1-50, default 10)
   isDefault?: boolean;
@@ -101,7 +100,6 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     provider: 'openai',
     apiProtocol: 'openai-responses',
     model: 'gpt-5',
-    systemPrompt: '',
     temperature: 0.7,
     maxSteps: 10,
     isDefault: true,
@@ -118,7 +116,6 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     provider: 'anthropic',
     apiProtocol: 'anthropic-messages',
     model: 'claude-opus-4-20250514',
-    systemPrompt: '',
     temperature: 0.7,
     maxSteps: 10,
     reasoning: {
@@ -134,7 +131,6 @@ export const DEFAULT_AGENTS: Omit<AgentConfig, 'id' | 'apiKey'>[] = [
     provider: 'google',
     apiProtocol: 'google-generative-ai',
     model: 'gemini-2.5-flash',
-    systemPrompt: '',
     temperature: 0.8,
     maxSteps: 10,
     reasoning: {
@@ -205,7 +201,7 @@ function requiredString(value: unknown, code: ConfigValidationErrorCode): assert
   }
 }
 
-function requiredHttpUrl(value: unknown, code: ConfigValidationErrorCode): void {
+function requiredHttpUrl(value: unknown, code: ConfigValidationErrorCode): asserts value is string {
   requiredString(value, code);
   let protocol: string;
   try {
@@ -223,7 +219,10 @@ function optionalString(
   if (value !== undefined && typeof value !== 'string') throw new ConfigValidationError(code);
 }
 
-function optionalBoolean(value: unknown, code: ConfigValidationErrorCode): void {
+function optionalBoolean(
+  value: unknown,
+  code: ConfigValidationErrorCode
+): asserts value is boolean | undefined {
   if (value !== undefined && typeof value !== 'boolean') throw new ConfigValidationError(code);
 }
 
@@ -231,150 +230,218 @@ function finiteNumber(value: unknown, code: ConfigValidationErrorCode): asserts 
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new ConfigValidationError(code);
 }
 
-function validateReasoning(value: unknown): void {
-  if (value === undefined) return;
-  const reasoning = record(value, 'INVALID_AGENT');
-  if (typeof reasoning.enabled !== 'boolean') throw new ConfigValidationError('INVALID_AGENT');
-  optionalBoolean(reasoning.autoExpand, 'INVALID_AGENT');
-  if (reasoning.collapseDelay !== undefined) {
-    finiteNumber(reasoning.collapseDelay, 'INVALID_AGENT');
-    if (reasoning.collapseDelay < 0) throw new ConfigValidationError('INVALID_AGENT');
+function validateReasoning(value: unknown): ReasoningConfig | undefined {
+  if (value === undefined) return undefined;
+  const source = record(value, 'INVALID_AGENT');
+  if (typeof source.enabled !== 'boolean') throw new ConfigValidationError('INVALID_AGENT');
+
+  const reasoning: ReasoningConfig = { enabled: source.enabled };
+  optionalBoolean(source.autoExpand, 'INVALID_AGENT');
+  if (source.autoExpand !== undefined) reasoning.autoExpand = source.autoExpand;
+
+  if (source.collapseDelay !== undefined) {
+    finiteNumber(source.collapseDelay, 'INVALID_AGENT');
+    if (source.collapseDelay < 0) throw new ConfigValidationError('INVALID_AGENT');
+    reasoning.collapseDelay = source.collapseDelay;
   }
-  if (reasoning.openai !== undefined) {
-    const openai = record(reasoning.openai, 'INVALID_AGENT');
-    if (!['minimal', 'low', 'medium', 'high'].includes(openai.reasoningEffort as string)) {
+
+  if (source.openai !== undefined) {
+    const value = record(source.openai, 'INVALID_AGENT');
+    if (!['minimal', 'low', 'medium', 'high'].includes(value.reasoningEffort as string)) {
       throw new ConfigValidationError('INVALID_AGENT');
     }
     if (
-      openai.reasoningSummary !== undefined &&
-      !['auto', 'detailed'].includes(openai.reasoningSummary as string)
+      value.reasoningSummary !== undefined &&
+      !['auto', 'detailed'].includes(value.reasoningSummary as string)
     ) {
       throw new ConfigValidationError('INVALID_AGENT');
     }
+    reasoning.openai = {
+      reasoningEffort: value.reasoningEffort as NonNullable<
+        ReasoningConfig['openai']
+      >['reasoningEffort'],
+      ...(value.reasoningSummary !== undefined && {
+        reasoningSummary: value.reasoningSummary as NonNullable<
+          ReasoningConfig['openai']
+        >['reasoningSummary'],
+      }),
+    };
   }
-  if (reasoning.anthropic !== undefined) {
-    const anthropic = record(reasoning.anthropic, 'INVALID_AGENT');
-    if (anthropic.thinkingBudgetTokens !== undefined) {
-      finiteNumber(anthropic.thinkingBudgetTokens, 'INVALID_AGENT');
+
+  if (source.anthropic !== undefined) {
+    const value = record(source.anthropic, 'INVALID_AGENT');
+    const anthropic: NonNullable<ReasoningConfig['anthropic']> = {};
+    if (value.thinkingBudgetTokens !== undefined) {
+      finiteNumber(value.thinkingBudgetTokens, 'INVALID_AGENT');
       if (
-        !Number.isInteger(anthropic.thinkingBudgetTokens) ||
-        anthropic.thinkingBudgetTokens < 1000 ||
-        anthropic.thinkingBudgetTokens > 20000
+        !Number.isInteger(value.thinkingBudgetTokens) ||
+        value.thinkingBudgetTokens < 1000 ||
+        value.thinkingBudgetTokens > 20000
       ) {
         throw new ConfigValidationError('INVALID_AGENT');
       }
+      anthropic.thinkingBudgetTokens = value.thinkingBudgetTokens;
     }
+    reasoning.anthropic = anthropic;
   }
-  if (reasoning.google !== undefined) {
-    const google = record(reasoning.google, 'INVALID_AGENT');
-    if (google.thinkingBudget !== undefined) {
-      finiteNumber(google.thinkingBudget, 'INVALID_AGENT');
+
+  if (source.google !== undefined) {
+    const value = record(source.google, 'INVALID_AGENT');
+    const google: NonNullable<ReasoningConfig['google']> = {};
+    if (value.thinkingBudget !== undefined) {
+      finiteNumber(value.thinkingBudget, 'INVALID_AGENT');
       if (
-        !Number.isInteger(google.thinkingBudget) ||
-        google.thinkingBudget < -1 ||
-        google.thinkingBudget > 24576
+        !Number.isInteger(value.thinkingBudget) ||
+        value.thinkingBudget < -1 ||
+        value.thinkingBudget > 24576
       ) {
         throw new ConfigValidationError('INVALID_AGENT');
       }
+      google.thinkingBudget = value.thinkingBudget;
     }
-    optionalBoolean(google.includeThoughts, 'INVALID_AGENT');
+    optionalBoolean(value.includeThoughts, 'INVALID_AGENT');
+    if (value.includeThoughts !== undefined) google.includeThoughts = value.includeThoughts;
+    reasoning.google = google;
   }
+
+  return reasoning;
 }
 
-function validateAgent(value: unknown): asserts value is AgentConfig {
-  const agent = record(value, 'INVALID_AGENT');
-  for (const field of ['id', 'name', 'model'] as const)
-    requiredString(agent[field], 'INVALID_AGENT');
-  if (typeof agent.systemPrompt !== 'string') throw new ConfigValidationError('INVALID_AGENT');
-  if (!PROVIDERS.includes(agent.provider as AIProvider) || !isApiProtocol(agent.apiProtocol)) {
+function validateAgent(value: unknown): AgentConfig {
+  const source = record(value, 'INVALID_AGENT');
+  for (const field of ['id', 'name', 'model'] as const) {
+    requiredString(source[field], 'INVALID_AGENT');
+  }
+  if (!PROVIDERS.includes(source.provider as AIProvider) || !isApiProtocol(source.apiProtocol)) {
     throw new ConfigValidationError('INVALID_AGENT');
   }
-  // Provider remains descriptive model metadata. Proxies may legitimately expose a
-  // model from one provider through another provider's wire protocol.
-  if ('openaiCompatible' in agent) throw new ConfigValidationError('INVALID_AGENT');
-  optionalString(agent.description, 'INVALID_AGENT');
-  optionalString(agent.apiKey, 'INVALID_AGENT');
-  optionalString(agent.endpoint, 'INVALID_AGENT');
-  optionalBoolean(agent.isDefault, 'INVALID_AGENT');
-  finiteNumber(agent.temperature, 'INVALID_AGENT');
-  if (agent.temperature < 0 || agent.temperature > 2) {
+  // This retired routing key is a known authority conflict, not a harmless unknown field.
+  if ('openaiCompatible' in source) throw new ConfigValidationError('INVALID_AGENT');
+  optionalString(source.description, 'INVALID_AGENT');
+  optionalString(source.apiKey, 'INVALID_AGENT');
+  optionalString(source.endpoint, 'INVALID_AGENT');
+  optionalBoolean(source.isDefault, 'INVALID_AGENT');
+  finiteNumber(source.temperature, 'INVALID_AGENT');
+  if (source.temperature < 0 || source.temperature > 2) {
     throw new ConfigValidationError('INVALID_AGENT');
   }
-  if (agent.maxSteps !== undefined) {
-    finiteNumber(agent.maxSteps, 'INVALID_AGENT');
-    if (!Number.isInteger(agent.maxSteps) || agent.maxSteps < 1 || agent.maxSteps > 50)
+  if (source.maxSteps !== undefined) {
+    finiteNumber(source.maxSteps, 'INVALID_AGENT');
+    if (!Number.isInteger(source.maxSteps) || source.maxSteps < 1 || source.maxSteps > 50) {
       throw new ConfigValidationError('INVALID_AGENT');
+    }
   }
-  validateReasoning(agent.reasoning);
+  const reasoning = validateReasoning(source.reasoning);
+
+  return {
+    id: source.id as string,
+    name: source.name as string,
+    provider: source.provider as AIProvider,
+    model: source.model as string,
+    apiProtocol: source.apiProtocol as ApiProtocol,
+    temperature: source.temperature,
+    ...(source.description !== undefined && { description: source.description }),
+    ...(source.apiKey !== undefined && { apiKey: source.apiKey }),
+    ...(source.endpoint !== undefined &&
+      source.endpoint.trim() !== '' && { endpoint: source.endpoint }),
+    ...(source.maxSteps !== undefined && { maxSteps: source.maxSteps }),
+    ...(source.isDefault !== undefined && { isDefault: source.isDefault }),
+    ...(reasoning !== undefined && { reasoning }),
+  };
 }
 
 export function validateStorageConfigV2(value: unknown): StorageConfig {
-  const config = record(value, 'INVALID_CONFIG');
-  if (config.schemaVersion !== CONFIG_SCHEMA_VERSION)
+  const source = record(value, 'INVALID_CONFIG');
+  if (source.schemaVersion !== CONFIG_SCHEMA_VERSION) {
     throw new ConfigValidationError('UNSUPPORTED_SCHEMA_VERSION');
-  const agents = denseArray(config.agents, 'INVALID_CONFIG');
-  agents.forEach(validateAgent);
-  const ids = (agents as AgentConfig[]).map((agent) => agent.id);
+  }
+
+  const agents = denseArray(source.agents, 'INVALID_CONFIG').map(validateAgent);
+  const ids = agents.map(({ id }) => id);
   if (new Set(ids).size !== ids.length) throw new ConfigValidationError('INVALID_REFERENCE');
-  optionalString(config.defaultAgentId, 'INVALID_REFERENCE');
-  if (config.defaultAgentId !== undefined && !ids.includes(config.defaultAgentId))
+  optionalString(source.defaultAgentId, 'INVALID_REFERENCE');
+  if (source.defaultAgentId !== undefined && !ids.includes(source.defaultAgentId)) {
     throw new ConfigValidationError('INVALID_REFERENCE');
+  }
 
-  if (config.mcpConfig !== undefined) {
-    const mcp = record(config.mcpConfig, 'INVALID_MCP_CONFIG');
+  let mcpConfig: MCPConfig | undefined;
+  if (source.mcpConfig !== undefined) {
+    const mcp = record(source.mcpConfig, 'INVALID_MCP_CONFIG');
     const servers = record(mcp.mcpServers, 'INVALID_MCP_CONFIG');
-    for (const serverValue of Object.values(servers)) {
-      const server = record(serverValue, 'INVALID_MCP_CONFIG');
-      if (server.transport !== 'http') throw new ConfigValidationError('INVALID_MCP_CONFIG');
-      requiredHttpUrl(server.url, 'INVALID_MCP_CONFIG');
-      optionalString(server.authToken, 'INVALID_MCP_CONFIG');
-    }
+    mcpConfig = {
+      mcpServers: Object.fromEntries(
+        Object.entries(servers).map(([name, serverValue]) => {
+          const server = record(serverValue, 'INVALID_MCP_CONFIG');
+          if (server.transport !== 'http') {
+            throw new ConfigValidationError('INVALID_MCP_CONFIG');
+          }
+          requiredHttpUrl(server.url, 'INVALID_MCP_CONFIG');
+          optionalString(server.authToken, 'INVALID_MCP_CONFIG');
+          return [
+            name,
+            {
+              transport: 'http' as const,
+              url: server.url,
+              ...(server.authToken !== undefined && { authToken: server.authToken }),
+            },
+          ];
+        })
+      ),
+    };
   }
 
-  for (const [field, code] of [
-    ['userScripts', 'INVALID_SCRIPT'],
-    ['builtinScripts', 'INVALID_SCRIPT'],
-  ] as const) {
-    const scriptValues = config[field];
-    if (scriptValues === undefined) continue;
-    const scripts = denseArray(scriptValues, code);
-    const scriptIds = new Set<string>();
-    for (const scriptValue of scripts) {
-      const script = record(scriptValue, code);
-      requiredString(script.id, code);
-      if (scriptIds.has(script.id)) throw new ConfigValidationError(code);
-      scriptIds.add(script.id);
-      if (typeof script.enabled !== 'boolean') throw new ConfigValidationError(code);
-      if (field === 'userScripts' && typeof script.code !== 'string')
-        throw new ConfigValidationError(code);
-    }
+  let userScripts: UserScript[] | undefined;
+  if (source.userScripts !== undefined) {
+    const ids = new Set<string>();
+    userScripts = denseArray(source.userScripts, 'INVALID_SCRIPT').map((value) => {
+      const script = record(value, 'INVALID_SCRIPT');
+      requiredString(script.id, 'INVALID_SCRIPT');
+      if (ids.has(script.id)) throw new ConfigValidationError('INVALID_SCRIPT');
+      ids.add(script.id);
+      if (typeof script.code !== 'string' || typeof script.enabled !== 'boolean') {
+        throw new ConfigValidationError('INVALID_SCRIPT');
+      }
+      return { id: script.id, code: script.code, enabled: script.enabled };
+    });
   }
-  if (config.logLevel !== undefined && !LOG_LEVELS.includes(config.logLevel as LogLevel))
+
+  let builtinScripts: BuiltinScript[] | undefined;
+  if (source.builtinScripts !== undefined) {
+    const ids = new Set<string>();
+    builtinScripts = denseArray(source.builtinScripts, 'INVALID_SCRIPT').map((value) => {
+      const script = record(value, 'INVALID_SCRIPT');
+      requiredString(script.id, 'INVALID_SCRIPT');
+      if (ids.has(script.id)) throw new ConfigValidationError('INVALID_SCRIPT');
+      ids.add(script.id);
+      if (typeof script.enabled !== 'boolean') throw new ConfigValidationError('INVALID_SCRIPT');
+      return { id: script.id, enabled: script.enabled };
+    });
+  }
+
+  if (source.logLevel !== undefined && !LOG_LEVELS.includes(source.logLevel as LogLevel)) {
     throw new ConfigValidationError('INVALID_LOG_LEVEL');
-  return config as unknown as StorageConfig;
+  }
+
+  // Projection is the canonical boundary: unknown keys are harmless input but
+  // never enter runtime state, persistence writes, or settings exports.
+  return {
+    schemaVersion: CONFIG_SCHEMA_VERSION,
+    agents,
+    ...(source.defaultAgentId !== undefined && { defaultAgentId: source.defaultAgentId }),
+    ...(mcpConfig !== undefined && { mcpConfig }),
+    ...(userScripts !== undefined && { userScripts }),
+    ...(builtinScripts !== undefined && { builtinScripts }),
+    ...(source.logLevel !== undefined && { logLevel: source.logLevel as LogLevel }),
+  };
 }
 
 function freshDefaultConfig(): StorageConfig {
   return globalThis.structuredClone(DEFAULT_CONFIG);
 }
 
-function canonicalAgent(agent: AgentConfig): AgentConfig {
-  const canonical = { ...agent } as AgentConfig & { maxTokens?: unknown };
-  delete canonical.maxTokens;
-  if (canonical.endpoint?.trim() === '') delete canonical.endpoint;
-  return canonical;
-}
-
-function canonicalConfig(config: StorageConfig): StorageConfig {
-  const cloned = globalThis.structuredClone(config);
-  return validateStorageConfigV2({
-    ...freshDefaultConfig(),
-    ...cloned,
-    schemaVersion: CONFIG_SCHEMA_VERSION,
-    // Retired v2 fields remain accepted at storage/import boundaries, then are
-    // removed from runtime state and future exports without forcing a rewrite.
-    agents: cloned.agents.map(canonicalAgent),
-  });
+function canonicalConfig(value: unknown): StorageConfig {
+  const projected = validateStorageConfigV2(value);
+  return { ...freshDefaultConfig(), ...projected };
 }
 
 /** Parse either persisted schema v1 or current schema v2 without mutating the input. */
@@ -384,7 +451,7 @@ export function parseStorageConfig(value: unknown): { config: StorageConfig; mig
     throw new ConfigValidationError('UNSUPPORTED_SCHEMA_VERSION');
   }
   if (source.schemaVersion === CONFIG_SCHEMA_VERSION) {
-    return { config: canonicalConfig(validateStorageConfigV2(source)), migrated: false };
+    return { config: canonicalConfig(source), migrated: false };
   }
   const sourceAgents = denseArray(source.agents, 'INVALID_CONFIG');
   let agents: Record<string, unknown>[];
@@ -393,12 +460,12 @@ export function parseStorageConfig(value: unknown): { config: StorageConfig; mig
   } catch {
     throw new ConfigValidationError('INVALID_AGENT');
   }
-  const migrated = validateStorageConfigV2({
+  const migrated = canonicalConfig({
     ...source,
     schemaVersion: CONFIG_SCHEMA_VERSION,
     agents,
   });
-  return { config: canonicalConfig(migrated), migrated: true };
+  return { config: migrated, migrated: true };
 }
 
 export class ConfigStorage {
@@ -565,33 +632,53 @@ export class ConfigStorage {
         console.error('[ConfigStorage] Config change error handler failed');
       }
     };
-    const notify = (config: StorageConfig) => {
-      const operation = this.changeOperations.then(() =>
-        callback(globalThis.structuredClone(config))
-      );
+    let eventGeneration = 0;
+    let latestInvalidGeneration = 0;
+    const notify = (config: StorageConfig, generation: number) => {
+      const operation = this.changeOperations.then(() => {
+        // A malformed newer value has already revoked runtime authority. Do not let an
+        // older queued callback reconnect capabilities from the superseded snapshot.
+        if (generation <= latestInvalidGeneration) return;
+        return callback(globalThis.structuredClone(config));
+      });
       this.changeOperations = operation.then(
         () => undefined,
-        (error) => reportError(error)
+        (error) => {
+          if (generation > latestInvalidGeneration) reportError(error);
+        }
       );
     };
 
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes.config) return;
+      const generation = ++eventGeneration;
       if (changes.config.newValue === undefined) {
-        notify(freshDefaultConfig());
+        notify(freshDefaultConfig(), generation);
         return;
       }
 
       try {
         const parsed = parseStorageConfig(changes.config.newValue);
         if (parsed.migrated) {
-          // Do not expose migrated state until the complete v2 value is durable. The
-          // resulting v2 storage event invokes the callback after the write succeeds.
-          void this.get().catch(reportError);
+          // Re-read under the shared storage lock so a delayed migration cannot overwrite a
+          // newer product mutation. The resulting v2 event delivers the durable snapshot.
+          void this.serialize(async () => {
+            if (generation !== eventGeneration) return;
+            const result = await chrome.storage.local.get(['config']);
+            if (generation !== eventGeneration || result.config === undefined) return;
+            const current = parseStorageConfig(result.config);
+            if (!current.migrated || generation !== eventGeneration) return;
+            await chrome.storage.local.set({ config: current.config });
+          }).catch((error) => {
+            if (generation !== eventGeneration) return;
+            latestInvalidGeneration = generation;
+            reportError(error);
+          });
           return;
         }
-        notify(parsed.config);
+        notify(parsed.config, generation);
       } catch (error) {
+        latestInvalidGeneration = generation;
         reportError(error);
       }
     });

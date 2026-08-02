@@ -310,7 +310,7 @@ export class AIClient {
       const conversation = mountedWorkspace
         ? attachMemoryContext(messages, mountedWorkspace.memory)
         : messages;
-      const systemPrompt = composeSystemPrompt(agent, {
+      const systemPrompt = composeSystemPrompt({
         mcpInstructions: toolSnapshot.mcpInstructions,
         ...(mountedWorkspace && { workspace: mountedWorkspace }),
         memoryEnabled: memoryEnabled || mountedWorkspace !== undefined,
@@ -684,7 +684,6 @@ export class AIClient {
         apiKey: details.apiKey,
         model: details.model,
         endpoint: details.endpoint,
-        systemPrompt: '',
         temperature: 0.7,
       };
 
