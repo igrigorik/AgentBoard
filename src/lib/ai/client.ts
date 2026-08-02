@@ -5,7 +5,8 @@
  * Streaming responses are sent back to sidebar via Chrome runtime messaging.
  */
 
-import { streamText, CoreMessage } from 'ai';
+import { InvalidToolInputError, streamText } from 'ai';
+import type { CoreMessage } from 'ai';
 import { raceWithAbort } from '../abort';
 import type { AgentConfig } from '../storage/config';
 import type { ConversationWorkspaceContext, ToolCall } from '../../types';
@@ -416,6 +417,9 @@ export class AIClient {
         let isReasoning = false; // Track if we're currently in reasoning phase
         let currentReasoningId: string | undefined; // Track the current reasoning segment ID
         let reasoningTokens: number | undefined; // Track reasoning token usage
+        // AI SDK preserves the typed validation error on the invalid tool-call but
+        // flattens it before the matching tool-error, so retain only the call ID.
+        const invalidToolInputCallIds = new Set<string>();
 
         // Use fullStream for tools OR reasoning support
         if (hasTools || agent.reasoning?.enabled) {
@@ -557,6 +561,10 @@ export class AIClient {
 
               _fullText += chunk;
             } else if (part.type === 'tool-call') {
+              if (part.invalid && InvalidToolInputError.isInstance(part.error)) {
+                invalidToolInputCallIds.add(part.toolCallId);
+              }
+
               // Create structured tool call object
               const toolCall: ToolCall = {
                 id: part.toolCallId,
@@ -581,11 +589,12 @@ export class AIClient {
               }
               // The AI should continue generating text after tool results
             } else if (part.type === 'tool-error') {
+              const invalidToolInput = invalidToolInputCallIds.delete(part.toolCallId);
               callbacks.onToolResult?.({
                 id: part.toolCallId,
                 output: null,
                 status: 'error',
-                error: 'Tool execution failed',
+                error: invalidToolInput ? 'Invalid tool arguments' : 'Tool execution failed',
               });
             } else if (part.type === 'error') {
               throw part.error;

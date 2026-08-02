@@ -31,7 +31,8 @@ vi.mock('@ai-sdk/google', () => ({
   createGoogleGenerativeAI: vi.fn(),
 }));
 
-vi.mock('ai', () => ({
+vi.mock('ai', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('ai')>()),
   streamText: mocks.streamText,
   tool: vi.fn((definition) => definition),
 }));
@@ -48,6 +49,7 @@ vi.mock('../src/lib/webmcp/tool-registry', () => ({
   getToolRegistry: vi.fn(),
 }));
 
+import { InvalidToolInputError } from 'ai';
 import { AIClient } from '../src/lib/ai/client';
 import { MemoryMountError } from '../src/lib/memory/manager';
 import { getToolRegistry } from '../src/lib/webmcp/tool-registry';
@@ -986,6 +988,71 @@ describe('AIClient connection testing', () => {
     active.reject(new DOMException('cancelled', 'AbortError'));
     await activeRequest;
     expect(activeOnAbort).toHaveBeenCalledTimes(1);
+  });
+
+  it('identifies invalid model arguments without exposing validation details', async () => {
+    storeAgent('invalid-tool-input-agent');
+    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({ private_tool: {} }) as never);
+    const malformedInput = {
+      maxLength: 100000,
+      properties: { convertToMarkdown: { type: 'BOOLEAN' } },
+    };
+    const validationSecret = 'secret validation internals';
+    const invalidInputError = new InvalidToolInputError({
+      toolName: 'private_tool',
+      toolInput: JSON.stringify(malformedInput),
+      cause: new Error(validationSecret),
+    });
+    mocks.streamText.mockReturnValue({
+      textStream: undefined,
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'tool-call',
+            toolCallId: 'invalid-call',
+            toolName: 'private_tool',
+            input: malformedInput,
+            dynamic: true,
+            invalid: true,
+            error: invalidInputError,
+          };
+          yield {
+            type: 'tool-error',
+            toolCallId: 'invalid-call',
+            toolName: 'private_tool',
+            input: malformedInput,
+            dynamic: true,
+            error: invalidInputError.message,
+          };
+        },
+      },
+    });
+    const onToolCall = vi.fn();
+    const onToolResult = vi.fn();
+
+    await AIClient.getInstance().streamChat('invalid-tool-input-agent', [], undefined, {
+      onFinish: vi.fn(),
+      onError: vi.fn(),
+      onToolCall,
+      onToolResult,
+    });
+
+    expect(onToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'invalid-call',
+        toolName: 'private_tool',
+        input: malformedInput,
+        status: 'running',
+      })
+    );
+    expect(onToolResult).toHaveBeenCalledWith({
+      id: 'invalid-call',
+      output: null,
+      status: 'error',
+      error: 'Invalid tool arguments',
+    });
+    expect(JSON.stringify(onToolResult.mock.calls)).not.toContain(validationSecret);
+    expect(JSON.stringify(onToolResult.mock.calls)).not.toContain('Invalid input for tool');
   });
 
   it('does not expose tool-error payloads to sidebar callbacks', async () => {
