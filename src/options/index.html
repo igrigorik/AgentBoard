@@ -196,180 +196,16 @@
             </div>
 
             <div class="form-group">
-              <label for="agent-connection-api">Connection API *</label>
-              <select
-                id="agent-connection-api"
-                name="connectionApi"
-                aria-describedby="agent-connection-api-hint"
-                required
-              >
-                <option value="openai">OpenAI-style API</option>
-                <option value="anthropic">Anthropic Messages API</option>
-                <option value="google">Google Generative AI API</option>
-              </select>
-              <span class="field-hint" id="agent-connection-api-hint"
-                >Choose the API contract implemented by the endpoint, not the model vendor. A Gemini
-                model behind an OpenAI-compatible proxy uses OpenAI-style.</span
-              >
-            </div>
-
-            <div class="form-group" id="openai-api-mode-group">
-              <label for="agent-openai-api-mode"
-                >OpenAI API mode <span class="field-label-qualifier">Advanced</span></label
-              >
-              <select
-                id="agent-openai-api-mode"
-                name="openAIProtocol"
-                aria-describedby="agent-openai-api-mode-hint"
-              >
-                <option value="openai-responses">Responses (recommended)</option>
-                <option value="openai-chat-completions">
-                  Chat Completions (legacy compatibility)
-                </option>
-              </select>
-              <span class="field-hint" id="agent-openai-api-mode-hint"
-                >Use legacy Chat only when the endpoint does not support Responses. AgentBoard never
-                falls back automatically.</span
-              >
-            </div>
-
-            <div class="form-group">
-              <label for="agent-model">Model *</label>
-              <input
-                type="text"
-                id="agent-model"
-                name="model"
-                aria-describedby="agent-model-hint"
-                placeholder="Enter the exact model ID"
-                required
-              />
-              <span class="field-hint" id="agent-model-hint"
-                >Passed unchanged to the selected Connection API</span
-              >
-            </div>
-
-            <!-- Reasoning Configuration -->
-            <div class="form-group">
               <label class="checkbox-label">
-                <input type="checkbox" id="reasoning-enabled" name="reasoningEnabled" />
+                <input type="checkbox" id="agent-is-default" name="isDefault" />
                 <span class="checkmark"></span>
-                Enable and show thinking process before responding
+                Set as default agent
               </label>
-            </div>
-
-            <div id="reasoning-settings" class="reasoning-settings hidden">
-              <!-- Provider-specific reasoning controls will be populated dynamically -->
-              <div id="reasoning-openai" class="provider-reasoning hidden">
-                <div class="form-group">
-                  <label for="reasoning-effort">Reasoning Effort</label>
-                  <select id="reasoning-effort" name="reasoningEffort">
-                    <option value="minimal">Minimal - Quick analysis</option>
-                    <option value="low">Low - Basic reasoning</option>
-                    <option value="medium" selected>Medium - Balanced thinking</option>
-                    <option value="high">High - Deep analysis</option>
-                  </select>
-                  <span class="field-hint"
-                    >Higher effort uses more tokens but provides deeper insights</span
-                  >
-                </div>
-                <div class="form-group" id="reasoning-summary-group">
-                  <label for="reasoning-summary">Reasoning Summary</label>
-                  <select id="reasoning-summary" name="reasoningSummary">
-                    <option value="auto" selected>Auto - Model decides</option>
-                    <option value="detailed">Detailed - Full thinking trace</option>
-                  </select>
-                </div>
-              </div>
-
-              <div id="reasoning-anthropic" class="provider-reasoning hidden">
-                <div class="form-group">
-                  <label for="thinking-budget">Thinking Budget (tokens)</label>
-                  <input
-                    type="number"
-                    id="thinking-budget"
-                    name="anthropicThinkingBudget"
-                    min="1000"
-                    max="20000"
-                    value="12000"
-                  />
-                  <span class="field-hint"
-                    >Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span
-                  >
-                </div>
-              </div>
-
-              <div id="reasoning-google" class="provider-reasoning hidden">
-                <div class="form-group">
-                  <label for="thinking-budget-google">Thinking Budget</label>
-                  <input
-                    type="number"
-                    id="thinking-budget-google"
-                    name="googleThinkingBudget"
-                    min="-1"
-                    max="24576"
-                    value="8192"
-                  />
-                  <span class="field-hint"
-                    >Token budget (0-24576, -1 for dynamic). Flash models only</span
-                  >
-                </div>
-                <div class="form-group">
-                  <label class="checkbox-label">
-                    <input
-                      type="checkbox"
-                      id="include-thoughts"
-                      name="googleIncludeThoughts"
-                      checked
-                    />
-                    <span class="checkmark"></span>
-                    Include Thought Summaries
-                  </label>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input
-                    type="checkbox"
-                    id="reasoning-auto-expand"
-                    name="reasoningAutoExpand"
-                    checked
-                  />
-                  <span class="checkmark"></span>
-                  Auto-expand reasoning when streaming
-                </label>
-              </div>
-            </div>
-
-            <div class="form-group">
-              <label for="agent-endpoint">Custom provider endpoint / proxy (optional)</label>
-              <input
-                type="url"
-                id="agent-endpoint"
-                name="endpoint"
-                aria-describedby="agent-endpoint-hint"
-              />
-              <span class="field-hint" id="agent-endpoint-hint"
-                >Must implement the selected Connection API, including its authentication and
-                streaming format.</span
-              >
-            </div>
-
-            <div class="form-group">
-              <label for="agent-api-key">API Key <span id="agent-api-key-required">*</span></label>
-              <input
-                type="password"
-                id="agent-api-key"
-                name="apiKey"
-                aria-describedby="agent-api-key-hint"
-                placeholder="Your API key"
-              />
-              <span class="api-key-hint" id="agent-api-key-hint" aria-live="polite"></span>
             </div>
 
             <fieldset
               id="agent-memory-section"
-              class="agent-memory-section hidden"
+              class="agent-config-section agent-memory-section hidden"
               aria-busy="false"
             >
               <legend>Local Workspace <span class="field-label-qualifier">Optional</span></legend>
@@ -377,14 +213,16 @@
                 Without a workspace, this agent uses AgentBoard’s built-in behavior. Connect a
                 folder to bootstrap each new chat from <code>IDENTITY.md</code>,
                 <code>SOUL.md</code>, <code>USER.md</code>, <code>AGENTS.md</code>, and
-                <code>MEMORY.md</code>. Their contents are sent to this agent’s configured AI
-                service. Switching agents keeps the chat history and loads the selected agent’s
-                workspace.
+                <code>MEMORY.md</code>.
               </p>
 
               <details class="agent-memory-details">
                 <summary>File access and sharing</summary>
                 <ul>
+                  <li>
+                    Their contents are sent to this agent’s configured AI service. Switching agents
+                    keeps the chat history and loads the selected agent’s workspace.
+                  </li>
                   <li>
                     The agent can list and read other bounded UTF-8 files in this folder through
                     visible tool calls, and read contents may be sent to its configured AI service.
@@ -410,8 +248,9 @@
                     200 matching entries.
                   </li>
                   <li>
-                    Original files stay in the folder. Connections stay on this device, are excluded
-                    from settings backups, and are removed by settings imports.
+                    Disconnecting or deleting the agent removes the connection, not your files.
+                    Connections stay on this device, are excluded from settings backups, and are
+                    removed by settings imports.
                   </li>
                 </ul>
               </details>
@@ -449,50 +288,216 @@
                   Disconnect
                 </button>
               </div>
-              <p class="field-hint">
-                Disconnecting or deleting the agent removes only this connection. It never deletes
-                the folder or its files.
-              </p>
             </fieldset>
 
-            <div class="form-row">
+            <fieldset class="agent-config-section">
+              <legend>Model & Connection</legend>
+
               <div class="form-group">
-                <label for="agent-temperature">Temperature</label>
-                <input
-                  type="number"
-                  id="agent-temperature"
-                  name="temperature"
-                  min="0"
-                  max="2"
-                  step="0.1"
-                  value="0.7"
+                <label for="agent-connection-api">Connection API *</label>
+                <select
+                  id="agent-connection-api"
+                  name="connectionApi"
+                  aria-describedby="agent-connection-api-hint"
                   required
-                />
-                <span class="field-hint">0 = focused, 2 = creative</span>
+                >
+                  <option value="openai">OpenAI-style API</option>
+                  <option value="anthropic">Anthropic Messages API</option>
+                  <option value="google">Google Generative AI API</option>
+                </select>
+                <span class="field-hint" id="agent-connection-api-hint"
+                  >Choose the API contract implemented by the endpoint, not the model vendor. A
+                  Gemini model behind an OpenAI-compatible proxy uses OpenAI-style.</span
+                >
+              </div>
+
+              <div class="form-group" id="openai-api-mode-group">
+                <label for="agent-openai-api-mode"
+                  >OpenAI API mode <span class="field-label-qualifier">Advanced</span></label
+                >
+                <select
+                  id="agent-openai-api-mode"
+                  name="openAIProtocol"
+                  aria-describedby="agent-openai-api-mode-hint"
+                >
+                  <option value="openai-responses">Responses (recommended)</option>
+                  <option value="openai-chat-completions">
+                    Chat Completions (legacy compatibility)
+                  </option>
+                </select>
+                <span class="field-hint" id="agent-openai-api-mode-hint"
+                  >Use legacy Chat only when the endpoint does not support Responses. AgentBoard
+                  never falls back automatically.</span
+                >
               </div>
 
               <div class="form-group">
-                <label for="agent-max-steps">Max Steps</label>
+                <label for="agent-model">Model *</label>
                 <input
-                  type="number"
-                  id="agent-max-steps"
-                  name="maxSteps"
-                  min="1"
-                  max="50"
-                  value="10"
+                  type="text"
+                  id="agent-model"
+                  name="model"
+                  aria-describedby="agent-model-hint"
+                  placeholder="Enter the exact model ID"
                   required
                 />
-                <span class="field-hint">Tool calls per turn (1-50)</span>
+                <span class="field-hint" id="agent-model-hint"
+                  >Passed unchanged to the selected Connection API</span
+                >
               </div>
-            </div>
 
-            <div class="form-group">
-              <label class="checkbox-label">
-                <input type="checkbox" id="agent-is-default" name="isDefault" />
-                <span class="checkmark"></span>
-                Set as default agent
-              </label>
-            </div>
+              <!-- Reasoning Configuration -->
+              <div class="form-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="reasoning-enabled" name="reasoningEnabled" />
+                  <span class="checkmark"></span>
+                  Enable and show thinking process before responding
+                </label>
+              </div>
+
+              <div id="reasoning-settings" class="reasoning-settings hidden">
+                <!-- Provider-specific reasoning controls will be populated dynamically -->
+                <div id="reasoning-openai" class="provider-reasoning hidden">
+                  <div class="form-group">
+                    <label for="reasoning-effort">Reasoning Effort</label>
+                    <select id="reasoning-effort" name="reasoningEffort">
+                      <option value="minimal">Minimal - Quick analysis</option>
+                      <option value="low">Low - Basic reasoning</option>
+                      <option value="medium" selected>Medium - Balanced thinking</option>
+                      <option value="high">High - Deep analysis</option>
+                    </select>
+                    <span class="field-hint"
+                      >Higher effort uses more tokens but provides deeper insights</span
+                    >
+                  </div>
+                  <div class="form-group" id="reasoning-summary-group">
+                    <label for="reasoning-summary">Reasoning Summary</label>
+                    <select id="reasoning-summary" name="reasoningSummary">
+                      <option value="auto" selected>Auto - Model decides</option>
+                      <option value="detailed">Detailed - Full thinking trace</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div id="reasoning-anthropic" class="provider-reasoning hidden">
+                  <div class="form-group">
+                    <label for="thinking-budget">Thinking Budget (tokens)</label>
+                    <input
+                      type="number"
+                      id="thinking-budget"
+                      name="anthropicThinkingBudget"
+                      min="1000"
+                      max="20000"
+                      value="12000"
+                    />
+                    <span class="field-hint"
+                      >Token budget for reasoning (1,000-20,000). Higher = deeper thinking</span
+                    >
+                  </div>
+                </div>
+
+                <div id="reasoning-google" class="provider-reasoning hidden">
+                  <div class="form-group">
+                    <label for="thinking-budget-google">Thinking Budget</label>
+                    <input
+                      type="number"
+                      id="thinking-budget-google"
+                      name="googleThinkingBudget"
+                      min="-1"
+                      max="24576"
+                      value="8192"
+                    />
+                    <span class="field-hint"
+                      >Token budget (0-24576, -1 for dynamic). Flash models only</span
+                    >
+                  </div>
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input
+                        type="checkbox"
+                        id="include-thoughts"
+                        name="googleIncludeThoughts"
+                        checked
+                      />
+                      <span class="checkmark"></span>
+                      Include Thought Summaries
+                    </label>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="checkbox-label">
+                    <input
+                      type="checkbox"
+                      id="reasoning-auto-expand"
+                      name="reasoningAutoExpand"
+                      checked
+                    />
+                    <span class="checkmark"></span>
+                    Auto-expand reasoning when streaming
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="agent-endpoint">Custom provider endpoint / proxy (optional)</label>
+                <input
+                  type="url"
+                  id="agent-endpoint"
+                  name="endpoint"
+                  aria-describedby="agent-endpoint-hint"
+                />
+                <span class="field-hint" id="agent-endpoint-hint"
+                  >Must implement the selected Connection API, including its authentication and
+                  streaming format.</span
+                >
+              </div>
+
+              <div class="form-group">
+                <label for="agent-api-key"
+                  >API Key <span id="agent-api-key-required">*</span></label
+                >
+                <input
+                  type="password"
+                  id="agent-api-key"
+                  name="apiKey"
+                  aria-describedby="agent-api-key-hint"
+                  placeholder="Your API key"
+                />
+                <span class="api-key-hint" id="agent-api-key-hint" aria-live="polite"></span>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="agent-temperature">Temperature</label>
+                  <input
+                    type="number"
+                    id="agent-temperature"
+                    name="temperature"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value="0.7"
+                    required
+                  />
+                  <span class="field-hint">0 = focused, 2 = creative</span>
+                </div>
+
+                <div class="form-group">
+                  <label for="agent-max-steps">Max Steps</label>
+                  <input
+                    type="number"
+                    id="agent-max-steps"
+                    name="maxSteps"
+                    min="1"
+                    max="50"
+                    value="10"
+                    required
+                  />
+                  <span class="field-hint">Tool calls per turn (1-50)</span>
+                </div>
+              </div>
+            </fieldset>
           </form>
 
           <div

@@ -344,7 +344,7 @@ header h1 {
   font-weight: 600;
 }
 
-.agent-memory-section {
+.agent-config-section {
   min-width: 0;
   margin: 4px 0 20px;
   padding: 16px;
@@ -352,10 +352,14 @@ header h1 {
   border-radius: 8px;
 }
 
-.agent-memory-section legend {
+.agent-config-section legend {
   padding: 0 6px;
   color: #1f2937;
   font-weight: 600;
+}
+
+.agent-config-section > .form-row:last-child {
+  margin-bottom: 0;
 }
 
 .agent-memory-section code {
