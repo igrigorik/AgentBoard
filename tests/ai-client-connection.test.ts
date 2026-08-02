@@ -93,11 +93,12 @@ function mountedMemory(content: string) {
         writeFile: vi.fn(),
         deleteFile: vi.fn(),
       },
-      memoryFile: {
-        path: 'MEMORY.md',
-        content,
-        bytes: new TextEncoder().encode(content).byteLength,
-        revision: `sha256:${'a'.repeat(64)}`,
+      workspace: {
+        identity: null as string | null,
+        soul: null as string | null,
+        user: null as string | null,
+        agents: null as string | null,
+        memory: content,
       },
       authoritySignal: controller.signal,
     },
@@ -363,34 +364,49 @@ describe('AIClient connection testing', () => {
     expect(Object.keys(mocks.streamText.mock.calls[0][0].tools)).toEqual(['remote_tool']);
   });
 
-  it('captures one hidden snapshot and never refreshes it on ordinary turns', async () => {
+  it('captures one hidden workspace bootstrap and never refreshes it on ordinary turns', async () => {
     storeAgent('memory-agent');
-    mocks.resolveMemory.mockResolvedValue(mountedMemory('# Memory\nInitial').resolved);
+    const initial = mountedMemory('# Memory\nInitial');
+    initial.resolved.workspace = {
+      identity: 'Browser researcher',
+      soul: 'Be calm & precise',
+      user: null,
+      agents: 'Use relevant browser tools',
+      memory: '# Memory\nInitial',
+    };
+    mocks.resolveMemory.mockResolvedValue(initial.resolved);
     mocks.streamText.mockReturnValue(finishedFullStream());
-    const onMemoryContext = vi.fn();
+    const onWorkspaceContext = vi.fn();
     const onError = vi.fn();
 
     await AIClient.getInstance().streamChat(
       'memory-agent',
       [{ role: 'user', content: 'First question' }],
       undefined,
-      { onFinish: vi.fn(), onError, onMemoryContext },
-      'memory-first'
+      { onFinish: vi.fn(), onError, onWorkspaceContext },
+      'workspace-first'
     );
 
+    const expectedContext = {
+      agentId: 'memory-agent',
+      state: 'mounted' as const,
+      ...initial.resolved.workspace,
+    };
     expect(onError).not.toHaveBeenCalled();
-    expect(onMemoryContext).toHaveBeenCalledWith({ snapshot: '# Memory\nInitial' });
+    expect(onWorkspaceContext).toHaveBeenCalledWith(expectedContext);
     expect(mocks.resolveMemory).toHaveBeenNthCalledWith(1, 'memory-agent', {
-      includeMemoryFile: true,
+      includeWorkspaceContext: true,
     });
-    const context = onMemoryContext.mock.calls[0][0];
     const firstRequest = mocks.streamText.mock.calls[0][0];
     const firstMessages = firstRequest.messages as CoreMessage[];
+    const system = String(firstMessages[0].content);
     expect(firstMessages[1]).toMatchObject({ role: 'user' });
     expect(firstMessages[1].content).toContain('<memory_context');
     expect(firstMessages[1].content).toContain('# Memory\nInitial');
     expect(firstMessages[1].content).toContain('First question');
-    expect(firstRequest.messages[0].content).toContain('MOUNTED MEMORY:');
+    expect(system).toContain('MOUNTED MEMORY:');
+    expect(system).toContain('<workspace_identity source="IDENTITY.md">');
+    expect(system).toContain('Be calm &amp; precise');
     expect(firstRequest.tools).toEqual(
       expect.objectContaining({
         agentboard_list_files: expect.anything(),
@@ -401,7 +417,7 @@ describe('AIClient connection testing', () => {
     );
 
     mocks.resolveMemory.mockResolvedValue(mountedMemory('# Memory\nChanged on disk').resolved);
-    const secondOnMemoryContext = vi.fn();
+    const secondOnWorkspaceContext = vi.fn();
     await AIClient.getInstance().streamChat(
       'memory-agent',
       [
@@ -410,24 +426,25 @@ describe('AIClient connection testing', () => {
         { role: 'user', content: 'Second question' },
       ],
       undefined,
-      { onFinish: vi.fn(), onError, onMemoryContext: secondOnMemoryContext },
-      'memory-second',
-      context
+      { onFinish: vi.fn(), onError, onWorkspaceContext: secondOnWorkspaceContext },
+      'workspace-second',
+      expectedContext
     );
 
     expect(mocks.resolveMemory).toHaveBeenNthCalledWith(2, 'memory-agent', {
-      includeMemoryFile: false,
+      includeWorkspaceContext: false,
     });
     const secondMessages = mocks.streamText.mock.calls[1][0].messages as CoreMessage[];
-    expect(secondOnMemoryContext).not.toHaveBeenCalled();
+    expect(secondOnWorkspaceContext).not.toHaveBeenCalled();
     expect(secondMessages[1].content).toBe(firstMessages[1].content);
+    expect(String(secondMessages[0].content)).toContain('Browser researcher');
     expect(JSON.stringify(secondMessages)).not.toContain('Changed on disk');
     expect(JSON.stringify(secondMessages).match(/<memory_context source=/g)).toHaveLength(1);
     expect(JSON.stringify(secondMessages)).not.toContain('Revision:');
     expect(JSON.stringify(secondMessages)).not.toContain('Content-Length:');
   });
 
-  it('fails closed before provider construction when mounted memory is unavailable', async () => {
+  it('fails closed before provider construction when a fresh workspace is unavailable', async () => {
     storeAgent('unavailable-memory-agent');
     const error = new MemoryMountError('PERMISSION_REQUIRED');
     mocks.resolveMemory.mockResolvedValue({
@@ -449,27 +466,28 @@ describe('AIClient connection testing', () => {
     expect(mocks.streamText).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledWith(error);
     expect(mocks.resolveMemory).toHaveBeenCalledWith('unavailable-memory-agent', {
-      includeMemoryFile: true,
+      includeWorkspaceContext: true,
     });
   });
 
-  it('records an unmounted first turn so later agents cannot inject a new snapshot', async () => {
+  it('records an unmounted bootstrap so later disk changes wait for invalidation', async () => {
     storeAgent('memory-agent');
     mocks.resolveMemory.mockResolvedValue({ state: 'unmounted' });
     mocks.streamText
       .mockReturnValueOnce(finishedTextStream())
       .mockReturnValueOnce(finishedFullStream());
-    const onMemoryContext = vi.fn();
+    const onWorkspaceContext = vi.fn();
 
     await AIClient.getInstance().streamChat(
       'memory-agent',
       [{ role: 'user', content: 'First question' }],
       undefined,
-      { onFinish: vi.fn(), onError: vi.fn(), onMemoryContext },
+      { onFinish: vi.fn(), onError: vi.fn(), onWorkspaceContext },
       'unmounted-first'
     );
 
-    expect(onMemoryContext).toHaveBeenCalledWith({ snapshot: null });
+    const unmountedContext = { agentId: 'memory-agent', state: 'unmounted' } as const;
+    expect(onWorkspaceContext).toHaveBeenCalledWith(unmountedContext);
     expect(JSON.stringify(mocks.streamText.mock.calls[0][0].messages)).not.toContain(
       '<memory_context'
     );
@@ -482,11 +500,11 @@ describe('AIClient connection testing', () => {
       undefined,
       { onFinish: vi.fn(), onError: vi.fn() },
       'mounted-later',
-      { snapshot: null }
+      unmountedContext
     );
 
     expect(mocks.resolveMemory).toHaveBeenLastCalledWith('memory-agent', {
-      includeMemoryFile: false,
+      includeWorkspaceContext: false,
     });
     expect(JSON.stringify(mocks.streamText.mock.calls[1][0].messages)).not.toContain(
       'Later memory'
@@ -494,9 +512,39 @@ describe('AIClient connection testing', () => {
     expect(mocks.streamText.mock.calls[1][0].messages[0].content).toContain('MOUNTED MEMORY:');
   });
 
-  it('rejects malformed or oversized replayed snapshots before provider invocation', async () => {
+  it('rejects malformed, oversized, or cross-agent replayed bootstraps before provider work', async () => {
     storeAgent('memory-agent');
-    for (const memoryContext of [{ snapshot: 42 }, { snapshot: 'x'.repeat(64 * 1024 + 1) }]) {
+    const invalidContexts = [
+      { agentId: 'other-agent', state: 'unmounted' },
+      {
+        agentId: 'memory-agent',
+        state: 'mounted',
+        identity: 42,
+        soul: null,
+        user: null,
+        agents: null,
+        memory: '',
+      },
+      {
+        agentId: 'memory-agent',
+        state: 'mounted',
+        identity: null,
+        soul: null,
+        user: null,
+        agents: null,
+        memory: 'x'.repeat(64 * 1024 + 1),
+      },
+      {
+        agentId: 'memory-agent',
+        state: 'mounted',
+        identity: 'x'.repeat(128 * 1024 + 1),
+        soul: null,
+        user: null,
+        agents: null,
+        memory: '',
+      },
+    ];
+    for (const workspaceContext of invalidContexts) {
       const onError = vi.fn();
       await AIClient.getInstance().streamChat(
         'memory-agent',
@@ -504,7 +552,7 @@ describe('AIClient connection testing', () => {
         undefined,
         { onFinish: vi.fn(), onError },
         globalThis.crypto.randomUUID(),
-        memoryContext as never
+        workspaceContext as never
       );
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -517,7 +565,7 @@ describe('AIClient connection testing', () => {
     expect(mocks.streamText).not.toHaveBeenCalled();
   });
 
-  it('keeps retained grounding when the selected agent has no live memory tools', async () => {
+  it('keeps one agent’s captured workspace when its live file tools become unavailable', async () => {
     storeAgent('next-agent');
     const unavailable = new MemoryMountError('PERMISSION_REQUIRED');
     mocks.resolveMemory.mockResolvedValue({
@@ -528,23 +576,33 @@ describe('AIClient connection testing', () => {
     });
     mocks.streamText.mockReturnValue(finishedTextStream());
     const onError = vi.fn();
+    const context = {
+      agentId: 'next-agent',
+      state: 'mounted' as const,
+      identity: null,
+      soul: 'Retained style',
+      user: null,
+      agents: null,
+      memory: '# Memory\nRetained in this chat',
+    };
 
     await AIClient.getInstance().streamChat(
       'next-agent',
-      [{ role: 'user', content: 'Continue with the next agent' }],
+      [{ role: 'user', content: 'Continue this chat' }],
       undefined,
       { onFinish: vi.fn(), onError },
-      'transferred-memory',
-      { snapshot: '# Memory\nCaptured under the previous agent' }
+      'retained-workspace',
+      context
     );
 
     expect(onError).not.toHaveBeenCalled();
     expect(mocks.resolveMemory).toHaveBeenCalledWith('next-agent', {
-      includeMemoryFile: false,
+      includeWorkspaceContext: false,
     });
     expect(mocks.streamText).toHaveBeenCalledOnce();
     const request = mocks.streamText.mock.calls[0][0];
-    expect(JSON.stringify(request.messages)).toContain('Captured under the previous agent');
+    expect(JSON.stringify(request.messages)).toContain('Retained in this chat');
+    expect(JSON.stringify(request.messages)).toContain('Retained style');
     expect(request.tools).toBeUndefined();
   });
 

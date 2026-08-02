@@ -110,7 +110,7 @@ describe('AgentMemoryControls', () => {
     button('agent-memory-connect').click();
     await vi.waitFor(() => expect(text('agent-memory-state')).toBe('Connection failed'));
 
-    expect(text('agent-memory-detail')).toContain('parent and child memory folders');
+    expect(text('agent-memory-detail')).toContain('parent and child workspaces');
   });
 
   it('renders permission loss as reconnect-required instead of silently disconnecting', async () => {

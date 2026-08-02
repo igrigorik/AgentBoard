@@ -53,21 +53,24 @@ describe('MemoryManager', () => {
     });
   });
 
-  it('resolves live tools without rereading the conversation snapshot', async () => {
+  it('resolves live tools without rereading the conversation bootstrap', async () => {
     const manager = new MemoryManager(new InMemoryBindingRepository());
     const root = new FakeMemoryDirectoryHandle('workspace');
     await manager.connect('agent', root);
     const getFileHandle = vi.spyOn(root, 'getFileHandle');
 
-    await expect(manager.resolve('agent', { includeMemoryFile: false })).resolves.toMatchObject({
+    await expect(manager.resolve('agent')).resolves.toMatchObject({
       state: 'available',
       rootName: 'workspace',
     });
     expect(getFileHandle).not.toHaveBeenCalled();
 
-    await expect(manager.resolve('agent')).resolves.toMatchObject({
+    await root.writeExternal('SOUL.md', 'Calm and direct');
+    await expect(
+      manager.resolve('agent', { includeWorkspaceContext: true })
+    ).resolves.toMatchObject({
       state: 'available',
-      memoryFile: { path: 'MEMORY.md' },
+      workspace: { soul: 'Calm and direct', memory: '# Memory\n' },
     });
     expect(getFileHandle).toHaveBeenCalledWith('MEMORY.md', { create: false });
   });
@@ -299,14 +302,14 @@ describe('MemoryManager', () => {
     await root.writeExternal('MEMORY.md', '# First\n');
     await manager.connect('agent', root);
 
-    expect(await manager.resolve('agent')).toMatchObject({
+    expect(await manager.resolve('agent', { includeWorkspaceContext: true })).toMatchObject({
       state: 'available',
-      memoryFile: { content: '# First\n' },
+      workspace: { memory: '# First\n' },
     });
     await root.writeExternal('MEMORY.md', '# Externally edited\n');
-    expect(await manager.resolve('agent')).toMatchObject({
+    expect(await manager.resolve('agent', { includeWorkspaceContext: true })).toMatchObject({
       state: 'available',
-      memoryFile: { content: '# Externally edited\n' },
+      workspace: { memory: '# Externally edited\n' },
     });
   });
 
@@ -368,10 +371,24 @@ describe('MemoryManager', () => {
     const oversized = new FakeMemoryDirectoryHandle('oversized');
     await oversized.writeExternal('MEMORY.md', 'x'.repeat(MAX_AUTOLOADED_MEMORY_BYTES + 1));
     await manager.connect('oversized-agent', oversized);
-    await expect(manager.resolve('oversized-agent')).resolves.toMatchObject({
+    await expect(
+      manager.resolve('oversized-agent', { includeWorkspaceContext: true })
+    ).resolves.toMatchObject({
       state: 'unavailable',
       reason: 'memory-too-large',
       error: { code: 'MEMORY_TOO_LARGE' },
+    });
+
+    const oversizedWorkspace = new FakeMemoryDirectoryHandle('oversized-workspace');
+    await oversizedWorkspace.writeExternal('IDENTITY.md', 'i'.repeat(64 * 1024 + 1));
+    await oversizedWorkspace.writeExternal('MEMORY.md', 'm'.repeat(64 * 1024));
+    await manager.connect('oversized-workspace-agent', oversizedWorkspace);
+    await expect(
+      manager.resolve('oversized-workspace-agent', { includeWorkspaceContext: true })
+    ).resolves.toMatchObject({
+      state: 'unavailable',
+      reason: 'workspace-too-large',
+      error: { code: 'WORKSPACE_TOO_LARGE' },
     });
   });
 
@@ -380,7 +397,9 @@ describe('MemoryManager', () => {
     const invalidText = new FakeMemoryDirectoryHandle('invalid-text');
     await invalidText.writeExternal('MEMORY.md', new Uint8Array([0xff]));
     await manager.connect('invalid-text-agent', invalidText);
-    await expect(manager.resolve('invalid-text-agent')).resolves.toMatchObject({
+    await expect(
+      manager.resolve('invalid-text-agent', { includeWorkspaceContext: true })
+    ).resolves.toMatchObject({
       state: 'unavailable',
       reason: 'incompatible-layout',
       error: { code: 'INCOMPATIBLE_LAYOUT' },

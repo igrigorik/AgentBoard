@@ -139,10 +139,10 @@
             <p class="section-description">
               Backup files are plaintext and can contain API keys, authentication tokens, endpoints,
               model IDs, system prompts, executable user scripts, and commands. Store them as
-              secrets. Exports never include Local Memory connections or files.
+              secrets. Exports never include Local Workspace connections or files.
             </p>
             <p class="section-description">
-              Importing settings removes every Local Memory connection on this device before the
+              Importing settings removes every Local Workspace connection on this device before the
               imported agents become active. It never deletes folders or files; reconnect them
               afterward.
             </p>
@@ -383,39 +383,45 @@
               class="agent-memory-section hidden"
               aria-busy="false"
             >
-              <legend>Local Memory <span class="field-label-qualifier">Optional</span></legend>
+              <legend>Local Workspace <span class="field-label-qualifier">Optional</span></legend>
               <p class="field-hint" id="agent-memory-description">
-                Connect a dedicated folder without secrets for durable memory. Each conversation
-                captures <code>MEMORY.md</code> once. That snapshot stays with the conversation and
-                may be sent to another agent’s AI endpoint if you switch agents. File tools use the
-                folder connected to the currently selected agent.
+                Connect a folder to bootstrap each new chat from
+                <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>USER.md</code>,
+                <code>AGENTS.md</code>, and <code>MEMORY.md</code>. Their contents are sent to this
+                agent’s configured AI service. Switching agents keeps the chat history and loads the
+                selected agent’s workspace.
               </p>
 
               <details class="agent-memory-details">
                 <summary>File access and sharing</summary>
                 <ul>
                   <li>
-                    AgentBoard can read bounded UTF-8 files and send their contents, relative names,
-                    and entry types to the selected AI endpoint.
+                    The agent can list and read other bounded UTF-8 files in this folder through
+                    visible tool calls, and read contents may be sent to its configured AI service.
                   </li>
                   <li>
-                    It can create or update <code>MEMORY.md</code> and files under
+                    <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>USER.md</code>, and
+                    <code>AGENTS.md</code> are model-read-only.
+                  </li>
+                  <li>
+                    Visible tool calls can create or update <code>MEMORY.md</code> and files under
                     <code>memory/</code>, and delete individual files under
                     <code>memory/</code> after reading their current version. Connecting creates
-                    <code>MEMORY.md</code> and <code>memory/</code> when missing; conversations are
-                    never saved automatically.
+                    <code>MEMORY.md</code> and <code>memory/</code> when missing; chats are never
+                    saved automatically.
                   </li>
                   <li>
                     Connecting the same folder to multiple agents shares live file changes across
-                    their selected endpoints. Parent and child folder overlaps are rejected.
+                    their configured services. Parent and child folder overlaps are rejected.
                   </li>
                   <li>
-                    <code>MEMORY.md</code> is limited to 64 KiB, other reads to 256 KiB, and
-                    listings to 200 matching entries.
+                    The chat bootstrap is limited to 128 KiB, including a 64 KiB
+                    <code>MEMORY.md</code> limit. Other reads are limited to 256 KiB and listings to
+                    200 matching entries.
                   </li>
                   <li>
-                    Folder connections stay on this device, are excluded from settings backups, and
-                    are removed by settings imports.
+                    Original files stay in the folder. Connections stay on this device, are excluded
+                    from settings backups, and are removed by settings imports.
                   </li>
                 </ul>
               </details>
@@ -433,7 +439,7 @@
               <div
                 class="agent-memory-actions"
                 role="group"
-                aria-label="Local Memory actions"
+                aria-label="Local Workspace actions"
                 aria-describedby="agent-memory-description"
               >
                 <button

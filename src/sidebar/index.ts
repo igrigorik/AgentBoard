@@ -15,7 +15,7 @@ import {
 import './styles.css';
 import type {
   ChatMessage,
-  ConversationMemoryContext,
+  ConversationWorkspaceContext,
   ToolCall,
   MessageContent,
   MessagePart,
@@ -52,11 +52,17 @@ let isLoading = false;
 let connectionRetries = 0;
 const MAX_RETRIES = 3;
 let messageHistory: ChatMessage[] = [];
-let conversationMemoryContext: ConversationMemoryContext | undefined;
+let conversationWorkspaceContext: ConversationWorkspaceContext | undefined;
+let workspaceContextEpoch = 0;
 let agentSelectionSequence = 0;
 let currentSession: StreamingSession | null = null;
 let currentStreamPreparation: AbortController | null = null;
 const configStorage = ConfigStorage.getInstance();
+
+function invalidateWorkspaceContext(): void {
+  conversationWorkspaceContext = undefined;
+  workspaceContextEpoch++;
+}
 
 // Auto-continuation: when tools change mid-stream (e.g., navigation),
 // the stream stops and restarts with fresh tools. Capped to prevent loops.
@@ -288,15 +294,16 @@ function scrollToBottomIfNeeded(): void {
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
   await loadAgents();
-  setupEventListeners();
-  setupMessageListener();
 
-  // Initialize command system
+  // Event handlers must not accept input before their command dependency exists.
   commandRegistry = new CommandRegistry();
   const builtinCommands = createBuiltinCommands(commandRegistry, attachedTabId);
   commandRegistry.registerBuiltins(builtinCommands);
   await commandRegistry.loadUserCommands();
   commandProcessor = new CommandProcessor(commandRegistry);
+
+  setupEventListeners();
+  setupMessageListener();
 
   // Set up scroll tracking
   messagesContainer.addEventListener('scroll', () => {
@@ -389,6 +396,10 @@ function setupMessageListener() {
       // PING is tab-agnostic, always respond
       // This is handled by the background script
       sendResponse({ received: true });
+    } else if (request.type === 'WORKSPACE_BINDINGS_INVALIDATED') {
+      if (request.agentId === undefined || request.agentId === currentAgentId) {
+        invalidateWorkspaceContext();
+      }
     } else {
       // Don't respond to unknown messages - let other handlers deal with them
       log.debug('[Sidebar] Ignoring message type:', request.type);
@@ -489,11 +500,12 @@ function setupEventListeners() {
     // Fall through to default text paste
   });
 
-  // Agent switching affects future sends; the active response and conversation
-  // context retain their owners. A sequence fence rejects stale async lookups.
+  // Agent switching affects future sends without cancelling the active response.
+  // Clear the bootstrap before the async lookup so late callbacks cannot cross agents.
   agentSelect.addEventListener('change', async (e) => {
     const selectedAgentId = (e.target as HTMLSelectElement).value;
     const selectionSequence = ++agentSelectionSequence;
+    invalidateWorkspaceContext();
     currentAgentId = null;
     currentAgent = null;
     updateSendButton();
@@ -675,7 +687,11 @@ async function streamAIResponse() {
   }
   const streamAgentId = currentAgentId;
   const streamAgent = currentAgent;
-  const streamMemoryContext = conversationMemoryContext;
+  const streamWorkspaceEpoch = workspaceContextEpoch;
+  const streamWorkspaceContext =
+    conversationWorkspaceContext?.agentId === streamAgentId
+      ? conversationWorkspaceContext
+      : undefined;
 
   // Create assistant message placeholder (don't add to history yet)
   const assistantMsg: ChatMessage = {
@@ -767,10 +783,16 @@ async function streamAIResponse() {
       if (currentSession !== session) return;
       log.debug('[Sidebar] Received message from port:', msg.type);
       switch (msg.type) {
-        case 'STREAM_MEMORY_CONTEXT': {
-          // The stream that establishes a conversation owns its hidden snapshot even
-          // if the user selects another agent while that response is still running.
-          conversationMemoryContext ??= msg.memoryContext;
+        case 'STREAM_WORKSPACE_CONTEXT': {
+          // Active responses may finish after an agent or binding change, but their
+          // bootstrap must never refill the selected chat's invalidated context slot.
+          if (
+            currentAgentId === streamAgentId &&
+            workspaceContextEpoch === streamWorkspaceEpoch &&
+            msg.workspaceContext?.agentId === streamAgentId
+          ) {
+            conversationWorkspaceContext ??= msg.workspaceContext;
+          }
           break;
         }
 
@@ -1142,7 +1164,7 @@ async function streamAIResponse() {
         type: 'STREAM_CHAT',
         agentId: streamAgentId,
         tabId: attachedTabId || undefined, // Pass the attached tab ID for tool scoping
-        ...(streamMemoryContext && { memoryContext: streamMemoryContext }),
+        ...(streamWorkspaceContext && { workspaceContext: streamWorkspaceContext }),
         messages: messagesToSend,
       });
     } catch {
@@ -1219,7 +1241,7 @@ function displayConversationNotice(content: string): void {
 // Add clear conversation functionality
 function clearConversation() {
   messageHistory = [];
-  conversationMemoryContext = undefined;
+  invalidateWorkspaceContext();
   messagesContainer.innerHTML = '';
   // Clean up any active or preparing request.
   if (currentSession || currentStreamPreparation) {

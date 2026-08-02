@@ -134,6 +134,12 @@ export interface MemoryBindingsResetMessage {
   type: 'MEMORY_BINDINGS_RESET';
 }
 
+/** Worker-issued notification for live sidebar bootstrap invalidation. */
+export interface WorkspaceBindingsInvalidatedMessage {
+  type: 'WORKSPACE_BINDINGS_INVALIDATED';
+  agentId?: string;
+}
+
 // Union type for all possible extension messages
 export type ExtensionMessage =
   | GetConfigMessage
@@ -156,7 +162,8 @@ export type ExtensionMessage =
   | WebMCPScriptsUpdatedMessage
   | GetSiteToolHintsMessage
   | MemoryBindingChangedMessage
-  | MemoryBindingsResetMessage;
+  | MemoryBindingsResetMessage
+  | WorkspaceBindingsInvalidatedMessage;
 
 // Response wrapper for message handlers
 export interface MessageResponse<T = unknown> {
@@ -203,11 +210,23 @@ export interface PageContext {
   title: string;
 }
 
-/** Hidden, clone-safe memory state owned by one live sidebar conversation. */
-export interface ConversationMemoryContext {
-  /** Null records that the conversation began without a mounted MEMORY.md snapshot. */
-  snapshot: string | null;
-}
+/** Hidden, clone-safe workspace bootstrap owned by one live sidebar conversation. */
+export type ConversationWorkspaceContext =
+  | {
+      agentId: string;
+      state: 'unmounted';
+    }
+  | {
+      agentId: string;
+      state: 'mounted';
+      /** Null standing fields are absent; empty strings preserve present-empty files. */
+      identity: string | null;
+      soul: string | null;
+      user: string | null;
+      agents: string | null;
+      /** Mounted-but-missing MEMORY.md preserves the existing empty snapshot behavior. */
+      memory: string;
+    };
 
 export interface ChatMessage {
   id: string;
@@ -255,7 +274,7 @@ interface PortStreamChatMessage {
   type: 'STREAM_CHAT';
   agentId: string;
   tabId?: number; // The tab this sidebar is associated with (for tool scoping)
-  memoryContext?: ConversationMemoryContext;
+  workspaceContext?: ConversationWorkspaceContext;
   messages: Array<{
     role: 'user' | 'assistant';
     content: MessageContent;

@@ -228,7 +228,7 @@ async function openEditModal(agentId: string) {
     onDelete: () => {
       if (
         window.confirm(
-          `Delete agent "${agent.name}"? Its Local Memory connection will be removed, but no local files will be deleted. This cannot be undone.`
+          `Delete agent "${agent.name}"? Its Local Workspace connection will be removed, but no local files will be deleted. This cannot be undone.`
         )
       ) {
         void deleteAgent(agentId);

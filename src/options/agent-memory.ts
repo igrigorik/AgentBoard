@@ -61,7 +61,7 @@ export class AgentMemoryControls {
     this.connectButton.addEventListener('click', () => void this.connectCurrent());
     this.disconnectButton.addEventListener('click', () => {
       if (!this.agentId) return;
-      if (globalThis.confirm('Remove this Local Memory connection? No files will be deleted.')) {
+      if (globalThis.confirm('Remove this Local Workspace connection? No files will be deleted.')) {
         void this.disconnectCurrent();
       }
     });
@@ -77,7 +77,7 @@ export class AgentMemoryControls {
     if (!agentId) {
       this.renderState(
         'Not connected',
-        'Save this agent before connecting a Local Memory folder.',
+        'Save this agent before connecting a Local Workspace.',
         false,
         false
       );
@@ -107,7 +107,7 @@ export class AgentMemoryControls {
     if (memory.state === 'unmounted') {
       this.renderState(
         'Not connected',
-        'Connect a folder to enable durable Local Memory.',
+        'Connect a folder to enable a Local Workspace.',
         true,
         false
       );
@@ -210,7 +210,7 @@ export class AgentMemoryControls {
       const message =
         error instanceof MemoryMountError
           ? error.message
-          : 'AgentBoard could not connect that Local Memory folder.';
+          : 'AgentBoard could not connect that Local Workspace.';
       const refresh = this.show(agentId);
       const refreshGeneration = this.renderGeneration;
       await refresh;

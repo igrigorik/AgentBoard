@@ -5,14 +5,19 @@ import {
   MemoryFilesystem,
   runMemoryMutation,
   type MemoryDirectoryHandle,
-  type MemoryFileSnapshot,
 } from './filesystem';
+import {
+  loadWorkspaceBootstrap,
+  WorkspaceContextError,
+  type WorkspaceBootstrapFiles,
+} from '../workspace/context';
 
 export type MemoryUnavailableReason =
   | 'permission-required'
   | 'root-unavailable'
   | 'incompatible-layout'
   | 'memory-too-large'
+  | 'workspace-too-large'
   | 'binding-changed'
   | 'binding-storage-unavailable';
 
@@ -21,6 +26,7 @@ export type MemoryMountErrorCode =
   | 'ROOT_UNAVAILABLE'
   | 'INCOMPATIBLE_LAYOUT'
   | 'MEMORY_TOO_LARGE'
+  | 'WORKSPACE_TOO_LARGE'
   | 'NESTED_ROOT'
   | 'BINDING_CHANGED'
   | 'BINDING_STORAGE_UNAVAILABLE';
@@ -35,19 +41,21 @@ export class MemoryMountError extends Error {
 function memoryMountErrorMessage(code: MemoryMountErrorCode): string {
   switch (code) {
     case 'PERMISSION_REQUIRED':
-      return 'This agent’s memory folder needs to be reconnected in Settings.';
+      return 'This agent’s Local Workspace needs to be reconnected in Settings.';
     case 'ROOT_UNAVAILABLE':
-      return 'This agent’s memory folder is unavailable. Reconnect it in Settings.';
+      return 'This agent’s Local Workspace is unavailable. Reconnect it in Settings.';
     case 'INCOMPATIBLE_LAYOUT':
-      return 'This memory folder has an incompatible MEMORY.md or memory entry.';
+      return 'This Local Workspace has an incompatible recognized entry.';
     case 'MEMORY_TOO_LARGE':
       return 'MEMORY.md exceeds AgentBoard’s 64 KiB limit.';
+    case 'WORKSPACE_TOO_LARGE':
+      return 'The Local Workspace bootstrap exceeds AgentBoard’s 128 KiB limit.';
     case 'NESTED_ROOT':
-      return 'Choose the same folder or a separate folder; parent and child memory folders cannot be connected to different agents.';
+      return 'Choose the same folder or a separate folder; parent and child workspaces cannot be connected to different agents.';
     case 'BINDING_CHANGED':
-      return 'The agent’s memory folder changed. Send the request again.';
+      return 'The agent’s Local Workspace changed. Send the request again.';
     default:
-      return 'AgentBoard could not access its memory-folder bindings.';
+      return 'AgentBoard could not access its Local Workspace bindings.';
   }
 }
 
@@ -57,7 +65,7 @@ export type ResolvedMemory =
       state: 'available';
       rootName: string;
       filesystem: MemoryFilesystem;
-      memoryFile?: MemoryFileSnapshot;
+      workspace?: WorkspaceBootstrapFiles;
       authoritySignal: AbortSignal;
     }
   | {
@@ -68,19 +76,21 @@ export type ResolvedMemory =
     };
 
 export interface ResolveMemoryOptions {
-  /** Ordinary turns need live tools but must not refresh the conversation snapshot. */
-  includeMemoryFile?: boolean;
+  /** Ordinary turns need live tools but must not refresh the conversation bootstrap. */
+  includeWorkspaceContext?: boolean;
 }
 
 export type MemoryPermissionRenewal = () => Promise<void>;
 
 function mapFilesystemFailure(error: unknown): MemoryMountError {
+  if (error instanceof WorkspaceContextError) return new MemoryMountError(error.code);
   if (!(error instanceof MemoryFileError)) return new MemoryMountError('ROOT_UNAVAILABLE');
   if (error.code === 'FILE_TOO_LARGE') return new MemoryMountError('MEMORY_TOO_LARGE');
   if (
     error.code === 'INVALID_TEXT' ||
     error.code === 'NOT_A_FILE' ||
-    error.code === 'NOT_A_DIRECTORY'
+    error.code === 'NOT_A_DIRECTORY' ||
+    error.code === 'NAME_MISMATCH'
   ) {
     return new MemoryMountError('INCOMPATIBLE_LAYOUT');
   }
@@ -212,7 +222,7 @@ export class MemoryManager {
 
   async resolve(
     agentId: string,
-    { includeMemoryFile = true }: ResolveMemoryOptions = {}
+    { includeWorkspaceContext = false }: ResolveMemoryOptions = {}
   ): Promise<ResolvedMemory> {
     const authorityEpoch = this.captureAuthorityEpoch(agentId);
     let binding;
@@ -252,7 +262,9 @@ export class MemoryManager {
       const filesystem = new MemoryFilesystem(binding.handle);
       try {
         await filesystem.validateLayout();
-        const memoryFile = includeMemoryFile ? await filesystem.readMemory() : undefined;
+        const workspace = includeWorkspaceContext
+          ? await loadWorkspaceBootstrap(filesystem)
+          : undefined;
         const authoritySignal = await this.authoritySignal(agentId, binding.handle, authorityEpoch);
         if (!authoritySignal) return this.bindingChanged(rootName);
         return {
@@ -260,7 +272,7 @@ export class MemoryManager {
           rootName,
           filesystem,
           authoritySignal,
-          ...(memoryFile && { memoryFile }),
+          ...(workspace && { workspace }),
         };
       } catch (failure) {
         if (!this.revokeIfCurrent(agentId, authorityEpoch)) return this.bindingChanged(rootName);
@@ -270,7 +282,9 @@ export class MemoryManager {
             ? 'incompatible-layout'
             : error.code === 'MEMORY_TOO_LARGE'
               ? 'memory-too-large'
-              : 'root-unavailable';
+              : error.code === 'WORKSPACE_TOO_LARGE'
+                ? 'workspace-too-large'
+                : 'root-unavailable';
         return { state: 'unavailable', rootName, reason, error };
       }
     } finally {

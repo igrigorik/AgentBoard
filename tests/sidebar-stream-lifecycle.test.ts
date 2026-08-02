@@ -105,6 +105,14 @@ function isStopMode(): boolean {
   );
 }
 
+let runtimeMessageListener:
+  | ((
+      message: Record<string, unknown>,
+      sender: unknown,
+      sendResponse: (value: unknown) => void
+    ) => boolean | undefined)
+  | undefined;
+
 describe('sidebar stream lifecycle ownership', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -115,6 +123,10 @@ describe('sidebar stream lifecycle ownership', () => {
     configStorage.getAgent.mockImplementation(async (agentId: string) =>
       agentId === secondAgent.id ? secondAgent : agent
     );
+    runtimeMessageListener = undefined;
+    chrome.runtime.onMessage.addListener = vi.fn((listener) => {
+      runtimeMessageListener = listener as typeof runtimeMessageListener;
+    });
     window.location.hash = '#tab=123';
     document.body.innerHTML = `
       <main id="app">
@@ -194,10 +206,18 @@ describe('sidebar stream lifecycle ownership', () => {
 
     sendMessage('Continue after tools change');
     await vi.waitFor(() => expect(ports[2]?.postMessage).toHaveBeenCalledOnce());
-    const continuationMemoryContext = { snapshot: '# Conversation memory' };
+    const continuationWorkspaceContext = {
+      agentId: 'agent-1',
+      state: 'mounted',
+      identity: null,
+      soul: null,
+      user: null,
+      agents: null,
+      memory: '# Conversation memory',
+    };
     ports[2].emitMessage({
-      type: 'STREAM_MEMORY_CONTEXT',
-      memoryContext: continuationMemoryContext,
+      type: 'STREAM_WORKSPACE_CONTEXT',
+      workspaceContext: continuationWorkspaceContext,
     });
     chrome.tabs.get = vi.fn().mockResolvedValue({
       id: 123,
@@ -230,10 +250,10 @@ describe('sidebar stream lifecycle ownership', () => {
       expect(ports[3].postMessage).toHaveBeenCalledOnce();
     });
     const continuationPayload = ports[3].postMessage.mock.calls[0][0] as {
-      memoryContext?: unknown;
+      workspaceContext?: unknown;
       messages: Array<{ role: string; content: string }>;
     };
-    expect(continuationPayload.memoryContext).toEqual(continuationMemoryContext);
+    expect(continuationPayload.workspaceContext).toEqual(continuationWorkspaceContext);
     const originalTurn = continuationPayload.messages.find(
       ({ role, content }) => role === 'user' && content.includes('Continue after tools change')
     );
@@ -252,7 +272,7 @@ describe('sidebar stream lifecycle ownership', () => {
     expect(failureCount()).toBe(1);
   });
 
-  it('keeps memory context hidden across turns and agent changes but drops it on clear', async () => {
+  it('keeps workspace context hidden across turns and reloads it on clear or agent change', async () => {
     const ports: MockPort[] = [];
     chrome.runtime.connect = vi.fn(({ name }) => {
       const port = createPort(name);
@@ -276,10 +296,18 @@ describe('sidebar stream lifecycle ownership', () => {
 
     sendMessage('First turn');
     await vi.waitFor(() => expect(ports[0]?.postMessage).toHaveBeenCalledOnce());
-    expect(ports[0].postMessage.mock.calls[0][0]).not.toHaveProperty('memoryContext');
+    expect(ports[0].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
 
-    const firstContext = { snapshot: 'PRIVATE_MEMORY_SENTINEL' };
-    ports[0].emitMessage({ type: 'STREAM_MEMORY_CONTEXT', memoryContext: firstContext });
+    const firstContext = {
+      agentId: 'agent-1',
+      state: 'mounted',
+      identity: 'PRIVATE_IDENTITY_SENTINEL',
+      soul: null,
+      user: null,
+      agents: null,
+      memory: 'PRIVATE_MEMORY_SENTINEL',
+    };
+    ports[0].emitMessage({ type: 'STREAM_WORKSPACE_CONTEXT', workspaceContext: firstContext });
     ports[0].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'First answer' });
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
     expect(document.body.textContent).not.toContain('PRIVATE_MEMORY_SENTINEL');
@@ -287,10 +315,10 @@ describe('sidebar stream lifecycle ownership', () => {
     sendMessage('Second turn');
     await vi.waitFor(() => expect(ports[1]?.postMessage).toHaveBeenCalledOnce());
     const secondPayload = ports[1].postMessage.mock.calls[0][0] as {
-      memoryContext?: unknown;
+      workspaceContext?: unknown;
       messages: unknown[];
     };
-    expect(secondPayload.memoryContext).toEqual(firstContext);
+    expect(secondPayload.workspaceContext).toEqual(firstContext);
     expect(JSON.stringify(secondPayload.messages)).not.toContain('PRIVATE_MEMORY_SENTINEL');
     ports[1].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Second answer' });
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
@@ -300,10 +328,18 @@ describe('sidebar stream lifecycle ownership', () => {
     );
     sendMessage('After clear');
     await vi.waitFor(() => expect(ports[2]?.postMessage).toHaveBeenCalledOnce());
-    expect(ports[2].postMessage.mock.calls[0][0]).not.toHaveProperty('memoryContext');
+    expect(ports[2].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
 
-    const secondContext = { snapshot: 'SECOND_PRIVATE_MEMORY_SENTINEL' };
-    ports[2].emitMessage({ type: 'STREAM_MEMORY_CONTEXT', memoryContext: secondContext });
+    const secondContext = {
+      agentId: 'agent-1',
+      state: 'mounted',
+      identity: null,
+      soul: 'SECOND_PRIVATE_SOUL_SENTINEL',
+      user: null,
+      agents: null,
+      memory: 'SECOND_PRIVATE_MEMORY_SENTINEL',
+    };
+    ports[2].emitMessage({ type: 'STREAM_WORKSPACE_CONTEXT', workspaceContext: secondContext });
     ports[2].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'After clear answer' });
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
 
@@ -314,14 +350,112 @@ describe('sidebar stream lifecycle ownership', () => {
 
     sendMessage('After agent change');
     await vi.waitFor(() => expect(ports[3]?.postMessage).toHaveBeenCalledOnce());
-    expect(ports[3].postMessage.mock.calls[0][0]).toMatchObject({
+    expect(ports[3].postMessage.mock.calls[0][0]).toMatchObject({ agentId: 'agent-2' });
+    expect(ports[3].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
+    const agentBMessages = JSON.stringify(ports[3].postMessage.mock.calls[0][0].messages);
+    expect(agentBMessages).not.toContain('SECOND_PRIVATE_MEMORY_SENTINEL');
+    expect(agentBMessages).toContain('After clear');
+    expect(agentBMessages).toContain('After clear answer');
+    const agentBContext = {
       agentId: 'agent-2',
-      memoryContext: secondContext,
+      state: 'unmounted',
+    };
+    ports[3].emitMessage({
+      type: 'STREAM_WORKSPACE_CONTEXT',
+      workspaceContext: agentBContext,
     });
-    expect(JSON.stringify(ports[3].postMessage.mock.calls[0][0].messages)).not.toContain(
-      'SECOND_PRIVATE_MEMORY_SENTINEL'
-    );
     ports[3].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Finished' });
+    await vi.waitFor(() => expect(isStopMode()).toBe(false));
+
+    select.value = 'agent-1';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(configStorage.getAgent).toHaveBeenCalledWith('agent-1'));
+    sendMessage('Back to agent A');
+    await vi.waitFor(() => expect(ports[4]?.postMessage).toHaveBeenCalledOnce());
+    expect(ports[4].postMessage.mock.calls[0][0]).toMatchObject({ agentId: 'agent-1' });
+    expect(ports[4].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
+    const agentAMessages = JSON.stringify(ports[4].postMessage.mock.calls[0][0].messages);
+    expect(agentAMessages).toContain('After agent change');
+    expect(agentAMessages).toContain('Finished');
+    ports[4].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Agent A reloaded' });
+    await vi.waitFor(() => expect(isStopMode()).toBe(false));
+  });
+
+  it('invalidates only the selected workspace after worker binding notifications', async () => {
+    const ports: MockPort[] = [];
+    chrome.runtime.connect = vi.fn(({ name }) => {
+      const port = createPort(name);
+      ports.push(port);
+      return port as unknown as chrome.runtime.Port;
+    });
+    chrome.runtime.sendMessage = vi.fn(async (message) =>
+      message.type === 'GET_SITE_TOOL_HINTS' ? { hints: [] } : { pong: true }
+    );
+    chrome.tabs.get = vi.fn().mockResolvedValue({
+      id: 123,
+      url: 'https://example.com/current',
+      title: 'Current page',
+    });
+
+    await import('../src/sidebar/index');
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await vi.waitFor(() => expect(runtimeMessageListener).toBeTypeOf('function'));
+
+    sendMessage('Establish workspace');
+    await vi.waitFor(() => expect(ports[0]?.postMessage).toHaveBeenCalledOnce());
+    const context = {
+      agentId: 'agent-1',
+      state: 'mounted',
+      identity: null,
+      soul: 'Private style',
+      user: null,
+      agents: null,
+      memory: 'Private memory',
+    };
+    ports[0].emitMessage({ type: 'STREAM_WORKSPACE_CONTEXT', workspaceContext: context });
+    ports[0].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Ready' });
+    await vi.waitFor(() => expect(isStopMode()).toBe(false));
+
+    runtimeMessageListener?.(
+      { type: 'WORKSPACE_BINDINGS_INVALIDATED', agentId: 'agent-2' },
+      {},
+      vi.fn()
+    );
+    sendMessage('Wrong agent invalidation');
+    await vi.waitFor(() => expect(ports[1]?.postMessage).toHaveBeenCalledOnce());
+    expect(ports[1].postMessage.mock.calls[0][0].workspaceContext).toEqual(context);
+    ports[1].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Still mounted' });
+    await vi.waitFor(() => expect(isStopMode()).toBe(false));
+
+    runtimeMessageListener?.(
+      { type: 'WORKSPACE_BINDINGS_INVALIDATED', agentId: 'agent-1' },
+      {},
+      vi.fn()
+    );
+    sendMessage('Selected agent invalidation');
+    await vi.waitFor(() => expect(ports[2]?.postMessage).toHaveBeenCalledOnce());
+    expect(ports[2].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
+    runtimeMessageListener?.(
+      { type: 'WORKSPACE_BINDINGS_INVALIDATED', agentId: 'agent-1' },
+      {},
+      vi.fn()
+    );
+    ports[2].emitMessage({ type: 'STREAM_WORKSPACE_CONTEXT', workspaceContext: context });
+    ports[2].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Stale capture ignored' });
+    await vi.waitFor(() => expect(isStopMode()).toBe(false));
+
+    sendMessage('Recapture after stale response');
+    await vi.waitFor(() => expect(ports[3]?.postMessage).toHaveBeenCalledOnce());
+    expect(ports[3].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
+    ports[3].emitMessage({ type: 'STREAM_WORKSPACE_CONTEXT', workspaceContext: context });
+    ports[3].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Recaptured' });
+    await vi.waitFor(() => expect(isStopMode()).toBe(false));
+
+    runtimeMessageListener?.({ type: 'WORKSPACE_BINDINGS_INVALIDATED' }, {}, vi.fn());
+    sendMessage('All bindings invalidated');
+    await vi.waitFor(() => expect(ports[4]?.postMessage).toHaveBeenCalledOnce());
+    expect(ports[4].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
+    ports[4].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'Finished' });
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
   });
 
@@ -361,10 +495,18 @@ describe('sidebar stream lifecycle ownership', () => {
     select.dispatchEvent(new Event('change', { bubbles: true }));
     expect(ports[0].disconnect).not.toHaveBeenCalled();
 
-    const agentAContext = { snapshot: 'AGENT_A_PRIVATE_MEMORY' };
+    const agentAContext = {
+      agentId: 'agent-1',
+      state: 'mounted',
+      identity: 'AGENT_A_PRIVATE_IDENTITY',
+      soul: null,
+      user: null,
+      agents: null,
+      memory: 'AGENT_A_PRIVATE_MEMORY',
+    };
     ports[0].emitMessage({
-      type: 'STREAM_MEMORY_CONTEXT',
-      memoryContext: agentAContext,
+      type: 'STREAM_WORKSPACE_CONTEXT',
+      workspaceContext: agentAContext,
     });
     expect(document.body.textContent).not.toContain('AGENT_A_PRIVATE_MEMORY');
 
@@ -383,10 +525,8 @@ describe('sidebar stream lifecycle ownership', () => {
     await vi.waitFor(() => expect(button.disabled).toBe(false));
     button.click();
     await vi.waitFor(() => expect(ports[1]?.postMessage).toHaveBeenCalledOnce());
-    expect(ports[1].postMessage.mock.calls[0][0]).toMatchObject({
-      agentId: 'agent-2',
-      memoryContext: agentAContext,
-    });
+    expect(ports[1].postMessage.mock.calls[0][0]).toMatchObject({ agentId: 'agent-2' });
+    expect(ports[1].postMessage.mock.calls[0][0]).not.toHaveProperty('workspaceContext');
     expect(JSON.stringify(ports[1].postMessage.mock.calls[0][0].messages)).not.toContain(
       'AGENT_A_PRIVATE_MEMORY'
     );

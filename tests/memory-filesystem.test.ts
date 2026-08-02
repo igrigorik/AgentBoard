@@ -27,7 +27,7 @@ describe('MemoryFilesystem', () => {
     await initializeMemoryRoot(root);
 
     const filesystem = new MemoryFilesystem(root);
-    expect((await filesystem.readMemory())?.content).toBe('# Existing\n');
+    expect((await filesystem.readFile('MEMORY.md')).content).toBe('# Existing\n');
     const rootListing = await filesystem.listFiles();
     expect(rootListing.entries).toEqual([
       { path: 'MEMORY.md', type: 'file' },
@@ -44,7 +44,7 @@ describe('MemoryFilesystem', () => {
     await initializeMemoryRoot(root);
     const filesystem = new MemoryFilesystem(root);
 
-    expect((await filesystem.readMemory())?.content).toBe('# Memory\n');
+    expect((await filesystem.readFile('MEMORY.md')).content).toBe('# Memory\n');
     expect((await filesystem.readFile('KNOWLEDGE.md')).content).toBe('# Legacy\n');
     expect((await filesystem.readFile('AGENTS.md')).content).toContain('data');
     for (const protectedPath of [
@@ -236,23 +236,28 @@ describe('MemoryFilesystem', () => {
 
   it('uses the smaller MEMORY.md bound consistently for reads and writes', async () => {
     const { root, filesystem } = await setupMemory();
-    const memoryFile = await filesystem.readMemory();
+    const memoryFile = await filesystem.readFile('MEMORY.md');
 
     await expectMemoryError(
       filesystem.writeFile(
         'MEMORY.md',
         'x'.repeat(MAX_AUTOLOADED_MEMORY_BYTES + 1),
-        memoryFile?.revision
+        memoryFile.revision
       ),
       'FILE_TOO_LARGE'
     );
     await root.writeExternal('MEMORY.md', 'x'.repeat(MAX_AUTOLOADED_MEMORY_BYTES + 1));
-    await expectMemoryError(filesystem.readMemory(), 'FILE_TOO_LARGE');
+    await expectMemoryError(
+      filesystem.readOptionalRootFile('MEMORY.md', MAX_AUTOLOADED_MEMORY_BYTES),
+      'FILE_TOO_LARGE'
+    );
     await expectMemoryError(filesystem.readFile('MEMORY.md'), 'FILE_TOO_LARGE');
   });
 
-  it('treats a missing MEMORY.md as an empty index', async () => {
+  it('treats a missing MEMORY.md as an absent optional root file', async () => {
     const filesystem = new MemoryFilesystem(new FakeMemoryDirectoryHandle('agent-memory'));
-    await expect(filesystem.readMemory()).resolves.toBeUndefined();
+    await expect(
+      filesystem.readOptionalRootFile('MEMORY.md', MAX_AUTOLOADED_MEMORY_BYTES)
+    ).resolves.toBeUndefined();
   });
 });

@@ -46,6 +46,7 @@ export type MemoryFileErrorCode =
   | 'PATH_NOT_FOUND'
   | 'NOT_A_FILE'
   | 'NOT_A_DIRECTORY'
+  | 'NAME_MISMATCH'
   | 'FILE_TOO_LARGE'
   | 'INVALID_TEXT'
   | 'WRITE_NOT_ALLOWED'
@@ -73,6 +74,8 @@ function memoryFileErrorMessage(code: MemoryFileErrorCode): string {
       return 'The requested memory path is not a file.';
     case 'NOT_A_DIRECTORY':
       return 'The requested memory path is not a directory.';
+    case 'NAME_MISMATCH':
+      return 'A workspace entry must use the exact recognized filename.';
     case 'FILE_TOO_LARGE':
       return 'The memory file exceeds AgentBoard’s size limit.';
     case 'INVALID_TEXT':
@@ -88,11 +91,14 @@ function memoryFileErrorMessage(code: MemoryFileErrorCode): string {
   }
 }
 
-export interface MemoryFileSnapshot {
+export interface MemoryTextSnapshot {
   path: string;
   content: string;
-  revision: string;
   bytes: number;
+}
+
+export interface MemoryFileSnapshot extends MemoryTextSnapshot {
+  revision: string;
 }
 
 export interface MemoryListEntry {
@@ -254,11 +260,11 @@ async function digest(bytes: ArrayBuffer): Promise<string> {
   ).join('')}`;
 }
 
-async function readHandle(
+async function readHandleText(
   handle: MemoryFileHandle,
   path: string,
   maxBytes: number
-): Promise<MemoryFileSnapshot> {
+): Promise<{ snapshot: MemoryTextSnapshot; rawBytes: ArrayBuffer }> {
   let file: MemoryFile;
   try {
     file = await handle.getFile();
@@ -282,7 +288,16 @@ async function readHandle(
     throw new MemoryFileError('INVALID_TEXT');
   }
 
-  return { path, content, revision: await digest(bytes), bytes: bytes.byteLength };
+  return { snapshot: { path, content, bytes: bytes.byteLength }, rawBytes: bytes };
+}
+
+async function readHandle(
+  handle: MemoryFileHandle,
+  path: string,
+  maxBytes: number
+): Promise<MemoryFileSnapshot> {
+  const { snapshot, rawBytes } = await readHandleText(handle, path, maxBytes);
+  return { ...snapshot, revision: await digest(rawBytes) };
 }
 
 async function writeHandle(
@@ -309,12 +324,15 @@ async function writeHandle(
 export async function initializeMemoryRoot(root: MemoryDirectoryHandle): Promise<void> {
   // The binding manager serializes initialization and binding publication under
   // runMemoryMutation; taking the same non-reentrant lock here would deadlock.
-  await getDirectory(root, [MEMORY_DIRECTORY], true);
+  const memoryDirectory = await getDirectory(root, [MEMORY_DIRECTORY], true);
+  if (memoryDirectory.name !== MEMORY_DIRECTORY) throw new MemoryFileError('NAME_MISMATCH');
   try {
-    await getFileHandle(root, [MEMORY_FILE]);
+    const memoryFile = await getFileHandle(root, [MEMORY_FILE]);
+    if (memoryFile.name !== MEMORY_FILE) throw new MemoryFileError('NAME_MISMATCH');
   } catch (error) {
     if (!(error instanceof MemoryFileError) || error.code !== 'PATH_NOT_FOUND') throw error;
     const handle = await getFileHandle(root, [MEMORY_FILE], true);
+    if (handle.name !== MEMORY_FILE) throw new MemoryFileError('NAME_MISMATCH');
     await writeHandle(handle, '# Memory\n');
   }
 }
@@ -359,9 +377,19 @@ export class MemoryFilesystem {
     return readHandle(handle, normalized, maxFileBytes(normalized));
   }
 
-  async readMemory(): Promise<MemoryFileSnapshot | undefined> {
+  /** Read one exact root-level file without creating it. */
+  async readOptionalRootFile(
+    filename: string,
+    maxBytes: number
+  ): Promise<MemoryTextSnapshot | undefined> {
+    const segments = parsePath(filename, false);
+    if (segments.length !== 1 || segments[0] !== filename) {
+      throw new MemoryFileError('INVALID_PATH');
+    }
     try {
-      return await this.readFile(MEMORY_FILE);
+      const handle = await getFileHandle(this.root, segments);
+      if (handle.name !== filename) throw new MemoryFileError('NAME_MISMATCH');
+      return (await readHandleText(handle, filename, maxBytes)).snapshot;
     } catch (error) {
       if (error instanceof MemoryFileError && error.code === 'PATH_NOT_FOUND') return undefined;
       throw error;
@@ -371,7 +399,8 @@ export class MemoryFilesystem {
   async validateLayout(): Promise<void> {
     // Snapshot capture separately validates MEMORY.md; ordinary turns only need a live root.
     try {
-      await getDirectory(this.root, [MEMORY_DIRECTORY]);
+      const memoryDirectory = await getDirectory(this.root, [MEMORY_DIRECTORY]);
+      if (memoryDirectory.name !== MEMORY_DIRECTORY) throw new MemoryFileError('NAME_MISMATCH');
     } catch (error) {
       if (!(error instanceof MemoryFileError) || error.code !== 'PATH_NOT_FOUND') throw error;
       // A missing optional memory/ entry and a deleted root both surface NotFoundError.

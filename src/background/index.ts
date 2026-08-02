@@ -193,6 +193,18 @@ function sendContextSelection(tabId: number, text: string | undefined): void {
   }, 500);
 }
 
+/** Invalidate only ephemeral sidebar bootstrap state; file contents never enter this message. */
+function broadcastWorkspaceInvalidation(agentId?: string): void {
+  const message: ExtensionMessage =
+    agentId === undefined
+      ? { type: 'WORKSPACE_BINDINGS_INVALIDATED' }
+      : { type: 'WORKSPACE_BINDINGS_INVALIDATED', agentId };
+  chrome.runtime.sendMessage(message, () => {
+    // No live sidebar is a normal state.
+    void chrome.runtime.lastError;
+  });
+}
+
 // Debug: Check what commands are registered
 chrome.commands.getAll((commands) => {
   log.debug('Registered commands:', commands);
@@ -379,6 +391,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       // Imported agent IDs are untrusted, so no existing local capability may
       // follow an ID across the import boundary. Revoke before and after deletion.
       memoryManager.revokeAll();
+      broadcastWorkspaceInvalidation();
       void memoryManager.pruneBindings(new Set()).then(
         () => {
           memoryManager.revokeAll();
@@ -397,8 +410,9 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
         return false;
       }
       // Options owns the user gesture and IndexedDB mutation; this worker owns
-      // live model closures and must retire them before acknowledging the change.
+      // live model closures and sidebar bootstrap invalidation.
       memoryManager.revoke(request.agentId);
+      broadcastWorkspaceInvalidation(request.agentId);
       sendResponse({ success: true });
       return false;
 
@@ -726,7 +740,7 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           await raceWithAbort(toolsReady, preparation.signal);
           if (!isCurrentStream()) return;
-          const { agentId, tabId, messages, memoryContext } = msg;
+          const { agentId, tabId, messages, workspaceContext } = msg;
 
           // Convert messages to CoreMessage format
           const coreMessages: CoreMessage[] = messages.map(
@@ -742,9 +756,9 @@ chrome.runtime.onConnect.addListener((port) => {
             tabId,
           });
           const streamCallbacks: StreamCallbacks = {
-            onMemoryContext: (context) => {
+            onWorkspaceContext: (context) => {
               if (isCurrentStream()) {
-                port.postMessage({ type: 'STREAM_MEMORY_CONTEXT', memoryContext: context });
+                port.postMessage({ type: 'STREAM_WORKSPACE_CONTEXT', workspaceContext: context });
               }
             },
             // Text block callbacks for interleaved display
@@ -866,7 +880,7 @@ chrome.runtime.onConnect.addListener((port) => {
             tabId,
             streamCallbacks,
             streamId,
-            memoryContext
+            workspaceContext
           );
           // Superseded and user-cancelled streams return without an error callback.
           finishCurrentStream();
@@ -937,12 +951,14 @@ configStorage.onChange(
       await memoryManager.pruneBindings(new Set(newConfig.agents.map(({ id }) => id)));
     } catch {
       memoryManager.revokeAll();
+      broadcastWorkspaceInvalidation();
       log.error('[Background] Memory connection reconciliation failed');
     }
   },
   (error) => {
     getToolRegistry().revokeRemoteTools();
     memoryManager.revokeAll();
+    broadcastWorkspaceInvalidation();
     log.error('[Background] Invalid configuration revoked runtime capabilities:', error.code);
   }
 );

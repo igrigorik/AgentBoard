@@ -42,7 +42,7 @@ export function createMemoryTools(
   return {
     [MEMORY_TOOL_NAMES.list]: tool({
       description:
-        'List one directory in the selected Local Memory folder. Returns at most 200 matching immediate entries and reports when matching results were truncated. Use memory to list the memory directory and omit path for the mounted root. The optional pattern is a case-sensitive basename glob with only * and ?; it does not recurse.',
+        'List one directory in the selected Local Workspace. Returns at most 200 matching immediate entries and reports when matching results were truncated. Use memory to list the memory directory and omit path for the mounted root. The optional pattern is a case-sensitive basename glob with only * and ?; it does not recurse.',
       inputSchema: z.object({
         path: directoryPath.optional(),
         pattern: z
@@ -57,7 +57,7 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.read]: tool({
       description:
-        'Read one UTF-8 text file from the selected Local Memory folder using its exact root-relative path, such as MEMORY.md, memory/topic.md, or memory/YYYY-MM-DD.md. AgentBoard retains a single-use revision receipt that authorizes one subsequent mutation of this exact path in the current request.',
+        'Read one UTF-8 text file from the selected Local Workspace using its exact root-relative path, such as MEMORY.md, memory/topic.md, or memory/YYYY-MM-DD.md. AgentBoard retains a single-use revision receipt that authorizes one subsequent mutation of this exact path in the current request.',
       inputSchema: z.object({ path: filePath }),
       execute: ({ path }, { abortSignal }) =>
         runAuthorized(authoritySignal, abortSignal, async () => {
@@ -68,7 +68,7 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.write]: tool({
       description:
-        'Create or replace MEMORY.md or a journal file under the memory directory in the selected Local Memory folder. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request; AgentBoard applies its retained revision automatically. Keep MEMORY.md as the compact core of stable facts worth having available in every conversation plus useful journal pointers. Use journal files for deeper context, supporting detail, reasoning, chronology, and provenance; journals may be topical or dated.',
+        'Create or replace MEMORY.md or a journal file under the memory directory in the selected Local Workspace. Replacing an existing file requires a fresh agentboard_read_file call for the exact path in this request; AgentBoard applies its retained revision automatically. Keep MEMORY.md as the compact core of stable facts worth having available in every conversation plus useful journal pointers. Use journal files for deeper context, supporting detail, reasoning, chronology, and provenance; journals may be topical or dated.',
       inputSchema: z.object({
         path: filePath,
         content: z.string().describe('Complete UTF-8 file content to write'),
@@ -81,7 +81,7 @@ export function createMemoryTools(
     }),
     [MEMORY_TOOL_NAMES.delete]: tool({
       description:
-        'Permanently delete one journal file under the memory directory from the selected Local Memory folder. Deletion requires a fresh agentboard_read_file call for the exact path in this request; AgentBoard applies its retained revision automatically. MEMORY.md and directories cannot be deleted.',
+        'Permanently delete one journal file under the memory directory from the selected Local Workspace. Deletion requires a fresh agentboard_read_file call for the exact path in this request; AgentBoard applies its retained revision automatically. MEMORY.md and directories cannot be deleted.',
       inputSchema: z.object({ path: filePath }),
       execute: ({ path }, { abortSignal }) =>
         runAuthorized(authoritySignal, abortSignal, (isAuthorized) =>

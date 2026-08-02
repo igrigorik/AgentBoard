@@ -8,9 +8,10 @@
 import { streamText, CoreMessage } from 'ai';
 import { raceWithAbort } from '../abort';
 import type { AgentConfig } from '../storage/config';
-import type { ConversationMemoryContext, ToolCall } from '../../types';
+import type { ConversationWorkspaceContext, ToolCall } from '../../types';
 import { ConfigStorage, ConfigValidationError, configValidationMessage } from '../storage/config';
 import { MAX_AUTOLOADED_MEMORY_BYTES } from '../memory/filesystem';
+import { MAX_WORKSPACE_BOOTSTRAP_BYTES } from '../workspace/context';
 import { getMemoryManager, MemoryMountError, type ResolvedMemory } from '../memory/manager';
 import { createMemoryTools } from '../memory/tools';
 import { composeSystemPrompt, formatMemoryContext } from './system-prompt';
@@ -94,27 +95,47 @@ function publicAIRequestError(error: unknown): Error {
   );
 }
 
-function validateMemoryContext(context: ConversationMemoryContext | undefined): void {
+function validateWorkspaceContext(
+  context: ConversationWorkspaceContext | undefined,
+  expectedAgentId: string
+): void {
   if (context === undefined) return;
-  if (typeof context !== 'object' || context === null) {
-    throw new Error('Invalid conversation memory context');
-  }
-  const snapshot = (context as { snapshot?: unknown }).snapshot;
   if (
-    snapshot !== null &&
-    (typeof snapshot !== 'string' ||
-      new TextEncoder().encode(snapshot).byteLength > MAX_AUTOLOADED_MEMORY_BYTES)
+    typeof context !== 'object' ||
+    context === null ||
+    context.agentId !== expectedAgentId ||
+    (context.state !== 'mounted' && context.state !== 'unmounted')
   ) {
-    throw new Error('Invalid conversation memory context');
+    throw new Error('Invalid conversation workspace context');
+  }
+  if (context.state === 'unmounted') return;
+
+  const standing = [context.identity, context.soul, context.user, context.agents];
+  if (
+    standing.some((value) => value !== null && typeof value !== 'string') ||
+    typeof context.memory !== 'string'
+  ) {
+    throw new Error('Invalid conversation workspace context');
+  }
+
+  const encoder = new TextEncoder();
+  const memoryBytes = encoder.encode(context.memory).byteLength;
+  const totalBytes = standing.reduce(
+    (total, value) => total + (value === null ? 0 : encoder.encode(value).byteLength),
+    memoryBytes
+  );
+  if (memoryBytes > MAX_AUTOLOADED_MEMORY_BYTES || totalBytes > MAX_WORKSPACE_BOOTSTRAP_BYTES) {
+    throw new Error('Invalid conversation workspace context');
   }
 }
 
-function captureMemoryContext(
+function captureWorkspaceContext(
+  agentId: string,
   memory: Exclude<ResolvedMemory, { state: 'unavailable' }>
-): ConversationMemoryContext {
-  return {
-    snapshot: memory.state === 'available' ? (memory.memoryFile?.content ?? '') : null,
-  };
+): ConversationWorkspaceContext {
+  if (memory.state === 'unmounted') return { agentId, state: 'unmounted' };
+  if (!memory.workspace) throw new Error('Workspace bootstrap was not initialized');
+  return { agentId, state: 'mounted', ...memory.workspace };
 }
 
 function attachMemoryContext(messages: CoreMessage[], snapshot: string): CoreMessage[] {
@@ -155,8 +176,8 @@ export interface StreamCallbacks {
   onFinish: (fullText: string, metadata?: StreamFinishMetadata) => void;
   onError: (error: Error) => void;
   onAbort?: (reason: StreamAbortReason) => void;
-  /** Delivers the immutable memory state established by this conversation's first stream. */
-  onMemoryContext?: (context: ConversationMemoryContext) => void;
+  /** Delivers the immutable workspace bootstrap established by this chat's first stream. */
+  onWorkspaceContext?: (context: ConversationWorkspaceContext) => void;
 
   // Tool callbacks
   onToolCall?: (toolCall: ToolCall) => void;
@@ -214,7 +235,7 @@ export class AIClient {
    * Stream a chat completion from the specified agent
    * @param tabId - Optional tab ID to scope tools to a specific tab
    * @param streamId - Ownership token required to cancel this specific stream
-   * @param memoryContext - Fixed hidden snapshot returned by this conversation's first stream
+   * @param workspaceContext - Fixed hidden bootstrap returned by this chat's first stream
    */
   async streamChat(
     agentId: string,
@@ -222,7 +243,7 @@ export class AIClient {
     tabId: number | undefined,
     callbacks: StreamCallbacks,
     streamId: string = globalThis.crypto.randomUUID(),
-    memoryContext?: ConversationMemoryContext
+    workspaceContext?: ConversationWorkspaceContext
   ): Promise<void> {
     const requestSequence = ++this.streamRequestSequence;
     let abortController: AbortController | undefined;
@@ -245,6 +266,7 @@ export class AIClient {
     this.pendingStreams.set(streamId, pendingStream);
 
     try {
+      validateWorkspaceContext(workspaceContext, agentId);
       const agent = await raceWithAbort(
         this.configStorage.getAgent(agentId),
         pendingStream.controller.signal
@@ -260,21 +282,20 @@ export class AIClient {
         throw new Error('Configure credentials or a custom endpoint in Settings.');
       }
 
-      validateMemoryContext(memoryContext);
-      const establishingMemoryContext = memoryContext === undefined;
+      const establishingWorkspaceContext = workspaceContext === undefined;
       const memory = await raceWithAbort(
         getMemoryManager().resolve(agentId, {
-          includeMemoryFile: establishingMemoryContext,
+          includeWorkspaceContext: establishingWorkspaceContext,
         }),
         pendingStream.controller.signal
       );
-      let capturedMemoryContext: ConversationMemoryContext | undefined;
-      if (establishingMemoryContext) {
+      let capturedWorkspaceContext: ConversationWorkspaceContext | undefined;
+      if (establishingWorkspaceContext) {
         if (memory.state === 'unavailable') throw memory.error;
-        capturedMemoryContext = captureMemoryContext(memory);
+        capturedWorkspaceContext = captureWorkspaceContext(agentId, memory);
       }
-      const conversationMemoryContext = memoryContext ?? capturedMemoryContext;
-      if (!conversationMemoryContext) throw new Error('Conversation memory was not initialized');
+      const conversationWorkspaceContext = workspaceContext ?? capturedWorkspaceContext;
+      if (!conversationWorkspaceContext) throw new Error('Workspace bootstrap was not initialized');
 
       const runtime = createModelRuntime(agent);
       const toolRegistry = getToolRegistry();
@@ -284,13 +305,15 @@ export class AIClient {
         ...toolSnapshot.tools,
         ...(memoryEnabled ? createMemoryTools(memory.filesystem, memory.authoritySignal) : {}),
       };
-      const conversation =
-        conversationMemoryContext.snapshot === null
-          ? messages
-          : attachMemoryContext(messages, conversationMemoryContext.snapshot);
+      const mountedWorkspace =
+        conversationWorkspaceContext.state === 'mounted' ? conversationWorkspaceContext : undefined;
+      const conversation = mountedWorkspace
+        ? attachMemoryContext(messages, mountedWorkspace.memory)
+        : messages;
       const systemPrompt = composeSystemPrompt(agent, {
         mcpInstructions: toolSnapshot.mcpInstructions,
-        memoryEnabled: memoryEnabled || conversationMemoryContext.snapshot !== null,
+        ...(mountedWorkspace && { workspace: mountedWorkspace }),
+        memoryEnabled: memoryEnabled || mountedWorkspace !== undefined,
       });
       const messagesWithSystem: CoreMessage[] = [
         { role: 'system', content: systemPrompt },
@@ -347,8 +370,8 @@ export class AIClient {
       }
 
       try {
-        if (capturedMemoryContext !== undefined) {
-          callbacks.onMemoryContext?.(capturedMemoryContext);
+        if (capturedWorkspaceContext !== undefined) {
+          callbacks.onWorkspaceContext?.(capturedWorkspaceContext);
         }
 
         const hasTools = Object.keys(allTools).length > 0;

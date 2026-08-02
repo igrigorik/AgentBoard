@@ -55,6 +55,34 @@ describe('mounted memory tools', () => {
     });
   });
 
+  it('keeps every standing workspace file read-only at the model-tool boundary', async () => {
+    const root = new FakeMemoryDirectoryHandle('private-root');
+    await initializeMemoryRoot(root);
+    const filesystem = new MemoryFilesystem(root);
+    const standingFiles = ['IDENTITY.md', 'SOUL.md', 'USER.md', 'AGENTS.md'];
+
+    for (const path of standingFiles) {
+      const original = `Original ${path}`;
+      await root.writeExternal(path, original);
+
+      const writeTools = createMemoryTools(filesystem, new AbortController().signal);
+      await executable(writeTools, MEMORY_TOOL_NAMES.read).execute({ path }, {});
+      await expect(
+        executable(writeTools, MEMORY_TOOL_NAMES.write).execute(
+          { path, content: 'Model replacement' },
+          {}
+        )
+      ).rejects.toMatchObject({ code: 'WRITE_NOT_ALLOWED' });
+
+      const deleteTools = createMemoryTools(filesystem, new AbortController().signal);
+      await executable(deleteTools, MEMORY_TOOL_NAMES.read).execute({ path }, {});
+      await expect(
+        executable(deleteTools, MEMORY_TOOL_NAMES.delete).execute({ path }, {})
+      ).rejects.toMatchObject({ code: 'WRITE_NOT_ALLOWED' });
+      await expect(filesystem.readFile(path)).resolves.toMatchObject({ content: original });
+    }
+  });
+
   it('requires a path-bound, single-use read from the same request before mutation', async () => {
     const root = new FakeMemoryDirectoryHandle('private-root');
     await initializeMemoryRoot(root);

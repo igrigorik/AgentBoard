@@ -223,7 +223,8 @@ describe('background response privacy', () => {
     expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(1);
   });
 
-  it('revokes worker-held memory authority after an Options binding change', () => {
+  it('revokes worker authority and invalidates sidebar bootstrap after an Options binding change', () => {
+    vi.mocked(chrome.runtime.sendMessage).mockClear();
     const sendResponse = vi.fn();
 
     const keepChannelOpen = mocks.onMessage!(
@@ -234,10 +235,18 @@ describe('background response privacy', () => {
 
     expect(keepChannelOpen).toBe(false);
     expect(mocks.memoryManager.revoke).toHaveBeenCalledWith('agent-1');
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      { type: 'WORKSPACE_BINDINGS_INVALIDATED', agentId: 'agent-1' },
+      expect.any(Function)
+    );
+    expect(mocks.memoryManager.revoke.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      vi.mocked(chrome.runtime.sendMessage).mock.invocationCallOrder.at(-1)!
+    );
     expect(sendResponse).toHaveBeenCalledWith({ success: true });
   });
 
-  it('revokes and removes every local binding before acknowledging a settings import', async () => {
+  it('revokes bindings and invalidates every sidebar bootstrap before acknowledging import', async () => {
+    vi.mocked(chrome.runtime.sendMessage).mockClear();
     mocks.memoryManager.revokeAll.mockClear();
     mocks.memoryManager.pruneBindings.mockClear();
     const sendResponse = vi.fn();
@@ -250,6 +259,13 @@ describe('background response privacy', () => {
 
     expect(keepChannelOpen).toBe(true);
     expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(1);
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      { type: 'WORKSPACE_BINDINGS_INVALIDATED' },
+      expect.any(Function)
+    );
+    expect(mocks.memoryManager.revokeAll.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(chrome.runtime.sendMessage).mock.invocationCallOrder[0]
+    );
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ success: true }));
     expect(mocks.memoryManager.pruneBindings).toHaveBeenCalledWith(new Set());
     expect(mocks.memoryManager.revokeAll).toHaveBeenCalledTimes(2);
@@ -273,6 +289,7 @@ describe('background response privacy', () => {
   });
 
   it('rejects memory lifecycle mutations from non-Options senders', () => {
+    vi.mocked(chrome.runtime.sendMessage).mockClear();
     mocks.memoryManager.revoke.mockClear();
     mocks.memoryManager.pruneBindings.mockClear();
     const sendResponse = vi.fn();
@@ -289,6 +306,7 @@ describe('background response privacy', () => {
 
     expect(mocks.memoryManager.revoke).not.toHaveBeenCalled();
     expect(mocks.memoryManager.pruneBindings).not.toHaveBeenCalled();
+    expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
     expect(sendResponse).toHaveBeenNthCalledWith(1, { success: false });
     expect(sendResponse).toHaveBeenNthCalledWith(2, { success: false });
   });
@@ -433,29 +451,37 @@ describe('background stream ownership', () => {
     await Promise.all([firstRequest, secondRequest]);
   });
 
-  it('forwards hidden conversation memory through the owning stream', async () => {
-    const memoryContext = { snapshot: 'PRIVATE_MEMORY_SENTINEL' };
+  it('forwards the hidden workspace bootstrap through the owning stream', async () => {
+    const workspaceContext = {
+      agentId: 'agent',
+      state: 'mounted',
+      identity: 'Private identity',
+      soul: null,
+      user: null,
+      agents: null,
+      memory: 'PRIVATE_MEMORY_SENTINEL',
+    };
     mocks.aiClient.streamChat.mockImplementationOnce(
-      async (_agent, _messages, _tab, callbacks, _streamId, suppliedMemoryContext) => {
-        expect(suppliedMemoryContext).toEqual(memoryContext);
-        callbacks.onMemoryContext(memoryContext);
+      async (_agent, _messages, _tab, callbacks, _streamId, suppliedWorkspaceContext) => {
+        expect(suppliedWorkspaceContext).toEqual(workspaceContext);
+        callbacks.onWorkspaceContext(workspaceContext);
         callbacks.onFinish('complete');
       }
     );
-    const port = createPort('ai-stream-memory-context');
+    const port = createPort('ai-stream-workspace-context');
     mocks.onConnect!(port.port);
 
     await port.send({
       type: 'STREAM_CHAT',
       agentId: 'agent',
       tabId: 1,
-      memoryContext,
+      workspaceContext,
       messages: [{ role: 'user', content: 'Hello' }],
     });
 
     expect(port.postMessage).toHaveBeenCalledWith({
-      type: 'STREAM_MEMORY_CONTEXT',
-      memoryContext,
+      type: 'STREAM_WORKSPACE_CONTEXT',
+      workspaceContext,
     });
     expect(port.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'STREAM_COMPLETE', fullResponse: 'complete' })
