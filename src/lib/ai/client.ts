@@ -8,18 +8,49 @@
 import { InvalidToolInputError, streamText } from 'ai';
 import type { CoreMessage } from 'ai';
 import { raceWithAbort } from '../abort';
-import type { AgentConfig } from '../storage/config';
-import type { ConversationWorkspaceContext, ToolCall } from '../../types';
+import type { AgentConfig, UserScript } from '../storage/config';
+import type { ConversationWorkspaceContext, ToolCall, ToolCallSource } from '../../types';
 import { ConfigStorage, ConfigValidationError, configValidationMessage } from '../storage/config';
 import { MAX_AUTOLOADED_MEMORY_BYTES } from '../memory/filesystem';
 import { MAX_WORKSPACE_BOOTSTRAP_BYTES } from '../workspace/context';
 import { getMemoryManager, MemoryMountError, type ResolvedMemory } from '../memory/manager';
 import { createMemoryTools } from '../memory/tools';
 import { composeSystemPrompt, formatMemoryContext } from './system-prompt';
-import { getToolRegistry } from '../webmcp/tool-registry';
+import { getToolRegistry, type ToolSourceType } from '../webmcp/tool-registry';
+import { parseUserScript } from '../webmcp/script-parser';
+import { COMPILED_TOOLS } from '../webmcp/tools';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
 import { decideStreamStop } from './stream-policy';
+
+const AGENTBOARD_WEBMCP_TOOL_NAMES = new Set(COMPILED_TOOLS.map(({ id }) => id));
+
+function enabledUserToolNames(scripts: readonly UserScript[]): Set<string> {
+  const names = new Set<string>();
+  for (const script of scripts) {
+    if (!script.enabled) continue;
+    try {
+      const { metadata } = parseUserScript(script.code, true);
+      names.add(`${metadata.namespace}_${metadata.name}`);
+    } catch {
+      // Invalid configured scripts cannot own a source label or block a request.
+    }
+  }
+  return names;
+}
+
+function displayToolSource(
+  toolName: string,
+  executionSource: ToolSourceType | undefined,
+  userToolNames: ReadonlySet<string>
+): ToolCallSource | undefined {
+  if (executionSource === 'remote') return 'mcp';
+  if (executionSource === 'system') return 'agentboard';
+  if (executionSource !== 'site') return undefined;
+  if (AGENTBOARD_WEBMCP_TOOL_NAMES.has(toolName)) return 'agentboard';
+  if (userToolNames.has(toolName)) return 'custom';
+  return 'webmcp';
+}
 
 interface APIError extends Error {
   statusCode?: number;
@@ -298,14 +329,32 @@ export class AIClient {
       const conversationWorkspaceContext = workspaceContext ?? capturedWorkspaceContext;
       if (!conversationWorkspaceContext) throw new Error('Workspace bootstrap was not initialized');
 
+      let userToolNames = new Set<string>();
+      try {
+        const scripts = await raceWithAbort(
+          this.configStorage.getUserScripts(),
+          pendingStream.controller.signal
+        );
+        userToolNames = enabledUserToolNames(scripts);
+      } catch (error) {
+        if (pendingStream.controller.signal.aborted) throw error;
+        // Source labels are informational; unavailable script metadata must not block chat.
+      }
+
       const runtime = createModelRuntime(agent);
       const toolRegistry = getToolRegistry();
       const toolSnapshot = toolRegistry.captureToolSnapshot(tabId);
       const memoryEnabled = memory.state === 'available';
-      const allTools = {
-        ...toolSnapshot.tools,
-        ...(memoryEnabled ? createMemoryTools(memory.filesystem, memory.authoritySignal) : {}),
-      };
+      const memoryTools = memoryEnabled
+        ? createMemoryTools(memory.filesystem, memory.authoritySignal)
+        : {};
+      const allTools = { ...toolSnapshot.tools, ...memoryTools };
+      const toolCallSources = new Map<string, ToolCallSource>();
+      for (const [name, executionSource] of toolSnapshot.toolSources) {
+        const source = displayToolSource(name, executionSource, userToolNames);
+        if (source) toolCallSources.set(name, source);
+      }
+      for (const name of Object.keys(memoryTools)) toolCallSources.set(name, 'agentboard');
       const mountedWorkspace =
         conversationWorkspaceContext.state === 'mounted' ? conversationWorkspaceContext : undefined;
       const conversation = mountedWorkspace
@@ -566,9 +615,11 @@ export class AIClient {
               }
 
               // Create structured tool call object
+              const source = toolCallSources.get(part.toolName);
               const toolCall: ToolCall = {
                 id: part.toolCallId,
                 toolName: part.toolName,
+                ...(source && { source }),
                 input: part.input,
                 status: 'running',
                 startTime: Date.now(),

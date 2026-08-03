@@ -40,11 +40,17 @@ export interface ToolWithMetadata {
   publicName?: string;
 }
 
-/** One synchronous stream snapshot keeps remote tools and instructions coherent. */
+/** One synchronous stream snapshot keeps tools, their execution source, and MCP context coherent. */
 export interface ToolSnapshot {
   tools: Record<string, AISDKTool>;
+  toolSources: ReadonlyMap<string, ToolSourceType>;
   remoteSession: RemoteMCPSession;
   mcpInstructions?: string;
+}
+
+interface ToolSelection {
+  tools: Record<string, AISDKTool>;
+  toolSources: Map<string, ToolSourceType>;
 }
 
 /**
@@ -184,10 +190,10 @@ export class ToolRegistryManager {
     }
   }
 
-  /** Collect and sort tools by specificity for deterministic model ordering. */
-  private getToolsSortedBySpecificity(
+  /** Select and sort tools with source metadata from the same winning candidates. */
+  private selectToolsBySpecificity(
     filter?: (name: string, meta: ToolWithMetadata) => boolean
-  ): Record<string, AISDKTool> {
+  ): ToolSelection {
     type Candidate = {
       name: string;
       tool: AISDKTool;
@@ -231,7 +237,10 @@ export class ToolRegistryManager {
 
     scored.sort((a, b) => b.score - a.score);
 
-    return Object.fromEntries(scored.map(({ name, tool }) => [name, tool]));
+    return {
+      tools: Object.fromEntries(scored.map(({ name, tool }) => [name, tool])),
+      toolSources: new Map(scored.map(({ name, meta }) => [name, meta.source])),
+    };
   }
 
   /**
@@ -239,7 +248,7 @@ export class ToolRegistryManager {
    * Ordered by specificity score (descending)
    */
   getAllTools(): Record<string, AISDKTool> {
-    return this.getToolsSortedBySpecificity();
+    return this.selectToolsBySpecificity().tools;
   }
 
   /**
@@ -251,25 +260,31 @@ export class ToolRegistryManager {
    * See tool-patterns.ts for scoring logic.
    */
   getToolsForTab(tabId: number): Record<string, AISDKTool> {
-    const tools = this.getToolsSortedBySpecificity(
+    return this.selectToolsForTab(tabId).tools;
+  }
+
+  private selectToolsForTab(tabId: number): ToolSelection {
+    const selection = this.selectToolsBySpecificity(
       (_, meta) =>
         meta.origin === `tab-${tabId}` || meta.source === 'remote' || meta.source === 'system'
     );
 
-    // Inject tab-bound system tools (ephemeral, created per-call with tabId)
+    // Tab-bound factories are extension-owned and overwrite any same-named selected page tool.
     for (const [name, factory] of this.tabBoundFactories) {
-      tools[name] = factory(tabId);
+      selection.tools[name] = factory(tabId);
+      selection.toolSources.set(name, 'system');
     }
 
-    return tools;
+    return selection;
   }
 
-  /** Capture tools and MCP instructions from the same published remote session. */
+  /** Capture each executable and source from one selection pass. */
   captureToolSnapshot(tabId?: number): ToolSnapshot {
     const remoteSession = this.remoteSession;
     const mcpInstructions = remoteSession.getMCPInstructions();
+    const selection = tabId ? this.selectToolsForTab(tabId) : this.selectToolsBySpecificity();
     return {
-      tools: tabId ? this.getToolsForTab(tabId) : this.getAllTools(),
+      ...selection,
       remoteSession,
       ...(mcpInstructions && { mcpInstructions }),
     };

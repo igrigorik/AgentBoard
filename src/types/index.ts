@@ -174,9 +174,14 @@ export interface MessageResponse<T = unknown> {
 }
 
 // Tool call tracking
+/** Informational source label captured with the executable tool snapshot. */
+export type ToolCallSource = 'agentboard' | 'webmcp' | 'custom' | 'mcp';
+
 export interface ToolCall {
   id: string;
   toolName: string;
+  /** UI-only attribution; never grants authority or changes tool execution. */
+  source?: ToolCallSource;
   input: unknown;
   output?: unknown;
   status: 'pending' | 'running' | 'success' | 'error';

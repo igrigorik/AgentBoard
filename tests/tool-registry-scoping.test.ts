@@ -274,6 +274,51 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(mockFactory).not.toHaveBeenCalled();
     });
 
+    it('captures the source of the exact selected tool and tab-bound factories', () => {
+      const pageTool = { execute: vi.fn() };
+      const shadowedPageTool = { execute: vi.fn() };
+      const systemTool = { execute: vi.fn() };
+      const remoteTool = { execute: vi.fn() };
+      const navigateTool = { execute: vi.fn() };
+
+      registry.addTool('page_context', {
+        tool: pageTool,
+        source: 'site',
+        origin: 'tab-100',
+      });
+      registry.addTool('shared_name', {
+        tool: shadowedPageTool,
+        source: 'site',
+        origin: 'tab-100',
+      });
+      registry.addTool('shared_name', {
+        tool: systemTool,
+        source: 'system',
+        origin: 'system',
+      });
+      registry.addTool('remote_search', {
+        tool: remoteTool,
+        source: 'remote',
+        origin: 'remote-server',
+      });
+      (registry as any).tabBoundFactories.set('agentboard_navigate', () => navigateTool);
+
+      const snapshot = registry.captureToolSnapshot(100);
+
+      expect(snapshot.tools).toMatchObject({
+        page_context: pageTool,
+        shared_name: systemTool,
+        remote_search: remoteTool,
+        agentboard_navigate: navigateTool,
+      });
+      expect(Object.fromEntries(snapshot.toolSources)).toEqual({
+        page_context: 'site',
+        shared_name: 'system',
+        remote_search: 'remote',
+        agentboard_navigate: 'system',
+      });
+    });
+
     it('should include remote MCP tools for all tabs', () => {
       const remoteTool = { execute: vi.fn() };
       const siteTool = { execute: vi.fn() };

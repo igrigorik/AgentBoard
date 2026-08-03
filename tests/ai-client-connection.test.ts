@@ -131,15 +131,20 @@ function finishedTextStream() {
 function toolRegistry(
   tools: Record<string, unknown> = {},
   session = remoteSession(),
-  mcpInstructions?: string
+  mcpInstructions?: string,
+  toolSources: ReadonlyMap<string, 'site' | 'remote' | 'system'> = new Map()
 ) {
   return {
-    captureToolSnapshot: () => ({ tools, remoteSession: session, mcpInstructions }),
+    captureToolSnapshot: () => ({ tools, toolSources, remoteSession: session, mcpInstructions }),
     onTabToolsChanged: () => () => undefined,
   };
 }
 
-function storeAgent(agentId: string, retiredSystemPrompt?: string): void {
+function storeAgent(
+  agentId: string,
+  retiredSystemPrompt?: string,
+  userScripts?: Array<{ id: string; code: string; enabled: boolean }>
+): void {
   vi.mocked(chrome.storage.local.get).mockResolvedValue({
     config: {
       schemaVersion: 2,
@@ -156,6 +161,7 @@ function storeAgent(agentId: string, retiredSystemPrompt?: string): void {
           temperature: 0.7,
         },
       ],
+      ...(userScripts && { userScripts }),
     },
   } as never);
 }
@@ -988,6 +994,78 @@ describe('AIClient connection testing', () => {
     active.reject(new DOMException('cancelled', 'AbortError'));
     await activeRequest;
     expect(activeOnAbort).toHaveBeenCalledTimes(1);
+  });
+
+  it('labels calls from the captured tool source without treating labels as authority', async () => {
+    const customScript = `'use webmcp-tool v1';
+export const metadata = {
+  name: 'find_context',
+  namespace: 'notes',
+  version: '1.0.0',
+  match: ['<all_urls>']
+};
+export function execute() { return {}; }`;
+    storeAgent('source-agent', undefined, [
+      { id: 'custom-script', code: customScript, enabled: true },
+    ]);
+    const memory = mountedMemory('# Memory');
+    mocks.resolveMemory.mockResolvedValue(memory.resolved);
+    const tools = {
+      agentboard_read_page: {},
+      page_search: {},
+      notes_find_context: {},
+      linear_search_issues: {},
+    };
+    const toolSources = new Map<string, 'site' | 'remote' | 'system'>([
+      ['agentboard_read_page', 'site'],
+      ['page_search', 'site'],
+      ['notes_find_context', 'site'],
+      ['linear_search_issues', 'remote'],
+    ]);
+    vi.mocked(getToolRegistry).mockReturnValue(
+      toolRegistry(tools, remoteSession(), undefined, toolSources) as never
+    );
+    mocks.streamText.mockReturnValue({
+      textStream: undefined,
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          for (const toolName of [
+            'agentboard_read_page',
+            'page_search',
+            'notes_find_context',
+            'linear_search_issues',
+            'agentboard_read_file',
+            'unknown_tool',
+          ]) {
+            yield {
+              type: 'tool-call',
+              toolCallId: `${toolName}-call`,
+              toolName,
+              input: {},
+            };
+          }
+          yield { type: 'finish', totalUsage: {} };
+        },
+      },
+    });
+    const onToolCall = vi.fn();
+
+    await AIClient.getInstance().streamChat(
+      'source-agent',
+      [{ role: 'user', content: 'Use the right tools' }],
+      undefined,
+      { onFinish: vi.fn(), onError: vi.fn(), onToolCall }
+    );
+
+    const calls = Object.fromEntries(
+      onToolCall.mock.calls.map(([call]) => [call.toolName, call])
+    ) as Record<string, { source?: string }>;
+    expect(calls.agentboard_read_page.source).toBe('agentboard');
+    expect(calls.page_search.source).toBe('webmcp');
+    expect(calls.notes_find_context.source).toBe('custom');
+    expect(calls.linear_search_issues.source).toBe('mcp');
+    expect(calls.agentboard_read_file.source).toBe('agentboard');
+    expect(calls.unknown_tool).not.toHaveProperty('source');
   });
 
   it('identifies invalid model arguments without exposing validation details', async () => {

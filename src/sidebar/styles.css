@@ -1116,6 +1116,59 @@ body {
   color: var(--text);
 }
 
+.tool-call-header > .tool-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-source-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 11%, transparent);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.tool-source-agentboard {
+  color: #0b7285;
+}
+
+.tool-source-webmcp {
+  color: #3d639b;
+}
+
+.tool-source-custom {
+  color: #805a14;
+}
+
+.tool-source-mcp {
+  color: #68458f;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tool-source-agentboard {
+    color: #63c7d4;
+  }
+
+  .tool-source-webmcp {
+    color: #8faee0;
+  }
+
+  .tool-source-custom {
+    color: #d7b36a;
+  }
+
+  .tool-source-mcp {
+    color: #b89bd6;
+  }
+}
+
 .duration-badge {
   font-size: 11px;
   color: var(--muted);

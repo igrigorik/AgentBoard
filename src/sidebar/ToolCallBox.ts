@@ -2,9 +2,16 @@
  * ToolCallBox Component - Collapsible UI for displaying tool calls
  */
 
-import type { ToolCall } from '../types';
+import type { ToolCall, ToolCallSource } from '../types';
 import JSONFormatter from 'json-formatter-js';
 import { CollapsibleBox } from './CollapsibleBox';
+
+const TOOL_SOURCE_LABELS: Record<ToolCallSource, string> = {
+  agentboard: 'AgentBoard',
+  webmcp: 'WebMCP',
+  custom: 'Custom',
+  mcp: 'MCP',
+};
 
 export class ToolCallBox extends CollapsibleBox {
   private detailsSection: HTMLDivElement | null = null;
@@ -23,6 +30,7 @@ export class ToolCallBox extends CollapsibleBox {
     this.container.className = 'tool-call-box';
     this.container.dataset.status = this.toolCall.status;
     this.container.dataset.toolId = this.toolCall.id;
+    if (this.toolCall.source) this.container.dataset.toolSource = this.toolCall.source;
 
     // Header (always visible)
     const header = this.createHeader();
@@ -48,6 +56,8 @@ export class ToolCallBox extends CollapsibleBox {
     toolName.className = 'tool-name';
     toolName.textContent = this.toolCall.toolName;
 
+    const sourceBadge = this.createSourceBadge();
+
     // Duration badge with status indicator (if completed)
     this.durationBadge = this.createDurationBadge();
 
@@ -56,6 +66,7 @@ export class ToolCallBox extends CollapsibleBox {
 
     header.appendChild(this.statusIcon);
     header.appendChild(toolName);
+    if (sourceBadge) header.appendChild(sourceBadge);
     if (this.durationBadge) {
       header.appendChild(this.durationBadge);
     }
@@ -66,6 +77,16 @@ export class ToolCallBox extends CollapsibleBox {
     this.initializeToggleHandler();
 
     return header;
+  }
+
+  private createSourceBadge(): HTMLSpanElement | null {
+    const source = this.toolCall.source;
+    if (!source) return null;
+
+    const badge = document.createElement('span');
+    badge.className = `tool-source-badge tool-source-${source}`;
+    badge.textContent = TOOL_SOURCE_LABELS[source];
+    return badge;
   }
 
   private createStatusIcon(): HTMLSpanElement {
