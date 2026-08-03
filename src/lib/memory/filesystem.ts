@@ -254,7 +254,8 @@ async function getFileHandle(
 }
 
 async function digest(bytes: ArrayBuffer): Promise<string> {
-  const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  // A view avoids realm-sensitive ArrayBuffer brand checks without copying the file bytes.
+  const hash = await globalThis.crypto.subtle.digest('SHA-256', new Uint8Array(bytes));
   return `sha256:${Array.from(new Uint8Array(hash), (byte) =>
     byte.toString(16).padStart(2, '0')
   ).join('')}`;

@@ -9,7 +9,7 @@ const executeTool = vi.fn();
 const mcpTool = {
   name: 'private_tool',
   description: 'Private tool',
-  inputSchema: { type: 'object', properties: {} },
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 } as MCPTool;
 
 const capability: RemoteMCPToolCapability = {
@@ -21,7 +21,7 @@ const session = { executeTool } as unknown as RemoteMCPSession;
 function convertedTool() {
   return convertMCPToAISDKTool(session, capability) as unknown as {
     execute: (
-      input: Record<string, never>,
+      input: Record<string, unknown>,
       context?: { abortSignal?: AbortSignal }
     ) => Promise<unknown>;
   };
@@ -30,6 +30,15 @@ function convertedTool() {
 describe('MCP tool privacy boundary', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('revalidates direct execute calls before contacting the MCP server', async () => {
+    const converted = convertedTool();
+
+    await expect(converted.execute({ unexpected: true })).rejects.toThrow(
+      'MCP tool execution failed'
+    );
+    expect(executeTool).not.toHaveBeenCalled();
   });
 
   it('converts protocol isError results into a fixed tool failure', async () => {

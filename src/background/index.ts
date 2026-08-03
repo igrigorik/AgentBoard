@@ -530,6 +530,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
           const currentTabRegistry = webmcp.getToolRegistry(tabId);
           if (currentTabRegistry) {
             for (const tool of currentTabRegistry.tools) {
+              if (!unifiedRegistry.hasSiteTool(tabId, tool.name)) continue;
               if (unifiedRegistry.isProtectedToolName(tool.name)) continue;
               toolsArray.push({
                 name: tool.name,
@@ -552,7 +553,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
             toolsArray.push({
               name,
               description: tool.description || 'No description available',
-              inputSchema: null, // MCP tools use Zod schemas, hard to convert back
+              inputSchema: null, // Unified tools may use non-JSON AI SDK schemas.
             });
           }
         }

@@ -19,6 +19,7 @@ import {
 } from '../mcp/manager';
 import { RESERVED_MEMORY_TOOL_NAMES } from '../memory/tool-names';
 import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
+import { InvalidToolInputSchemaError } from '../schema/tool-input-schema';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
 import { ConfigStorage, type StorageConfig } from '../storage/config';
 import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
@@ -274,6 +275,11 @@ export class ToolRegistryManager {
     };
   }
 
+  /** Whether this exact tab currently owns an accepted page-tool capability. */
+  hasSiteTool(tabId: number, name: string): boolean {
+    return this.tools.get(`tab-${tabId}\0${name}`)?.source === 'site';
+  }
+
   /** Whether a global system or configured remote capability owns this public name. */
   isProtectedToolName(name: string): boolean {
     const global = this.tools.get(name);
@@ -432,10 +438,20 @@ export class ToolRegistryManager {
 
     for (const capability of session.getToolCapabilities()) {
       const { serverName, tool: mcpTool } = capability;
+      let convertedTool: AISDKTool;
+      try {
+        convertedTool = convertMCPToAISDKTool(session, capability);
+      } catch (error) {
+        if (!(error instanceof InvalidToolInputSchemaError)) throw error;
+        // One malformed remote schema must not suppress unrelated capabilities or leak metadata.
+        log.warn('[ToolRegistry] Invalid remote MCP tool omitted');
+        continue;
+      }
+
       this.addTool(
         `${serverName}_${mcpTool.name}`,
         {
-          tool: convertMCPToAISDKTool(session, capability),
+          tool: convertedTool,
           source: 'remote',
           origin: serverName,
           description: mcpTool.description,
@@ -461,20 +477,26 @@ export class ToolRegistryManager {
       description?: string;
       inputSchema?: unknown;
       annotations?: Record<string, unknown>;
-    }>,
-    origin: string
+    }>
   ): void {
     // Remove existing tools from this tab (silent: notify once after new tools are in)
     this.removeToolsByOrigin(`tab-${tabId}`, { silent: true });
 
-    // Convert and add each WebMCP tool
+    // Convert and add each WebMCP tool without letting one malformed schema poison the snapshot.
     for (const webmcpTool of tools) {
-      const aiTool = convertWebMCPToAISDKTool(webmcpTool, tabId);
+      let convertedTool: AISDKTool;
+      try {
+        convertedTool = convertWebMCPToAISDKTool(webmcpTool, tabId);
+      } catch (error) {
+        if (!(error instanceof InvalidToolInputSchemaError)) throw error;
+        log.warn('[ToolRegistry] Invalid WebMCP tool omitted');
+        continue;
+      }
 
       this.addTool(
         webmcpTool.name,
         {
-          tool: aiTool,
+          tool: convertedTool,
           source: 'site',
           origin: `tab-${tabId}`,
           description: webmcpTool.description,
@@ -483,10 +505,7 @@ export class ToolRegistryManager {
       );
     }
 
-    log.warn(
-      `[ToolRegistry] Added ${tools.length} WebMCP tools from tab ${tabId} (${origin}):`,
-      tools.map((t) => t.name)
-    );
+    log.info('[ToolRegistry] WebMCP snapshot replaced');
 
     // Publish the replacement atomically instead of exposing partially rebuilt tool sets.
     this.notifyListeners();

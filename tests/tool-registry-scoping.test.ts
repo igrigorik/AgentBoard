@@ -406,6 +406,27 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(Object.keys(tools)).not.toContain('old_tool');
     });
 
+    it('omits one malformed schema without suppressing valid tools or notification', () => {
+      const listener = vi.fn();
+      registry.addListener(listener);
+
+      registry.updateWebMCPTools(100, [
+        { name: 'first_tool', description: 'First' },
+        {
+          name: 'malformed_tool',
+          description: 'Malformed',
+          inputSchema: { type: 'string' },
+        },
+        { name: 'second_tool', description: 'Second' },
+      ]);
+
+      expect(Object.keys(registry.getToolsForTab(100))).toEqual(['first_tool', 'second_tool']);
+      expect(registry.hasSiteTool(100, 'first_tool')).toBe(true);
+      expect(registry.hasSiteTool(100, 'malformed_tool')).toBe(false);
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(Object.keys(listener.mock.calls[0][0])).toEqual(['first_tool', 'second_tool']);
+    });
+
     it('should notify global listeners once with the complete replacement snapshot', () => {
       registry.addTool('old_tool', {
         tool: { execute: vi.fn() },
@@ -415,14 +436,10 @@ describe('ToolRegistryManager Tab Scoping', () => {
       const listener = vi.fn();
       registry.addListener(listener);
 
-      registry.updateWebMCPTools(
-        100,
-        [
-          { name: 'first_tool', description: 'First' },
-          { name: 'second_tool', description: 'Second' },
-        ],
-        'https://example.com'
-      );
+      registry.updateWebMCPTools(100, [
+        { name: 'first_tool', description: 'First' },
+        { name: 'second_tool', description: 'Second' },
+      ]);
 
       expect(listener).toHaveBeenCalledTimes(1);
       expect(Object.keys(listener.mock.calls[0][0])).toEqual(['first_tool', 'second_tool']);
@@ -505,11 +522,7 @@ describe('ToolRegistryManager Tab Scoping', () => {
       registry.onTabToolsChanged(100, callback);
 
       // updateWebMCPTools calls removeToolsByOrigin(silent) + addTool + notifyTabChange
-      registry.updateWebMCPTools(
-        100,
-        [{ name: 'new_tool', description: 'A new tool' }],
-        'https://example.com'
-      );
+      registry.updateWebMCPTools(100, [{ name: 'new_tool', description: 'A new tool' }]);
 
       // Fired exactly once: removeToolsByOrigin is silent, only the final notify fires
       expect(callback).toHaveBeenCalledTimes(1);

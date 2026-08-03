@@ -1,12 +1,13 @@
 // @vitest-environment node
 
-import { streamText, tool } from 'ai';
+import { streamText, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
 import { AIClient } from '../src/lib/ai/client';
 import { createModelRuntime } from '../src/lib/ai/model-runtime';
 import type { ApiProtocol } from '../src/lib/ai/protocol';
 import type { AgentConfig } from '../src/lib/storage/config';
+import { convertWebMCPToAISDKTool } from '../src/lib/webmcp/tool-bridge';
 import {
   eventSSE,
   sse,
@@ -32,6 +33,80 @@ const googleProbeJSONSchema = {
   type: 'object',
   properties: { value: { type: 'string' } },
 };
+
+const shopifyUpdateCartSchema = {
+  type: 'object',
+  required: ['cart'],
+  properties: {
+    cart: {
+      type: 'object',
+      required: ['line_items'],
+      properties: {
+        line_items: {
+          type: 'array',
+          description: 'Items to add or update (1-10).',
+          items: {
+            type: 'object',
+            properties: {
+              item: {
+                type: 'object',
+                description: 'The merchandise to add.',
+                properties: {
+                  id: { type: 'string', description: 'ProductVariant GID.' },
+                },
+              },
+              quantity: {
+                type: 'integer',
+                description: 'Quantity. Defaults to 1. Set 0 to remove.',
+                minimum: 0,
+                maximum: 100,
+                default: 1,
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+const shopifyShowVariantSchema = {
+  type: 'object',
+  required: ['catalog'],
+  properties: {
+    catalog: {
+      type: 'object',
+      description: 'Provide EITHER variant_id OR selected_options.',
+      properties: {
+        variant_id: {
+          type: ['string', 'number'],
+          description: 'ProductVariant GID or numeric variant ID.',
+        },
+      },
+    },
+  },
+};
+
+function shopifyWebMCPTools(): ToolSet {
+  return {
+    update_cart: convertWebMCPToAISDKTool(
+      {
+        name: 'update_cart',
+        description: 'Update the cart',
+        inputSchema: shopifyUpdateCartSchema,
+      },
+      100
+    ),
+    show_variant: convertWebMCPToAISDKTool(
+      {
+        name: 'show_variant',
+        description: 'Show a variant',
+        inputSchema: shopifyShowVariantSchema,
+      },
+      100
+    ),
+  };
+}
 
 const responseFixtures = {
   responses: [
@@ -142,7 +217,8 @@ async function captureWireRequest(
   apiProtocol: ApiProtocol,
   chunks: readonly string[],
   overrides: Partial<AgentConfig> = {},
-  pathPrefix = '/nested/v1/'
+  pathPrefix = '/nested/v1/',
+  tools: ToolSet = { probe: probeTool }
 ): Promise<CapturedWireRequest> {
   const server = await startAIWireServer({ chunks: [...chunks] });
   const controller = new AbortController();
@@ -159,7 +235,7 @@ async function captureWireRequest(
       maxOutputTokens: 32,
       maxRetries: 0,
       abortSignal: controller.signal,
-      tools: { probe: probeTool },
+      tools,
       toolChoice: 'auto',
       onError: ({ error }) => {
         streamErrors.push(error);
@@ -327,6 +403,138 @@ describe('AI provider wire contracts', () => {
         },
       ],
       toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+    });
+  });
+
+  it('preserves Shopify WebMCP schemas on the OpenAI Responses wire', async () => {
+    const request = await captureWireRequest(
+      'openai-responses',
+      responseFixtures.responses,
+      { provider: 'openai', model: 'gpt-5-wire' },
+      '/nested/v1/',
+      shopifyWebMCPTools()
+    );
+
+    expect(request.body).toMatchObject({
+      tools: [
+        { name: 'update_cart', parameters: shopifyUpdateCartSchema },
+        { name: 'show_variant', parameters: shopifyShowVariantSchema },
+      ],
+    });
+  });
+
+  it('preserves Shopify WebMCP schemas on the OpenAI Chat Completions wire', async () => {
+    const request = await captureWireRequest(
+      'openai-chat-completions',
+      responseFixtures.chat,
+      { provider: 'openai', model: 'gpt-4o-wire' },
+      '/nested/v1/',
+      shopifyWebMCPTools()
+    );
+
+    expect(request.body).toMatchObject({
+      tools: [
+        { function: { name: 'update_cart', parameters: shopifyUpdateCartSchema } },
+        { function: { name: 'show_variant', parameters: shopifyShowVariantSchema } },
+      ],
+    });
+  });
+
+  it('preserves Shopify WebMCP schemas on the Anthropic wire', async () => {
+    const request = await captureWireRequest(
+      'anthropic-messages',
+      responseFixtures.anthropic,
+      { provider: 'anthropic', model: 'claude-wire' },
+      '/nested/v1/',
+      shopifyWebMCPTools()
+    );
+
+    expect(request.body).toMatchObject({
+      tools: [
+        { name: 'update_cart', input_schema: shopifyUpdateCartSchema },
+        { name: 'show_variant', input_schema: shopifyShowVariantSchema },
+      ],
+    });
+  });
+
+  it('preserves Shopify-critical descriptions and union typing on the Google wire', async () => {
+    const request = await captureWireRequest(
+      'google-generative-ai',
+      responseFixtures.google,
+      { provider: 'google', model: 'gemini-wire' },
+      '/nested/v1/',
+      shopifyWebMCPTools()
+    );
+
+    expect(request.body).toMatchObject({
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: 'update_cart',
+              parameters: {
+                properties: {
+                  cart: {
+                    properties: {
+                      line_items: {
+                        description: 'Items to add or update (1-10).',
+                        items: {
+                          properties: {
+                            item: { description: 'The merchandise to add.' },
+                            quantity: {
+                              description: 'Quantity. Defaults to 1. Set 0 to remove.',
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              name: 'show_variant',
+              parameters: {
+                properties: {
+                  catalog: {
+                    description: 'Provide EITHER variant_id OR selected_options.',
+                    properties: {
+                      variant_id: {
+                        description: 'ProductVariant GID or numeric variant ID.',
+                        anyOf: [{ type: 'string' }, { type: 'number' }],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    // Google's current OpenAPI subset drops these keywords; local validation remains authoritative.
+    expect(request.body).not.toMatchObject({
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              parameters: {
+                properties: {
+                  cart: {
+                    properties: {
+                      line_items: {
+                        items: {
+                          properties: { quantity: { minimum: 0, maximum: 100, default: 1 } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
     });
   });
 

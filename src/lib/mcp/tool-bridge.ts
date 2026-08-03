@@ -3,13 +3,11 @@
  * Converts MCP tools to AI SDK format for use with streamText
  */
 
-import log from '../logger';
-import { tool } from 'ai';
-import { z } from 'zod';
-import { jsonSchemaToZod } from '../schema/jsonschema-to-zod';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { tool } from 'ai';
+import log from '../logger';
+import { prepareToolInputSchema, type ToolArguments } from '../schema/tool-input-schema';
 import type { RemoteMCPSession, RemoteMCPToolCapability } from './manager';
-import type { JSONSchema7 } from 'json-schema';
 
 /**
  * Convert an MCP tool to AI SDK tool format
@@ -20,30 +18,20 @@ export function convertMCPToAISDKTool(
 ) {
   const { tool: mcpTool } = capability;
 
-  // Convert the input schema
-  let zodSchema;
-  try {
-    zodSchema = mcpTool.inputSchema
-      ? jsonSchemaToZod(mcpTool.inputSchema as JSONSchema7)
-      : z.object({});
-  } catch (error) {
-    log.error(`Failed to convert schema for "${mcpTool.name}":`, error);
-    // Fallback to empty object schema
-    zodSchema = z.object({});
-  }
+  const preparedSchema = prepareToolInputSchema(mcpTool.inputSchema);
 
   const toolDefinition = {
     description: mcpTool.description || `Tool: ${mcpTool.name}`,
-    inputSchema: zodSchema,
-    execute: async (
-      args: z.infer<typeof zodSchema>,
-      { abortSignal }: { abortSignal?: AbortSignal } = {}
-    ) => {
-      // MCP protocol expects an object for arguments, even if empty.
-      const processedArgs = args === undefined || args === null ? {} : args;
-
+    inputSchema: preparedSchema.inputSchema,
+    execute: async (args: ToolArguments, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       try {
-        const result = await session.executeTool(capability, processedArgs, abortSignal);
+        // Keep the remote side-effect boundary independently fail-closed even if validation in the
+        // AI SDK call path is accidentally bypassed in a future refactor.
+        if (!preparedSchema.validateInput(args).success) {
+          throw new Error('MCP tool arguments are invalid');
+        }
+
+        const result = await session.executeTool(capability, args, abortSignal);
 
         // MCP uses a resolved isError result for semantic tool failures. Treat it
         // like a thrown failure before any server-supplied diagnostic can escape.

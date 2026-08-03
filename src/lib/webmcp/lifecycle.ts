@@ -370,7 +370,7 @@ export class TabManager {
 
     // Update unified registry with WebMCP tools
     const unifiedRegistry = getToolRegistry();
-    unifiedRegistry.updateWebMCPTools(tabId, registry.tools, registry.origin);
+    unifiedRegistry.updateWebMCPTools(tabId, registry.tools);
 
     // Resolve any pending tools/list requests for this tab
     const pending = this.pendingToolsRequests.get(tabId);

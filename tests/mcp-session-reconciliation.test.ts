@@ -274,6 +274,38 @@ describe('remote MCP registry snapshots', () => {
     await manager.disconnectAll();
   });
 
+  it('omits one malformed remote schema without suppressing valid capabilities', async () => {
+    const { manager, responses } = harness();
+    const alpha = config('alpha');
+    const status = connectedStatus('alpha');
+    status.tools = [
+      { name: 'first', inputSchema: { type: 'object' } },
+      {
+        name: 'malformed',
+        inputSchema: {
+          type: 'object',
+          properties: { value: { type: 'string', pattern: '^(a+)+$' } },
+        },
+      },
+      { name: 'second', inputSchema: { type: 'object' } },
+    ];
+    responses.set(alpha.mcpServers.alpha.url, status);
+    const registry = new ToolRegistryManager(manager);
+    const listener = vi.fn();
+    registry.addListener(listener);
+
+    await registry.loadRemoteTools(storageConfig(alpha));
+
+    const snapshot = registry.captureToolSnapshot(42);
+    expect(Object.keys(snapshot.tools)).toEqual(['alpha_first', 'alpha_second']);
+    expect(snapshot.remoteSession).toBe(manager.getCurrentSession());
+    expect(listener).toHaveBeenLastCalledWith(
+      expect.objectContaining({ alpha_first: expect.anything(), alpha_second: expect.anything() })
+    );
+    expect(listener.mock.calls.at(-1)?.[0]).not.toHaveProperty('alpha_malformed');
+    await manager.disconnectAll();
+  });
+
   it('clears the registry while a replacement connects, then publishes only the replacement', async () => {
     const { manager, responses } = harness();
     const alpha = config('alpha');
