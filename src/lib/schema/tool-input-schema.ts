@@ -1,4 +1,9 @@
-import { Validator, type Schema as CfWorkerSchema, type SchemaDraft } from '@cfworker/json-schema';
+import {
+  Validator,
+  type OutputUnit,
+  type Schema as CfWorkerSchema,
+  type SchemaDraft,
+} from '@cfworker/json-schema';
 import { jsonSchema, type Schema } from 'ai';
 import type { JSONSchema7 } from 'json-schema';
 
@@ -66,6 +71,37 @@ const MAX_INPUT_KEY_CHARS = 1_024;
 const MAX_ERROR_VALUE_BYTES = 512;
 const MAX_COMPOSITION_BRANCHES = 16;
 const MAX_VALIDATION_WORK = 4_096;
+/** One adjustable bound controls additional failure context sent to both the model and sidebar. */
+export const MAX_TOOL_VALIDATION_FEEDBACK_CHARS = 4 * 1_024;
+
+const TOOL_ARGUMENTS_SCHEMA_MISMATCH = 'Tool arguments do not match the declared schema';
+const VALIDATION_FEEDBACK_TRUNCATED = '[validation feedback truncated]';
+
+function toolValidationError(errors: readonly OutputUnit[]): Error {
+  if (errors.length === 0) return new Error(TOOL_ARGUMENTS_SCHEMA_MISMATCH);
+
+  const prefix = `${TOOL_ARGUMENTS_SCHEMA_MISMATCH}:`;
+  const lines = errors.map(
+    (error) => `\n- ${error.instanceLocation} [${error.keyword}]: ${error.error}`
+  );
+  const completeMessage = `${prefix}${lines.join('')}`;
+  if (completeMessage.length <= MAX_TOOL_VALIDATION_FEEDBACK_CHARS) {
+    return new Error(completeMessage);
+  }
+
+  const truncatedSuffix = `\n${VALIDATION_FEEDBACK_TRUNCATED}`;
+  let truncatedMessage = prefix;
+  for (const line of lines) {
+    if (
+      truncatedMessage.length + line.length + truncatedSuffix.length >
+      MAX_TOOL_VALIDATION_FEEDBACK_CHARS
+    ) {
+      break;
+    }
+    truncatedMessage += line;
+  }
+  return new Error(`${truncatedMessage}${truncatedSuffix}`);
+}
 
 export class InvalidToolInputSchemaError extends Error {
   constructor() {
@@ -428,15 +464,14 @@ export function prepareToolInputSchema(source: unknown): PreparedToolInputSchema
         maxKeyChars: MAX_INPUT_KEY_CHARS,
       });
       if (schemaNodes * inputNodes > MAX_VALIDATION_WORK) throw new Error();
-      if (!validator.validate(cloneWithoutPrototypes(value)).valid) throw new Error();
+      const validation = validator.validate(cloneWithoutPrototypes(value));
+      if (!validation.valid) {
+        return { success: false, error: toolValidationError(validation.errors) };
+      }
       return { success: true, value };
     } catch {
-      // AI SDK may echo model-generated input back to the model. Keep the validator-specific cause
-      // fixed so page, UI, and log boundaries never need to handle arbitrary validation details.
-      return {
-        success: false,
-        error: new Error('Tool arguments do not match the declared schema'),
-      };
+      // Structural and work-limit failures have no useful validator location to report.
+      return { success: false, error: new Error(TOOL_ARGUMENTS_SCHEMA_MISMATCH) };
     }
   };
 

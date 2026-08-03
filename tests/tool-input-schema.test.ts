@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { prepareToolInputSchema } from '../src/lib/schema/tool-input-schema';
+import {
+  MAX_TOOL_VALIDATION_FEEDBACK_CHARS,
+  prepareToolInputSchema,
+} from '../src/lib/schema/tool-input-schema';
 
 function deepFreeze(value: unknown): void {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
@@ -7,13 +10,16 @@ function deepFreeze(value: unknown): void {
   Object.freeze(value);
 }
 
-function expectInvalid(
-  result: ReturnType<ReturnType<typeof prepareToolInputSchema>['validateInput']>
-): void {
-  expect(result).toEqual({
-    success: false,
-    error: new Error('Tool arguments do not match the declared schema'),
-  });
+type ValidationResult = ReturnType<ReturnType<typeof prepareToolInputSchema>['validateInput']>;
+
+function invalidError(result: ValidationResult): Error {
+  expect(result.success).toBe(false);
+  if (result.success) throw new Error('Expected tool input validation to fail');
+  return result.error;
+}
+
+function expectInvalid(result: ValidationResult): void {
+  expect(invalidError(result).message).toContain('Tool arguments do not match the declared schema');
 }
 
 describe('tool input JSON Schema', () => {
@@ -98,6 +104,78 @@ describe('tool input JSON Schema', () => {
     expectInvalid(prepared.validateInput({ items: [{ id: 1, quantity: 0 }] }));
     expectInvalid(prepared.validateInput({ items: [{ id: 1, quantity: 2, secret: true }] }));
     expectInvalid(prepared.validateInput({ items: [] }));
+  });
+
+  it('returns every collected validator error in its original order', () => {
+    const prepared = prepareToolInputSchema({
+      type: 'object',
+      required: ['cart'],
+      properties: {
+        cart: {
+          type: 'object',
+          required: ['line_items'],
+          properties: {
+            line_items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { quantity: { type: 'integer' } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(
+      invalidError(
+        prepared.validateInput({
+          cart: { lineitems: { handle: 'verticalboard-first', quantity: 1 } },
+        })
+      ).message
+    ).toBe(
+      'Tool arguments do not match the declared schema:\n' +
+        '- # [properties]: Property "cart" does not match schema.\n' +
+        '- #/cart [required]: Instance does not have required property "line_items".'
+    );
+
+    expect(
+      invalidError(prepared.validateInput({ cart: { line_items: [{ quantity: '1' }] } })).message
+    ).toBe(
+      'Tool arguments do not match the declared schema:\n' +
+        '- # [properties]: Property "cart" does not match schema.\n' +
+        '- #/cart [properties]: Property "line_items" does not match schema.\n' +
+        '- #/cart/line_items [items]: Items did not match schema.\n' +
+        '- #/cart/line_items/0 [properties]: Property "quantity" does not match schema.\n' +
+        '- #/cart/line_items/0/quantity [type]: Instance type "string" is invalid. Expected "integer".'
+    );
+  });
+
+  it('preserves every error when the complete feedback fits just below the limit', () => {
+    const required = Array.from(
+      { length: 13 },
+      (_, index) => `required_${String(index).padStart(3, '0')}_${'x'.repeat(237)}`
+    );
+    const prepared = prepareToolInputSchema({ type: 'object', required });
+    const message = invalidError(prepared.validateInput({})).message;
+
+    expect(message.length).toBe(MAX_TOOL_VALIDATION_FEEDBACK_CHARS - 5);
+    expect(message).toContain(`required property "${required.at(-1)}"`);
+    expect(message).not.toContain('[validation feedback truncated]');
+  });
+
+  it('caps pathological validation feedback at the adjustable character limit', () => {
+    const required = Array.from(
+      { length: 100 },
+      (_, index) => `required_${String(index).padStart(3, '0')}_${'x'.repeat(40)}`
+    );
+    const prepared = prepareToolInputSchema({ type: 'object', required });
+    const message = invalidError(prepared.validateInput({})).message;
+
+    expect(message.length).toBeLessThanOrEqual(MAX_TOOL_VALIDATION_FEEDBACK_CHARS);
+    expect(message).toContain(`required property "${required[0]}"`);
+    expect(message).not.toContain(`required property "${required.at(-1)}"`);
+    expect(message.endsWith('[validation feedback truncated]')).toBe(true);
   });
 
   it('treats only an omitted schema as a strict no-parameter contract', () => {

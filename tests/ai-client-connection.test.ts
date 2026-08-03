@@ -1,3 +1,4 @@
+import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider';
 import type { CoreMessage } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -49,9 +50,10 @@ vi.mock('../src/lib/webmcp/tool-registry', () => ({
   getToolRegistry: vi.fn(),
 }));
 
-import { InvalidToolInputError } from 'ai';
+import { simulateReadableStream } from 'ai';
 import { AIClient } from '../src/lib/ai/client';
 import { MemoryMountError } from '../src/lib/memory/manager';
+import { prepareToolInputSchema } from '../src/lib/schema/tool-input-schema';
 import { getToolRegistry } from '../src/lib/webmcp/tool-registry';
 
 function textStream(read: () => Promise<ReadableStreamReadResult<string>>) {
@@ -1068,52 +1070,87 @@ export function execute() { return {}; }`;
     expect(calls.unknown_tool).not.toHaveProperty('source');
   });
 
-  it('identifies invalid model arguments without exposing validation details', async () => {
+  it('surfaces the real AI SDK validation cause without repeating its wrapper', async () => {
     storeAgent('invalid-tool-input-agent');
-    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({ private_tool: {} }) as never);
     const malformedInput = {
       maxLength: 100000,
       properties: { convertToMarkdown: { type: 'BOOLEAN' } },
     };
-    const validationSecret = 'secret validation internals';
-    const invalidInputError = new InvalidToolInputError({
-      toolName: 'private_tool',
-      toolInput: JSON.stringify(malformedInput),
-      cause: new Error(validationSecret),
+    const prepared = prepareToolInputSchema({
+      type: 'object',
+      properties: { maxLength: { type: 'number' } },
+      additionalProperties: false,
     });
-    mocks.streamText.mockReturnValue({
-      textStream: undefined,
-      fullStream: {
-        async *[Symbol.asyncIterator]() {
-          yield {
-            type: 'tool-call',
-            toolCallId: 'invalid-call',
-            toolName: 'private_tool',
-            input: malformedInput,
-            dynamic: true,
-            invalid: true,
-            error: invalidInputError,
-          };
-          yield {
-            type: 'tool-error',
-            toolCallId: 'invalid-call',
-            toolName: 'private_tool',
-            input: malformedInput,
-            dynamic: true,
-            error: invalidInputError.message,
-          };
+    const execute = vi.fn();
+    vi.mocked(getToolRegistry).mockReturnValue(
+      toolRegistry({
+        private_tool: {
+          description: 'Private tool',
+          inputSchema: prepared.inputSchema,
+          execute,
         },
+      }) as never
+    );
+
+    let invocation = 0;
+    const model = {
+      specificationVersion: 'v2' as const,
+      provider: 'test',
+      modelId: 'test',
+      supportedUrls: {},
+      doGenerate: vi.fn(),
+      doStream: async (_options: LanguageModelV2CallOptions) => {
+        invocation += 1;
+        const chunks: LanguageModelV2StreamPart[] =
+          invocation === 1
+            ? [
+                { type: 'stream-start', warnings: [] },
+                {
+                  type: 'tool-call',
+                  toolCallId: 'invalid-call',
+                  toolName: 'private_tool',
+                  input: JSON.stringify(malformedInput),
+                },
+                {
+                  type: 'finish',
+                  finishReason: 'tool-calls',
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                },
+              ]
+            : [
+                { type: 'stream-start', warnings: [] },
+                { type: 'text-start', id: 'text-1' },
+                { type: 'text-delta', id: 'text-1', delta: 'Corrected.' },
+                { type: 'text-end', id: 'text-1' },
+                {
+                  type: 'finish',
+                  finishReason: 'stop',
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                },
+              ];
+        return {
+          stream: simulateReadableStream({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
       },
-    });
+    };
+    mocks.openAIProvider.responses.mockReturnValueOnce(model as never);
+    const actualAI = await vi.importActual<typeof import('ai')>('ai');
+    mocks.streamText.mockImplementationOnce((options: Parameters<typeof actualAI.streamText>[0]) =>
+      actualAI.streamText(options)
+    );
     const onToolCall = vi.fn();
     const onToolResult = vi.fn();
 
-    await AIClient.getInstance().streamChat('invalid-tool-input-agent', [], undefined, {
-      onFinish: vi.fn(),
-      onError: vi.fn(),
-      onToolCall,
-      onToolResult,
-    });
+    await AIClient.getInstance().streamChat(
+      'invalid-tool-input-agent',
+      [{ role: 'user', content: 'Use the private tool' }],
+      undefined,
+      { onFinish: vi.fn(), onError: vi.fn(), onToolCall, onToolResult }
+    );
 
     expect(onToolCall).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1123,14 +1160,20 @@ export function execute() { return {}; }`;
         status: 'running',
       })
     );
-    expect(onToolResult).toHaveBeenCalledWith({
+    const feedback = onToolResult.mock.calls[0]?.[0];
+    expect(feedback).toMatchObject({
       id: 'invalid-call',
       output: null,
       status: 'error',
-      error: 'Invalid tool arguments',
     });
-    expect(JSON.stringify(onToolResult.mock.calls)).not.toContain(validationSecret);
-    expect(JSON.stringify(onToolResult.mock.calls)).not.toContain('Invalid input for tool');
+    expect(feedback.error).toContain('Tool arguments do not match the declared schema');
+    expect(feedback.error).toContain('# [additionalProperties]');
+    expect(feedback.error).toContain(
+      'Property "properties" does not match additional properties schema.'
+    );
+    expect(feedback.error).not.toContain('Invalid input for tool');
+    expect(feedback.error).not.toContain('Type validation failed');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('does not expose tool-error payloads to sidebar callbacks', async () => {

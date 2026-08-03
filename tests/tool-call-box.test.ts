@@ -69,4 +69,22 @@ describe('ToolCallBox source badge', () => {
       'chevron',
     ]);
   });
+
+  it('renders detailed validation feedback for a failed tool call', () => {
+    const box = new ToolCallBox({
+      id: 'call-3',
+      toolName: 'update_cart',
+      input: { cart: { lineitems: {} } },
+      status: 'running',
+      startTime: Date.now(),
+    });
+    const feedback =
+      'Tool arguments do not match the declared schema:\n' +
+      '- #/cart [required]: Instance does not have required property "line_items".';
+
+    box.updateResult(null, 'error', feedback);
+
+    const error = box.getElement().querySelector('.tool-section-error .tool-section-content');
+    expect(error?.textContent).toBe(feedback);
+  });
 });

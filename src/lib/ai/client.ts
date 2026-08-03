@@ -12,6 +12,7 @@ import type { AgentConfig, UserScript } from '../storage/config';
 import type { ConversationWorkspaceContext, ToolCall, ToolCallSource } from '../../types';
 import { ConfigStorage, ConfigValidationError, configValidationMessage } from '../storage/config';
 import { MAX_AUTOLOADED_MEMORY_BYTES } from '../memory/filesystem';
+import { MAX_TOOL_VALIDATION_FEEDBACK_CHARS } from '../schema/tool-input-schema';
 import { MAX_WORKSPACE_BOOTSTRAP_BYTES } from '../workspace/context';
 import { getMemoryManager, MemoryMountError, type ResolvedMemory } from '../memory/manager';
 import { createMemoryTools } from '../memory/tools';
@@ -91,6 +92,26 @@ async function* abortableAsyncIterable<T>(
       }
     }
   }
+}
+
+function errorMessage(value: unknown): string | undefined {
+  return value &&
+    typeof value === 'object' &&
+    typeof (value as { message?: unknown }).message === 'string'
+    ? (value as { message: string }).message
+    : undefined;
+}
+
+function invalidToolInputFeedback(error: InvalidToolInputError): string {
+  const sdkCause = (error as { cause?: unknown }).cause;
+  const validationCause =
+    sdkCause && typeof sdkCause === 'object' ? (sdkCause as { cause?: unknown }).cause : undefined;
+  const feedback =
+    errorMessage(validationCause) ?? errorMessage(sdkCause) ?? 'Invalid tool arguments';
+
+  if (feedback.length <= MAX_TOOL_VALIDATION_FEEDBACK_CHARS) return feedback;
+  const suffix = '\n[validation feedback truncated]';
+  return `${feedback.slice(0, MAX_TOOL_VALIDATION_FEEDBACK_CHARS - suffix.length)}${suffix}`;
 }
 
 /** Provider errors may contain prompts, generated text, headers, or proxy internals. */
@@ -466,9 +487,9 @@ export class AIClient {
         let isReasoning = false; // Track if we're currently in reasoning phase
         let currentReasoningId: string | undefined; // Track the current reasoning segment ID
         let reasoningTokens: number | undefined; // Track reasoning token usage
-        // AI SDK preserves the typed validation error on the invalid tool-call but
-        // flattens it before the matching tool-error, so retain only the call ID.
-        const invalidToolInputCallIds = new Set<string>();
+        // AI SDK preserves the typed validation cause on the invalid tool-call but
+        // flattens it before the matching tool-error, so retain its useful feedback by call ID.
+        const invalidToolInputFeedbackByCallId = new Map<string, string>();
 
         // Use fullStream for tools OR reasoning support
         if (hasTools || agent.reasoning?.enabled) {
@@ -611,7 +632,10 @@ export class AIClient {
               _fullText += chunk;
             } else if (part.type === 'tool-call') {
               if (part.invalid && InvalidToolInputError.isInstance(part.error)) {
-                invalidToolInputCallIds.add(part.toolCallId);
+                invalidToolInputFeedbackByCallId.set(
+                  part.toolCallId,
+                  invalidToolInputFeedback(part.error)
+                );
               }
 
               // Create structured tool call object
@@ -640,12 +664,13 @@ export class AIClient {
               }
               // The AI should continue generating text after tool results
             } else if (part.type === 'tool-error') {
-              const invalidToolInput = invalidToolInputCallIds.delete(part.toolCallId);
+              const validationFeedback = invalidToolInputFeedbackByCallId.get(part.toolCallId);
+              invalidToolInputFeedbackByCallId.delete(part.toolCallId);
               callbacks.onToolResult?.({
                 id: part.toolCallId,
                 output: null,
                 status: 'error',
-                error: invalidToolInput ? 'Invalid tool arguments' : 'Tool execution failed',
+                error: validationFeedback ?? 'Tool execution failed',
               });
             } else if (part.type === 'error') {
               throw part.error;

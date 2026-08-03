@@ -1,3 +1,4 @@
+import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider';
 import { InvalidToolInputError, simulateReadableStream, stepCountIs, streamText } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { convertWebMCPToAISDKTool } from '../src/lib/webmcp/tool-bridge';
@@ -88,32 +89,52 @@ describe('WebMCP Tool Bridge tab ownership', () => {
       callTool,
     } as unknown as ReturnType<typeof getTabManager>);
 
+    const prompts: unknown[] = [];
+    let invocation = 0;
     const model = {
       specificationVersion: 'v2' as const,
       provider: 'test',
       modelId: 'test',
       supportedUrls: {},
       doGenerate: vi.fn(),
-      doStream: async () => ({
-        stream: simulateReadableStream({
-          chunks: [
-            { type: 'stream-start' as const, warnings: [] },
-            {
-              type: 'tool-call' as const,
-              toolCallId: 'malformed-call',
-              toolName: readPageDescriptor.name,
-              input: JSON.stringify(malformedReadPageInput),
-            },
-            {
-              type: 'finish' as const,
-              finishReason: 'tool-calls' as const,
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            },
-          ],
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
-        }),
-      }),
+      doStream: async (options: LanguageModelV2CallOptions) => {
+        prompts.push(options.prompt);
+        invocation += 1;
+        const chunks: LanguageModelV2StreamPart[] =
+          invocation === 1
+            ? [
+                { type: 'stream-start' as const, warnings: [] },
+                {
+                  type: 'tool-call' as const,
+                  toolCallId: 'malformed-call',
+                  toolName: readPageDescriptor.name,
+                  input: JSON.stringify(malformedReadPageInput),
+                },
+                {
+                  type: 'finish' as const,
+                  finishReason: 'tool-calls' as const,
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                },
+              ]
+            : [
+                { type: 'stream-start' as const, warnings: [] },
+                { type: 'text-start' as const, id: 'text-1' },
+                { type: 'text-delta' as const, id: 'text-1', delta: 'Corrected.' },
+                { type: 'text-end' as const, id: 'text-1' },
+                {
+                  type: 'finish' as const,
+                  finishReason: 'stop' as const,
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                },
+              ];
+        return {
+          stream: simulateReadableStream({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
     };
 
     const result = streamText({
@@ -122,7 +143,7 @@ describe('WebMCP Tool Bridge tab ownership', () => {
       tools: {
         [readPageDescriptor.name]: convertWebMCPToAISDKTool(readPageDescriptor, 100),
       },
-      stopWhen: stepCountIs(1),
+      stopWhen: stepCountIs(2),
     });
     const parts = [];
     for await (const part of result.fullStream) parts.push(part);
@@ -137,6 +158,13 @@ describe('WebMCP Tool Bridge tab ownership', () => {
       invalidCall?.type === 'tool-call' && InvalidToolInputError.isInstance(invalidCall.error)
     ).toBe(true);
     expect(parts.some((part) => part.type === 'tool-error')).toBe(true);
+    expect(prompts).toHaveLength(2);
+    const continuationPrompt = JSON.stringify(prompts[1]);
+    expect(continuationPrompt).toContain('Tool arguments do not match the declared schema');
+    expect(continuationPrompt).toContain('# [additionalProperties]');
+    expect(continuationPrompt).toContain(
+      'Property \\"properties\\" does not match additional properties schema.'
+    );
     expect(getTabManager).not.toHaveBeenCalled();
     expect(callTool).not.toHaveBeenCalled();
   });
