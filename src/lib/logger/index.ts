@@ -1,41 +1,131 @@
 /**
- * Privacy-preserving application logger.
+ * Application logger.
  *
- * Callers may supply diagnostic context, but this boundary deliberately discards
- * it before reaching the browser console. Provider traffic, browser content,
- * credentials, configuration values, and arbitrary errors must never be logged.
+ * Normal levels emit fixed messages. DEBUG and TRACE retain sanitized call-site
+ * context so local DevTools can diagnose failures without exposing configured
+ * AI or MCP credentials.
  */
 
 import baseLogger from 'loglevel';
 import { parseStorageConfig, type LogLevel, type StorageConfig } from '../storage/config';
+import { redactDiagnosticString } from './redaction';
 
 const isTestEnvironment =
   (typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') ||
   (typeof globalThis !== 'undefined' && 'vitest' in globalThis);
 const DEFAULT_LOG_LEVEL: LogLevel = isTestEnvironment ? 'silent' : 'warn';
+const REDACTED_LOG_VALUE = '[REDACTED]';
+const CREDENTIAL_FIELDS =
+  /(?:api.?key|private.?key|authorization|token|cookie|password|secret|credential)$/i;
 
-function applyLogLevel(config: StorageConfig): void {
-  baseLogger.setLevel(config.logLevel ?? DEFAULT_LOG_LEVEL);
+let activeLogLevel: LogLevel = DEFAULT_LOG_LEVEL;
+let configuredSecrets: readonly string[] = [];
+
+function collectConfiguredSecrets(config: StorageConfig): readonly string[] {
+  return [
+    ...new Set(
+      [
+        ...config.agents.map((agent) => agent.apiKey),
+        ...Object.values(config.mcpConfig?.mcpServers ?? {}).map((server) => server.authToken),
+      ].filter((value): value is string => Boolean(value))
+    ),
+  ].sort((left, right) => right.length - left.length);
 }
 
-function rejectLogLevel(): void {
-  baseLogger.setLevel(DEFAULT_LOG_LEVEL);
-  console.error('[AgentBoard] Invalid logging configuration ignored');
+function setLogConfiguration(level: LogLevel, secrets: readonly string[]): void {
+  activeLogLevel = level;
+  configuredSecrets = secrets;
+  baseLogger.setLevel(level);
+}
+
+function resetLogConfiguration(): void {
+  setLogConfiguration(DEFAULT_LOG_LEVEL, []);
 }
 
 function applyStoredConfig(value: unknown): void {
   if (value === undefined) {
-    baseLogger.setLevel(DEFAULT_LOG_LEVEL);
+    resetLogConfiguration();
     return;
   }
   try {
     const parsed = parseStorageConfig(value);
     // ConfigStorage owns migration. Logger stays at its safe default until the
     // resulting durable v2 storage event arrives.
-    if (!parsed.migrated) applyLogLevel(parsed.config);
+    if (parsed.migrated) resetLogConfiguration();
+    else {
+      setLogConfiguration(
+        parsed.config.logLevel ?? DEFAULT_LOG_LEVEL,
+        collectConfiguredSecrets(parsed.config)
+      );
+    }
   } catch {
-    rejectLogLevel();
+    resetLogConfiguration();
+    console.error('[AgentBoard] Invalid logging configuration ignored');
   }
+}
+
+function sanitizeString(value: string): string {
+  let sanitized = value;
+  for (const secret of configuredSecrets) {
+    sanitized = sanitized.split(secret).join(REDACTED_LOG_VALUE);
+  }
+  return redactDiagnosticString(sanitized);
+}
+
+function isErrorLike(
+  value: unknown
+): value is { name?: unknown; message: string; stack?: unknown } {
+  if (!value || typeof value !== 'object') return false;
+  try {
+    const candidate = value as { message?: unknown; name?: unknown; stack?: unknown };
+    return (
+      typeof candidate.message === 'string' &&
+      (typeof candidate.name === 'string' || typeof candidate.stack === 'string')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeError(error: { name?: unknown; message: string; stack?: unknown }): object {
+  return {
+    ...(typeof error.name === 'string' && { name: sanitizeString(error.name) }),
+    message: sanitizeString(error.message),
+    ...(typeof error.stack === 'string' && { stack: sanitizeString(error.stack) }),
+  };
+}
+
+function sanitizeValue(value: unknown): unknown {
+  if (typeof value === 'string') return sanitizeString(value);
+  if (isErrorLike(value)) return sanitizeError(value);
+  if (!value || typeof value !== 'object') return value;
+
+  const seen = new WeakSet<object>();
+  try {
+    const json = JSON.stringify(value, (key, current: unknown) => {
+      if (key && CREDENTIAL_FIELDS.test(key.replaceAll('-', '').replaceAll('_', ''))) {
+        return REDACTED_LOG_VALUE;
+      }
+      if (typeof current === 'string') return sanitizeString(current);
+      if (typeof current === 'bigint') return `${current}n`;
+      if (isErrorLike(current)) return sanitizeError(current);
+      if (current && typeof current === 'object') {
+        if (seen.has(current)) return '[Circular]';
+        seen.add(current);
+      }
+      return current;
+    });
+    return json === undefined ? '[Unserializable context]' : JSON.parse(json);
+  } catch {
+    return '[Unserializable context]';
+  }
+}
+
+function contextualArguments(context: unknown[], fallback: string): unknown[] {
+  const detailed = activeLogLevel === 'debug' || activeLogLevel === 'trace';
+  return detailed && context.length > 0
+    ? ['[AgentBoard]', ...context.map(sanitizeValue)]
+    : [fallback];
 }
 
 baseLogger.setLevel(DEFAULT_LOG_LEVEL);
@@ -56,24 +146,25 @@ if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
   });
 }
 
-type SafeLogMethod = (...discardedContext: unknown[]) => void;
+type LogMethod = (...context: unknown[]) => void;
 
-/**
- * Fixed messages preserve severity and event counts without allowing call-site
- * values to escape into extension/page consoles.
- */
 const log: Readonly<{
-  trace: SafeLogMethod;
-  debug: SafeLogMethod;
-  info: SafeLogMethod;
-  warn: SafeLogMethod;
-  error: SafeLogMethod;
+  trace: LogMethod;
+  debug: LogMethod;
+  info: LogMethod;
+  warn: LogMethod;
+  error: LogMethod;
 }> = Object.freeze({
-  trace: () => baseLogger.trace('[AgentBoard] Trace event'),
-  debug: () => baseLogger.debug('[AgentBoard] Debug event'),
-  info: () => baseLogger.info('[AgentBoard] Information event'),
-  warn: () => baseLogger.warn('[AgentBoard] Warning event'),
-  error: () => baseLogger.error('[AgentBoard] Operation failed'),
+  trace: (...context) =>
+    baseLogger.trace(...contextualArguments(context, '[AgentBoard] Trace event')),
+  debug: (...context) =>
+    baseLogger.debug(...contextualArguments(context, '[AgentBoard] Debug event')),
+  info: (...context) =>
+    baseLogger.info(...contextualArguments(context, '[AgentBoard] Information event')),
+  warn: (...context) =>
+    baseLogger.warn(...contextualArguments(context, '[AgentBoard] Warning event')),
+  error: (...context) =>
+    baseLogger.error(...contextualArguments(context, '[AgentBoard] Operation failed')),
 });
 
 export default log;

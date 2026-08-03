@@ -72,10 +72,9 @@ describe('privacy-preserving logger boundary', () => {
     info.mockRestore();
   });
 
-  it('keeps page-facing console diagnostics to one fixed literal', () => {
+  it('keeps non-relay page-facing console diagnostics to one fixed literal', () => {
     const files = [
       'src/content-scripts/page-bridge.js',
-      'src/content-scripts/relay.js',
       'src/content-scripts/webmcp-polyfill.js',
       'src/lib/webmcp/script-injector.ts',
     ];

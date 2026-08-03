@@ -551,6 +551,13 @@ async function main() {
           ),
         'WebMCP fixture tab ID'
       );
+      assert.equal(
+        await evaluate(
+          `chrome.scripting.executeScript({ target: { tabId: ${fixtureTabId} }, files: ['content-scripts/relay.js'] }).then(() => true, () => false)`
+        ),
+        true,
+        'the built classic relay must remain safe to inject twice in one document'
+      );
       const pageTools = await waitFor(
         () =>
           evaluate(

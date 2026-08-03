@@ -1,3 +1,7 @@
+// Keep a private module identity so Rollup inlines this dependency: Chrome injects
+// the built relay as a classic script, which cannot retain an ESM import.
+import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';
+
 /**
  * WebMCP Content Script Relay (Isolated World)
  * Relays messages between page MAIN world and extension background
@@ -12,35 +16,60 @@
   if (existingRelay && !existingRelay.isShutdown) return;
 
   /**
-   * Inline logger that respects user's log level configuration
+   * Inline logger that respects user's log level configuration.
    *
-   * Strategy: Content scripts run in isolated context and can't import ES modules,
-   * so this lightweight logger asks the background's validated storage boundary for
-   * configuration. It never trusts a partial chrome.storage record directly.
+   * The stateful application logger does not belong in this isolated content
+   * script; only its pure redaction helper is shared. DEBUG and TRACE retain local
+   * context, while lower levels continue to emit fixed messages.
    */
   const logger = (() => {
     const levels = { silent: 0, error: 1, warn: 2, info: 3, debug: 4, trace: 5 };
     let currentLevel = levels.warn; // Default: warn
+    let levelGeneration = 0;
 
-    const setLevel = (level) => {
+    const applyLevel = (level) => {
       const nextLevel = levels[level];
       currentLevel = nextLevel === undefined ? levels.warn : nextLevel;
     };
+    const setLevel = (level) => {
+      levelGeneration++;
+      applyLevel(level);
+    };
     const refreshLevel = () => {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+      const generation = ++levelGeneration;
       chrome.runtime.sendMessage({ type: 'GET_LOG_LEVEL' }, (response) => {
-        if (chrome.runtime.lastError) return;
-        setLevel(response?.logLevel);
+        if (chrome.runtime.lastError || generation !== levelGeneration) return;
+        applyLevel(response?.logLevel);
       });
     };
+    const sanitizeValue = (value) => {
+      if (typeof value === 'string') return redactDiagnosticString(value);
+      if (!value || typeof value !== 'object') return value;
+      if (typeof value.message !== 'string') return '[Object]';
+      return {
+        ...(typeof value.name === 'string' && { name: redactDiagnosticString(value.name) }),
+        message: redactDiagnosticString(value.message),
+        ...(typeof value.stack === 'string' && { stack: redactDiagnosticString(value.stack) }),
+      };
+    };
+    const contextual = (context, fallback) =>
+      currentLevel >= levels.debug && context.length > 0
+        ? ['[AgentBoard]', ...context.map((value) => sanitizeValue(value))]
+        : [fallback];
 
-    // Never forward caller values: relay messages and errors can contain page data.
     return {
       refresh: refreshLevel,
       setLevel,
-      log: () => currentLevel >= levels.info && console.log('[AgentBoard] Relay event'),
-      warn: () => currentLevel >= levels.warn && console.warn('[AgentBoard] Relay warning'),
-      error: () => currentLevel >= levels.error && console.error('[AgentBoard] Relay failure'),
+      log: (...context) =>
+        currentLevel >= levels.info &&
+        console.log(...contextual(context, '[AgentBoard] Relay event')),
+      warn: (...context) =>
+        currentLevel >= levels.warn &&
+        console.warn(...contextual(context, '[AgentBoard] Relay warning')),
+      error: (...context) =>
+        currentLevel >= levels.error &&
+        console.error(...contextual(context, '[AgentBoard] Relay failure')),
     };
   })();
 

@@ -127,9 +127,10 @@
               <option value="silent">SILENT - No application or relay logs</option>
             </select>
             <span class="field-hint"
-              >Controls application and relay diagnostics, which discard caller values. Generated
-              page-tool registration wrappers and browser/provider code log independently and may
-              include their own errors.</span
+              >DEBUG and TRACE include local context that may contain sensitive application, page,
+              and tool data. Basic credential sanitization is applied, but review logs before
+              sharing them externally. Other levels discard caller values. Generated page-tool
+              wrappers and browser/provider code log independently.</span
             >
           </div>
 

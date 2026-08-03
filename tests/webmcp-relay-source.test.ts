@@ -2,8 +2,12 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { redactDiagnosticString } from '../src/lib/logger/redaction';
 
-const relaySource = readFileSync(resolve('src/content-scripts/relay.js'), 'utf8');
+const relaySource = readFileSync(resolve('src/content-scripts/relay.js'), 'utf8').replace(
+  "import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';\n\n",
+  ''
+);
 
 type RelayBridge = {
   isShutdown: boolean;
@@ -63,7 +67,7 @@ function createHarness() {
 }
 
 function inject(window: RelayWindow): void {
-  window.eval(relaySource);
+  window.eval(`${redactDiagnosticString.toString()}\n${relaySource}`);
 }
 
 describe('real WebMCP relay source', () => {
@@ -154,6 +158,87 @@ describe('real WebMCP relay source', () => {
 
     expect(consoleLog).toHaveBeenCalledWith('[AgentBoard] Relay event');
     expect(consoleLog.mock.calls.flat().map(String).join('\n')).not.toContain('secret page method');
+  });
+
+  it('does not let a stale level read overwrite a newer pushed level', () => {
+    let finishRefresh!: (response: { logLevel: string }) => void;
+    harness.chromeHarness.runtime.sendMessage.mockImplementation((_request, callback) => {
+      finishRefresh = callback;
+    });
+    const consoleLog = vi.spyOn(harness.window.console, 'log').mockImplementation(() => {});
+    inject(harness.window);
+    const portMessage = [...harness.portMessages.listeners][0];
+
+    portMessage({ type: 'RELAY_LOG_LEVEL', logLevel: 'info' });
+    finishRefresh({ logLevel: 'debug' });
+    harness.window.__webmcpRelayBridge!.onPageMessage({
+      source: harness.window,
+      data: {
+        source: 'webmcp-main',
+        jsonrpc: '2.0',
+        method: 'private page method',
+      },
+    });
+
+    expect(consoleLog).toHaveBeenCalledWith('[AgentBoard] Relay event');
+    expect(JSON.stringify(consoleLog.mock.calls)).not.toContain('private page method');
+  });
+
+  it('retains sanitized relay context at debug level', () => {
+    const consoleLog = vi.spyOn(harness.window.console, 'log').mockImplementation(() => {});
+    const consoleError = vi.spyOn(harness.window.console, 'error').mockImplementation(() => {});
+    inject(harness.window);
+    const portMessage = [...harness.portMessages.listeners][0];
+    portMessage({ type: 'RELAY_LOG_LEVEL', logLevel: 'debug' });
+    consoleLog.mockClear();
+    consoleError.mockClear();
+
+    harness.window.__webmcpRelayBridge!.onPageMessage({
+      source: harness.window,
+      data: {
+        source: 'webmcp-main',
+        jsonrpc: '2.0',
+        method: 'tools/listChanged',
+      },
+    });
+
+    expect(consoleLog).toHaveBeenCalledWith(
+      '[AgentBoard]',
+      '[WebMCP Relay] Forwarded to background:',
+      'tools/listChanged'
+    );
+
+    const pageCredential = 'page-object-credential';
+    harness.window.__webmcpRelayBridge!.onPageMessage({
+      source: harness.window,
+      data: {
+        source: 'webmcp-main',
+        jsonrpc: '2.0',
+        method: { apiKey: pageCredential },
+      },
+    });
+    expect(JSON.stringify(consoleLog.mock.calls)).toContain('[Object]');
+    expect(JSON.stringify(consoleLog.mock.calls)).not.toContain(pageCredential);
+
+    const credential = 'sk-relay-credential-123456';
+    const plainSecret = 'plain-relay-secret';
+    harness.port.postMessage.mockImplementationOnce(() => {
+      throw new Error(`{"client_secret":"${plainSecret}"} Basic ${credential}`);
+    });
+    harness.window.__webmcpRelayBridge!.onPageMessage({
+      source: harness.window,
+      data: {
+        source: 'webmcp-main',
+        jsonrpc: '2.0',
+        method: 'tools/call',
+      },
+    });
+
+    const renderedError = JSON.stringify(consoleError.mock.calls);
+    expect(renderedError).toContain('[WebMCP Relay] Failed to send message:');
+    expect(renderedError).toContain('[REDACTED]');
+    expect(renderedError).not.toContain(credential);
+    expect(renderedError).not.toContain(plainSecret);
   });
 
   it('disposes its document listener before replacing a shut-down relay', () => {
