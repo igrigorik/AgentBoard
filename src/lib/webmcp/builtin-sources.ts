@@ -3681,7 +3681,7 @@ function parseTranscriptJson(data) {
  * System Tool: URL Fetch for LLM Research
  *
  * Executes in background service worker to avoid CORS restrictions.
- * Provides raw content by default, optional markdown conversion via linkedom + Readability.
+ * Returns structured HTTP status metadata with raw content or optional markdown extraction.
  *
  * Pre-converted to AI SDK format for direct use in tool registry.
  */
@@ -3697,7 +3697,8 @@ export const FETCH_URL_TOOL_NAME = 'agentboard_fetch_url';
 const TOOL_VERSION = '1.0.0';
 const TOOL_DESCRIPTION =
   'Fetch content from external URLs. For the current page, prefer site-specific tools instead. ' +
-  'Returns raw content or optionally converts HTML to clean markdown.';
+  'Returns a structured result with HTTP status metadata plus raw content, or clean markdown when requested. ' +
+  'Non-2xx responses still return any available content.';
 
 const PARAM_DESCRIPTIONS = {
   url: 'URL to fetch (supports HTTPS URLs, including private IPs, and HTTP localhost URLs)',
@@ -3715,16 +3716,24 @@ const fetchUrlSchema = z.object({
   convertToMarkdown: z.boolean().optional().describe(PARAM_DESCRIPTIONS.convertToMarkdown),
 });
 
+export const fetchUrlOutputSchema = z.object({
+  status: z.number().int().min(0).max(999).describe('HTTP response status code'),
+  statusText: z.string().optional().describe('HTTP response reason phrase when available'),
+  content: z.string().describe('Raw response body or extracted markdown'),
+});
+
+export type FetchUrlResult = z.infer<typeof fetchUrlOutputSchema>;
+
 /**
  * Execute fetch URL operation
  */
 async function executeFetchUrl(
   args: z.infer<typeof fetchUrlSchema>,
   { abortSignal }: { abortSignal?: AbortSignal } = {}
-): Promise<string> {
+): Promise<FetchUrlResult> {
   const { url, convertToMarkdown: shouldConvert } = args;
 
-  log.debug('[fetch_url] Fetching:', url, {
+  log.debug('[fetch_url] Fetching', {
     convertToMarkdown: shouldConvert,
   });
 
@@ -3759,26 +3768,27 @@ async function executeFetchUrl(
       },
     });
 
-    if (!response.ok) {
-      throw new Error(\`HTTP \${response.status}: \${response.statusText} (\${url})\`);
-    }
-
-    // Get content as text (works for HTML, JSON, XML, plain text)
-    const content = await response.text();
+    // A completed HTTP response is evidence, even when its status is non-2xx.
+    abortSignal?.throwIfAborted();
+    const content = await raceWithAbort(response.text(), abortSignal);
+    abortSignal?.throwIfAborted();
 
     log.debug('[fetch_url] Fetched', content.length, 'bytes');
 
-    // Return raw content unless markdown conversion requested
-    if (!shouldConvert) {
-      return content;
+    let result = content;
+    if (shouldConvert && content.length > 0) {
+      log.debug('[fetch_url] Converting to markdown');
+      result = convertToMarkdown(content, { url });
+      log.debug('[fetch_url] Converted to', result.length, 'characters');
     }
 
-    // Convert to markdown using extraction pipeline
-    log.debug('[fetch_url] Converting to markdown');
-    const markdown = convertToMarkdown(content, { url });
-
-    log.debug('[fetch_url] Converted to', markdown.length, 'characters');
-    return markdown;
+    abortSignal?.throwIfAborted();
+    const statusText = response.statusText.trim();
+    return {
+      status: response.status,
+      ...(statusText && { statusText }),
+      content: result,
+    };
   } catch {
     log.error('[fetch_url] Request failed');
     throw new Error('URL fetch failed');
@@ -3792,6 +3802,7 @@ async function executeFetchUrl(
 export const fetchUrlTool = tool({
   description: TOOL_DESCRIPTION,
   inputSchema: fetchUrlSchema,
+  outputSchema: fetchUrlOutputSchema,
   execute: executeFetchUrl,
 });
 
