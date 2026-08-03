@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { CdpPipe, findChrome, waitFor } from './chrome-harness.mjs';
+import { CdpPipe, chromeSandboxArgs, findChrome, waitFor } from './chrome-harness.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const harnessPath = path.join(repositoryRoot, 'tests/browser/read-page.html');
@@ -65,6 +65,7 @@ async function readResults(chrome, profileDirectory, harnessUrl) {
     chrome,
     [
       '--headless=new',
+      ...chromeSandboxArgs(),
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',

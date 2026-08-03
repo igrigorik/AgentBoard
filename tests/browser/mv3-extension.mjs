@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CdpPipe, findChrome, waitFor } from './chrome-harness.mjs';
+import { CdpPipe, chromeSandboxArgs, findChrome, waitFor } from './chrome-harness.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = path.join(repositoryRoot, 'dist');
@@ -187,6 +187,7 @@ async function main() {
     chrome,
     [
       '--headless=new',
+      ...chromeSandboxArgs(),
       '--disable-background-networking',
       '--disable-breakpad',
       '--disable-component-update',

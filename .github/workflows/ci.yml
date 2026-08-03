@@ -54,7 +54,7 @@ jobs:
       - name: Setup Chrome for Testing
         if: matrix.node-version == '22.x'
         id: setup-chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: stable
 
@@ -63,12 +63,15 @@ jobs:
         run: pnpm run test:browser:built
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          # The downloaded Linux binary has no usable SUID or user-namespace sandbox.
+          AGENTBOARD_CHROME_NO_SANDBOX: '1'
 
       - name: Run built MV3 extension browser tests
         if: matrix.node-version == '22.x'
         run: pnpm run test:browser:mv3:built
         env:
           CHROME_FOR_TESTING_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          AGENTBOARD_CHROME_NO_SANDBOX: '1'
 
       # Optional: Upload build artifacts for debugging
       - name: Upload build artifacts

@@ -3,6 +3,12 @@ import path from 'node:path';
 
 const defaultTimeoutMs = 20_000;
 
+export function chromeSandboxArgs() {
+  // Keep local runs sandboxed; isolated CI must opt out explicitly when its
+  // downloaded Chrome has no usable SUID or user-namespace sandbox.
+  return process.env.AGENTBOARD_CHROME_NO_SANDBOX === '1' ? ['--no-sandbox'] : [];
+}
+
 export function findChrome({ forExtension = false } = {}) {
   const chrome = [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
