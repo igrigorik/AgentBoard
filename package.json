@@ -52,6 +52,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@ai-sdk/provider": "2.0.3",
     "@crxjs/vite-plugin": "^2.4.0",
     "@eslint/js": "^9.39.4",
     "@types/chrome": "^0.0.286",
