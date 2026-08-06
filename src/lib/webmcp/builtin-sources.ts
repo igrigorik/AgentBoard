@@ -3499,45 +3499,45 @@ export async function execute(args = {}) {
 `,
   agentboard_youtube_transcript: `'use webmcp-tool v1';
 
+const YOUTUBE_ORIGIN = 'https://www.youtube.com';
+const TRANSCRIPT_PANEL_TARGET = 'engagement-panel-searchable-transcript';
+const TRANSCRIPT_LOAD_TIMEOUT_MS = 5_000;
+
+let transcriptPanelLoad = null;
+
 export const metadata = {
   name: 'youtube_transcript',
   namespace: 'agentboard',
-  version: '1.0.0',
-  description: "Get the current YouTube video's transcript with timestamps and metadata.",
+  version: '1.0.1',
+  description:
+    "Get the current YouTube video's transcript with timestamps and metadata. Retrieval may briefly open and close YouTube's transcript panel.",
   match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
   inputSchema: {
     type: 'object',
     properties: {
       language: {
         type: 'string',
-        description: 'Preferred language code (e.g., "en", "es"). Defaults to English or first available.'
+        description:
+          'Preferred language code (e.g., "en", "es"). Defaults to English or first available.',
       },
       format: {
         type: 'string',
         enum: ['segments', 'text'],
-        description: '"segments" returns timestamped array, "text" returns concatenated plain text. Default: "segments"'
-      }
+        description:
+          '"segments" returns timestamped array, "text" returns concatenated plain text. Default: "segments"',
+      },
     },
-    additionalProperties: false
-  }
+    additionalProperties: false,
+  },
 };
 
 export async function execute(args = {}) {
-  const videoId = new URL(window.location.href).searchParams.get('v');
+  const videoId = currentVideoId();
   if (!videoId) {
     throw new Error('Not on a YouTube video page (no video ID found)');
   }
 
-  // Always fetch fresh playerResponse via Innertube API.
-  // We can't use window.ytInitialPlayerResponse because the caption URLs
-  // contain signatures and expiry timestamps that become stale.
-  const playerResponse = await fetchPlayerResponseViaInnertube(videoId);
-
-  if (!playerResponse) {
-    throw new Error('Could not retrieve video data from YouTube');
-  }
-
-  // Extract video metadata
+  const playerResponse = resolvePlayerResponse(videoId);
   const videoDetails = playerResponse.videoDetails || {};
   const metadata = {
     videoId,
@@ -3548,56 +3548,51 @@ export async function execute(args = {}) {
     viewCount: parseInt(videoDetails.viewCount, 10) || 0,
     description: videoDetails.shortDescription || '',
     keywords: videoDetails.keywords || [],
-    isLive: videoDetails.isLiveContent || false
+    isLive: videoDetails.isLiveContent || false,
   };
 
-  // Extract caption tracks
   const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!captionTracks?.length) {
-    // Return metadata even if no captions available
     return {
       metadata,
       transcript: null,
-      error: 'No captions available for this video'
+      error: 'No captions available for this video',
     };
   }
 
-  // Prefer manual captions over auto-generated (ASR)
-  // Manual captions don't have 'kind' field, auto-generated have kind: 'asr'
-  const manualTracks = captionTracks.filter(t => !t.kind);
+  // Prefer manual captions over auto-generated (ASR) captions.
+  const manualTracks = captionTracks.filter((track) => !track.kind);
   const tracksToSearch = manualTracks.length > 0 ? manualTracks : captionTracks;
-
-  // Select language: prefer requested, then English, then first available
-  const preferredLang = args.language || 'en';
+  const preferredLanguage = args.language || 'en';
   const selectedTrack =
-    tracksToSearch.find(t => t.languageCode === preferredLang) ||
-    tracksToSearch.find(t => t.languageCode.startsWith(preferredLang)) ||
-    tracksToSearch.find(t => t.languageCode.startsWith('en')) ||
+    tracksToSearch.find((track) => track.languageCode === preferredLanguage) ||
+    tracksToSearch.find((track) => track.languageCode.startsWith(preferredLanguage)) ||
+    tracksToSearch.find((track) => track.languageCode.startsWith('en')) ||
     tracksToSearch[0];
 
-  // Fetch transcript as JSON (fmt=json3) to avoid XML parsing and Trusted Types CSP issues
-  const jsonUrl = selectedTrack.baseUrl + '&fmt=json3';
-  const transcriptResponse = await fetch(jsonUrl, { credentials: 'include' });
-
-  if (!transcriptResponse.ok) {
-    throw new Error(\`Failed to fetch transcript: \${transcriptResponse.status}\`);
+  // Legacy timed-text remains the cheapest path and does not touch page UI. Newer
+  // Gemini-generated captions can expose a valid track while returning an empty
+  // timed-text body, so delegate the protected fallback to YouTube's own UI flow.
+  let segments = await fetchTimedTextSegments(selectedTrack);
+  if (segments.length === 0) {
+    segments = await loadTranscriptPanelSegments(videoId, selectedTrack);
+  }
+  if (segments.length === 0) {
+    throw new Error('Failed to retrieve transcript from YouTube');
+  }
+  if (currentVideoId() !== videoId) {
+    throw new Error('YouTube video changed while retrieving transcript');
   }
 
-  const transcriptData = await transcriptResponse.json();
-
-  // Parse JSON format into segments
-  const segments = parseTranscriptJson(transcriptData);
-
-  // Build transcript object
   const transcript = {
     language: selectedTrack.languageCode,
-    languageName: selectedTrack.name?.simpleText || selectedTrack.languageCode,
+    languageName: textFromRuns(selectedTrack.name) || selectedTrack.languageCode,
     isAutoGenerated: selectedTrack.kind === 'asr',
-    segmentCount: segments.length
+    segmentCount: segments.length,
   };
 
   if (args.format === 'text') {
-    transcript.text = segments.map(s => s.text).join(' ');
+    transcript.text = segments.map((segment) => segment.text).join(' ');
   } else {
     transcript.segments = segments;
   }
@@ -3605,76 +3600,346 @@ export async function execute(args = {}) {
   return { metadata, transcript };
 }
 
-
-/**
- * Fetch player response via YouTube's Innertube API.
- * This is the internal API YouTube uses for its own player.
- */
-async function fetchPlayerResponseViaInnertube(videoId) {
-  // Extract API key from page HTML
-  const html = document.documentElement.outerHTML;
-  const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
-  if (!apiKeyMatch) {
-    throw new Error('Could not find YouTube API key on page');
-  }
-
-  const apiKey = apiKeyMatch[1];
-  const innertubeUrl = \`https://www.youtube.com/youtubei/v1/player?key=\${apiKey}\`;
-
-  const response = await fetch(innertubeUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      context: {
-        client: {
-          clientName: 'WEB',
-          clientVersion: '2.20250101.00.00'
-        }
-      },
-      videoId
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`Innertube API request failed: \${response.status}\`);
-  }
-
-  return response.json();
+function currentVideoId() {
+  return new URL(window.location.href).searchParams.get('v');
 }
 
 /**
- * Parse YouTube's JSON transcript format (fmt=json3) into structured segments.
- * JSON format has events with segs arrays containing utf8 text.
+ * Prefer the live player because it follows same-document YouTube navigation.
+ * Every page-derived response is fenced to the URL's current video ID before it
+ * can supply metadata, caption URLs, or transcript authority.
  */
-function parseTranscriptJson(data) {
-  const segments = [];
+function resolvePlayerResponse(videoId) {
+  const player = document.getElementById('movie_player');
+  const candidates = [];
 
-  if (!data.events) {
-    return segments;
+  if (typeof player?.getPlayerResponse === 'function') {
+    try {
+      candidates.push(player.getPlayerResponse());
+    } catch {
+      // The player can exist before its API is ready; the initial response may be usable.
+    }
+  }
+  candidates.push(window.ytInitialPlayerResponse);
+
+  const matchingResponses = candidates.filter(
+    (response) => response?.videoDetails?.videoId === videoId
+  );
+  const responseWithCaptions = matchingResponses.find(
+    (response) => response?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length > 0
+  );
+  const currentResponse = responseWithCaptions || matchingResponses[0];
+  if (!currentResponse) {
+    throw new Error('Could not retrieve current video data from YouTube');
+  }
+  return currentResponse;
+}
+
+async function fetchTimedTextSegments(track) {
+  try {
+    const transcriptUrl = new URL(track.baseUrl, YOUTUBE_ORIGIN);
+    if (transcriptUrl.origin !== YOUTUBE_ORIGIN || transcriptUrl.pathname !== '/api/timedtext') {
+      return [];
+    }
+    transcriptUrl.searchParams.set('fmt', 'json3');
+
+    const response = await fetch(transcriptUrl, { credentials: 'include' });
+    if (!response.ok) {
+      return [];
+    }
+
+    const body = await response.text();
+    if (!body.trim()) {
+      return [];
+    }
+
+    return parseTimedTextJson(JSON.parse(body));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * YouTube's transcript endpoint now requires page-generated attestation and session
+ * context. Let the site's own command load that data, then restore panel visibility,
+ * rather than reading cookies or replaying opaque authorization material.
+ */
+async function loadTranscriptPanelSegments(videoId, selectedTrack) {
+  const loaded = readTranscriptPanel(videoId, selectedTrack);
+  if (loaded.length > 0) {
+    return loaded;
   }
 
-  for (const event of data.events) {
-    // Skip events without segments (e.g., format markers)
-    if (!event.segs) continue;
+  const selectedTrackKey = trackKey(selectedTrack);
+  if (transcriptPanelLoad) {
+    if (
+      transcriptPanelLoad.videoId !== videoId ||
+      transcriptPanelLoad.trackKey !== selectedTrackKey
+    ) {
+      return [];
+    }
+    return transcriptPanelLoad.promise;
+  }
 
-    // Concatenate all segment text
-    const text = event.segs
-      .map(seg => seg.utf8 || '')
-      .join('')
-      .trim();
+  const promise = openAndReadTranscriptPanel(videoId, selectedTrack);
+  transcriptPanelLoad = { videoId, trackKey: selectedTrackKey, promise };
+  try {
+    return await promise;
+  } finally {
+    if (transcriptPanelLoad?.promise === promise) {
+      transcriptPanelLoad = null;
+    }
+  }
+}
 
-    if (text) {
+async function openAndReadTranscriptPanel(videoId, selectedTrack) {
+  const expandedPanel = findExpandedEngagementPanel();
+  if (expandedPanel && !isTranscriptPanel(expandedPanel)) {
+    // Do not replace a panel the user is actively viewing.
+    return [];
+  }
+
+  const openedByAgentBoard = !expandedPanel;
+  let ownedPanel = expandedPanel;
+
+  try {
+    if (openedByAgentBoard) {
+      const trigger = findTranscriptTrigger();
+      if (!trigger || currentVideoId() !== videoId) {
+        return [];
+      }
+      const clickable = trigger.querySelector('button, tp-yt-paper-button') || trigger;
+      clickable.click();
+    }
+
+    const result = await waitForTranscriptPanel(videoId, selectedTrack);
+    ownedPanel = result.panel || ownedPanel;
+    if (result.error) {
+      throw result.error;
+    }
+    return result.segments;
+  } finally {
+    if (openedByAgentBoard && currentVideoId() === videoId) {
+      const currentPanel = findExpandedEngagementPanel();
+      const panelToClose = ownedPanel || currentPanel;
+      if (panelToClose && currentPanel === panelToClose && isTranscriptPanel(panelToClose)) {
+        panelToClose.querySelector('#visibility-button button')?.click();
+      }
+    }
+  }
+}
+
+function waitForTranscriptPanel(videoId, selectedTrack) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      observer.disconnect();
+      resolve(result);
+    };
+    const check = () => {
+      if (currentVideoId() !== videoId) {
+        finish({ segments: [], panel: null });
+        return;
+      }
+      const panel = findTranscriptPanelWithData(videoId);
+      if (panel) {
+        try {
+          finish({ segments: readTranscriptPanel(videoId, selectedTrack, panel), panel });
+        } catch (error) {
+          finish({ segments: [], panel, error });
+        }
+      }
+    };
+
+    const observer = new MutationObserver(check);
+    const timeout = setTimeout(
+      () => finish({ segments: [], panel: findExpandedEngagementPanel() }),
+      TRANSCRIPT_LOAD_TIMEOUT_MS
+    );
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    check();
+  });
+}
+
+function findTranscriptTrigger() {
+  return Array.from(document.querySelectorAll('ytd-button-renderer')).find((element) =>
+    commandTargetsTranscript(element.data?.command)
+  );
+}
+
+function commandTargetsTranscript(command) {
+  const seen = new WeakSet();
+  let visited = 0;
+
+  function visit(value, depth) {
+    if (typeof value === 'string') {
+      return value.startsWith(TRANSCRIPT_PANEL_TARGET);
+    }
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      depth > 12 ||
+      visited++ > 2_000 ||
+      seen.has(value)
+    ) {
+      return false;
+    }
+
+    seen.add(value);
+    return Object.values(value).some((child) => visit(child, depth + 1));
+  }
+
+  return visit(command, 0);
+}
+
+function findExpandedEngagementPanel() {
+  return Array.from(document.querySelectorAll('ytd-engagement-panel-section-list-renderer')).find(
+    (panel) => panel.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED'
+  );
+}
+
+function isTranscriptPanel(panel) {
+  return (
+    panel.getAttribute('target-id')?.includes('transcript') ||
+    panel.querySelector('ytd-transcript-segment-list-renderer') !== null
+  );
+}
+
+function findTranscriptPanelWithData(videoId) {
+  const panels = Array.from(
+    document.querySelectorAll('ytd-engagement-panel-section-list-renderer')
+  ).filter((panel) => panel.querySelector('ytd-transcript-segment-list-renderer'));
+  const expandedPanel = findExpandedEngagementPanel();
+  panels.sort((left, right) => Number(right === expandedPanel) - Number(left === expandedPanel));
+
+  return (
+    panels.find((panel) =>
+      transcriptPanelItems(panel).some((item) => {
+        const targetId = item?.transcriptSegmentRenderer?.targetId;
+        return typeof targetId === 'string' && targetId.startsWith(\`\${videoId}.\`);
+      })
+    ) || null
+  );
+}
+
+function readTranscriptPanel(videoId, selectedTrack, preferredPanel = null) {
+  const panel = preferredPanel || findTranscriptPanelWithData(videoId);
+  if (!panel) {
+    return [];
+  }
+
+  const items = transcriptPanelItems(panel);
+  const segments = [];
+  const videoPrefix = \`\${videoId}.\`;
+  const trackPrefix = \`\${videoPrefix}\${encodeTrackParams(selectedTrack)}.\`;
+  let sawCurrentVideo = false;
+  let sawSelectedTrack = false;
+
+  for (const item of items) {
+    const renderer = item?.transcriptSegmentRenderer;
+    if (!renderer || typeof renderer.targetId !== 'string') continue;
+    if (!renderer.targetId.startsWith(videoPrefix)) continue;
+    sawCurrentVideo = true;
+    if (!renderer.targetId.startsWith(trackPrefix)) continue;
+    sawSelectedTrack = true;
+
+    const startMs = Number(renderer.startMs);
+    const endMs = Number(renderer.endMs);
+    const text = textFromRuns(renderer.snippet).trim();
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && text) {
       segments.push({
-        start: (event.tStartMs || 0) / 1000,
-        duration: (event.dDurationMs || 0) / 1000,
-        text
+        start: startMs / 1000,
+        duration: Math.max(0, endMs - startMs) / 1000,
+        text,
       });
     }
   }
 
+  if (sawCurrentVideo && !sawSelectedTrack) {
+    throw new Error("YouTube's transcript panel opened a different caption track than requested");
+  }
   return segments;
+}
+
+function transcriptPanelItems(panel) {
+  const list = panel.querySelector('ytd-transcript-segment-list-renderer');
+  const items = list?.data?.initialSegments;
+  if (Array.isArray(items)) {
+    return items;
+  }
+
+  return Array.from(list?.querySelectorAll('ytd-transcript-segment-renderer') || []).map(
+    (element) => ({ transcriptSegmentRenderer: element.data })
+  );
+}
+
+function encodeTrackParams(track) {
+  const bytes = [];
+  for (const [fieldNumber, value] of [
+    [1, track.kind || ''],
+    [2, track.languageCode],
+    [3, track.trackName || ''],
+  ]) {
+    const encoded = new TextEncoder().encode(value);
+    bytes.push((fieldNumber << 3) | 2, ...encodeVarint(encoded.length), ...encoded);
+  }
+
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return encodeURIComponent(btoa(binary));
+}
+
+function encodeVarint(value) {
+  const bytes = [];
+  do {
+    let byte = value & 0x7f;
+    value = Math.floor(value / 128);
+    if (value > 0) byte |= 0x80;
+    bytes.push(byte);
+  } while (value > 0);
+  return bytes;
+}
+
+function trackKey(track) {
+  return \`\${track.kind || ''}\\u0000\${track.languageCode}\\u0000\${track.trackName || ''}\`;
+}
+
+/** Parse the legacy timed-text JSON3 representation. */
+function parseTimedTextJson(data) {
+  const segments = [];
+  if (!Array.isArray(data?.events)) {
+    return segments;
+  }
+
+  for (const event of data.events) {
+    if (!Array.isArray(event.segs)) continue;
+
+    const text = event.segs
+      .map((segment) => segment.utf8 || '')
+      .join('')
+      .trim();
+    if (!text) continue;
+
+    segments.push({
+      start: (event.tStartMs || 0) / 1000,
+      duration: (event.dDurationMs || 0) / 1000,
+      text,
+    });
+  }
+  return segments;
+}
+
+function textFromRuns(value) {
+  if (typeof value?.simpleText === 'string') {
+    return value.simpleText;
+  }
+  if (Array.isArray(value?.runs)) {
+    return value.runs.map((run) => run?.text || '').join('');
+  }
+  return '';
 }
 `,
   agentboard_fetch_url: `/**
