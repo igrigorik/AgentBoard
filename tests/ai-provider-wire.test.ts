@@ -643,6 +643,26 @@ describe('AI provider wire contracts', () => {
     }
   });
 
+  it('omits unsupported sampling parameters from Opus 5 connection probes', async () => {
+    const server = await startAIWireServer({ chunks: [...responseFixtures.anthropic] });
+
+    try {
+      const result = await AIClient.getInstance().testConnectionWithDetails({
+        apiProtocol: 'anthropic-messages',
+        apiKey: 'wire-secret-key',
+        model: 'claude-opus-5',
+        endpoint: `${server.baseURL}/nested/v1`,
+      });
+
+      expect(result.success).toBe(true);
+      const request = await server.request;
+      expect(request.body).toMatchObject({ model: 'claude-opus-5' });
+      expect(request.body).not.toHaveProperty('temperature');
+    } finally {
+      await server.close();
+    }
+  });
+
   it('fails closed before HTTP for an unknown protocol', async () => {
     const server = await startAIWireServer({ chunks: [...responseFixtures.responses] });
 

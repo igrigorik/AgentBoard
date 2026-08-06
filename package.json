@@ -36,7 +36,7 @@
     "postinstall": "husky || true"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.87",
+    "@ai-sdk/anthropic": "2.0.91",
     "@ai-sdk/google": "^2.0.82",
     "@ai-sdk/openai": "^2.0.114",
     "@cfworker/json-schema": "^4.1.1",
