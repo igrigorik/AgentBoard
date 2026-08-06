@@ -211,21 +211,15 @@ export class StreamingMarkdownRenderer {
         element = document.createElement('blockquote');
         break;
 
-      case smd.RULE: {
+      // streaming-markdown emits a matching end_token for void elements too, so
+      // they must enter the renderer stack even though they cannot have children.
+      case smd.RULE:
         element = document.createElement('hr');
-        // hr doesn't have children, append immediately
-        const parent = data.nodes.length > 0 ? data.nodes[data.nodes.length - 1] : data.container;
-        parent.appendChild(element);
-        return; // Don't push to stack
-      }
+        break;
 
-      case smd.LINE_BREAK: {
+      case smd.LINE_BREAK:
         element = document.createElement('br');
-        // br doesn't have children, append immediately
-        const brParent = data.nodes.length > 0 ? data.nodes[data.nodes.length - 1] : data.container;
-        brParent.appendChild(element);
-        return; // Don't push to stack
-      }
+        break;
 
       case smd.TABLE:
         element = document.createElement('table');
