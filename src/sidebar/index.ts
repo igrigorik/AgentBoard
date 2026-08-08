@@ -25,6 +25,7 @@ import { ConfigStorage, type AgentConfig } from '../lib/storage/config';
 import { ToolCallBox } from './ToolCallBox';
 import { ReasoningBox } from './ReasoningBox';
 import { TextBox } from './TextBox';
+import { createCopyMarkdownAction } from './CopyMarkdownAction';
 import { StreamingMarkdownRenderer } from './StreamingMarkdownRenderer';
 import { AgentSwitcher } from './AgentSwitcher';
 import { CommandRegistry, CommandProcessor, createBuiltinCommands } from '../lib/commands';
@@ -37,6 +38,11 @@ interface StreamingSession {
   reasoningBoxes: ReasoningBox[]; // All reasoning boxes in chronological order
   currentTextBox?: TextBox; // Currently streaming text box
   toolCalls: Map<string, ToolCallBox>; // Tool calls can execute in parallel
+}
+
+interface ResponseTurn {
+  markdownSegments: string[];
+  lastElement?: HTMLElement;
 }
 
 // DOM elements
@@ -649,8 +655,9 @@ async function sendToAI() {
       return;
     }
 
-    // Start streaming from AI (uses messageHistory)
-    await streamAIResponse();
+    // Automatic continuations are visually one reply, so they share one copy payload.
+    const responseTurn: ResponseTurn = { markdownSegments: [] };
+    await streamAIResponse(responseTurn);
   } catch (error) {
     addMessage('error', 'Failed to send message. Please try again.');
     log.error('[Sidebar] Send message error:', error);
@@ -660,7 +667,7 @@ async function sendToAI() {
   }
 }
 
-async function streamAIResponse() {
+async function streamAIResponse(responseTurn: ResponseTurn) {
   log.debug('[Sidebar] Starting streamAIResponse for agent:', currentAgent?.name);
 
   if (!currentAgentId || !currentAgent) {
@@ -739,6 +746,10 @@ async function streamAIResponse() {
   };
   currentSession = session;
 
+  // Preserve text-block boundaries that fullResponse flattens around tool calls.
+  const responseBlockIds: string[] = [];
+  const responseBlocks = new Map<string, string>();
+
   return new Promise<void>((resolve, reject) => {
     let expectedDisconnect = false;
     let settled = false;
@@ -792,6 +803,7 @@ async function streamAIResponse() {
             !lastReasoningBox.isStreamingActive()
           ) {
             log.debug('[Sidebar] Merging with previous reasoning box (adjacent segments)');
+            responseTurn.lastElement = lastChild as HTMLElement;
 
             // Add simple break between merged segments
             lastReasoningBox.appendChunk('\n\n');
@@ -824,6 +836,7 @@ async function streamAIResponse() {
 
             // Append chronologically - always at the end
             messagesContainer.appendChild(reasoningWrapper);
+            responseTurn.lastElement = reasoningWrapper;
             reasoningBox.startStreaming();
 
             log.debug(
@@ -861,6 +874,11 @@ async function streamAIResponse() {
         }
 
         case 'STREAM_TEXT_BLOCK_START': {
+          if (!responseBlocks.has(msg.blockId)) {
+            responseBlockIds.push(msg.blockId);
+            responseBlocks.set(msg.blockId, '');
+          }
+
           // Clean up any previous text box (defensive)
           if (currentSession?.currentTextBox) {
             currentSession.currentTextBox.finishStreaming();
@@ -872,7 +890,9 @@ async function streamAIResponse() {
           }
 
           // Append chronologically - always at the end
-          messagesContainer.appendChild(textBox.getElement());
+          const textBoxElement = textBox.getElement();
+          messagesContainer.appendChild(textBoxElement);
+          responseTurn.lastElement = textBoxElement;
           textBox.startStreaming();
           scrollToBottomIfNeeded();
 
@@ -882,6 +902,12 @@ async function streamAIResponse() {
 
         case 'STREAM_TEXT_BLOCK_CHUNK': {
           log.debug(`[Sidebar] Chunk for block ${msg.blockId}: "${msg.chunk.substring(0, 50)}..."`);
+
+          if (!responseBlocks.has(msg.blockId)) {
+            responseBlockIds.push(msg.blockId);
+            responseBlocks.set(msg.blockId, '');
+          }
+          responseBlocks.set(msg.blockId, `${responseBlocks.get(msg.blockId) || ''}${msg.chunk}`);
 
           if (currentSession?.currentTextBox) {
             currentSession.currentTextBox.appendChunk(msg.chunk);
@@ -924,6 +950,7 @@ async function streamAIResponse() {
 
             // Append chronologically - always at the end
             messagesContainer.appendChild(toolCallWrapper);
+            responseTurn.lastElement = toolCallWrapper;
 
             // Smart scroll - only scroll if user is at bottom
             scrollToBottomIfNeeded();
@@ -957,8 +984,16 @@ async function streamAIResponse() {
 
         case 'STREAM_COMPLETE': {
           // Streaming complete, update message history and UI
-          assistantMsg.content = msg.fullResponse || '';
+          const responseText = msg.fullResponse || '';
+          assistantMsg.content = responseText;
           messageHistory.push(assistantMsg);
+
+          const renderedMarkdown = responseBlockIds
+            .map((blockId) => responseBlocks.get(blockId) || '')
+            .filter((block) => block.trim())
+            .join('\n\n');
+          const copySegment = renderedMarkdown || responseText;
+          if (copySegment.trim()) responseTurn.markdownSegments.push(copySegment);
 
           // Session cleanup (TextBox handles its own cleanup)
           expectedDisconnect = true;
@@ -993,8 +1028,8 @@ async function streamAIResponse() {
             };
             messageHistory.push(contMsg);
 
-            // Chain the continuation — don't reset isLoading
-            streamAIResponse().then(resolveOnce).catch(rejectOnce);
+            // Chain the continuation into the same user-visible reply.
+            streamAIResponse(responseTurn).then(resolveOnce).catch(rejectOnce);
             break;
           }
 
@@ -1019,9 +1054,17 @@ async function streamAIResponse() {
             };
             messageHistory.push(contMsg);
 
-            // Chain continuation — model should respond with text summary
-            streamAIResponse().then(resolveOnce).catch(rejectOnce);
+            // Chain continuation — model should respond with text summary.
+            streamAIResponse(responseTurn).then(resolveOnce).catch(rejectOnce);
             break;
+          }
+
+          const responseMarkdown = responseTurn.markdownSegments.join('\n\n');
+          const anchor = responseTurn.lastElement;
+          if (responseMarkdown && anchor?.isConnected) {
+            anchor.classList.add('response-action-anchor');
+            anchor.appendChild(createCopyMarkdownAction(responseMarkdown));
+            scrollToBottomIfNeeded();
           }
 
           isLoading = false;

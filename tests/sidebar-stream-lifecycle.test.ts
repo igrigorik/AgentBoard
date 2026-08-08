@@ -44,13 +44,23 @@ vi.mock('../src/lib/commands', () => {
   };
 });
 
-vi.mock('../src/sidebar/StreamingMarkdownRenderer', () => ({
-  StreamingMarkdownRenderer: {
-    renderComplete: (element: HTMLElement, content: string) => {
+vi.mock('../src/sidebar/StreamingMarkdownRenderer', () => {
+  class StreamingMarkdownRenderer {
+    constructor(private readonly element: HTMLElement) {}
+
+    static renderComplete(element: HTMLElement, content: string): void {
       element.textContent = content;
-    },
-  },
-}));
+    }
+
+    write(content: string): void {
+      this.element.textContent += content;
+    }
+
+    end(): void {}
+  }
+
+  return { StreamingMarkdownRenderer };
+});
 
 interface MockPort {
   name: string;
@@ -121,12 +131,18 @@ let runtimeMessageListener:
       sendResponse: (value: unknown) => void
     ) => boolean | undefined)
   | undefined;
+const clipboardWriteText = vi.fn<(text: string) => Promise<void>>();
 
 describe('sidebar stream lifecycle ownership', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.resetModules();
     vi.clearAllMocks();
+    clipboardWriteText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
     configStorage.getAgents.mockResolvedValue([agent, secondAgent]);
     configStorage.getDefaultAgent.mockResolvedValue(agent);
     configStorage.getAgent.mockImplementation(async (agentId: string) =>
@@ -264,6 +280,7 @@ describe('sidebar stream lifecycle ownership', () => {
       expect(ports).toHaveLength(4);
       expect(ports[3].postMessage).toHaveBeenCalledOnce();
     });
+    expect(document.querySelector('.response-copy-button')).toBeNull();
     const continuationPayload = ports[3].postMessage.mock.calls[0][0] as {
       workspaceContext?: unknown;
       messages: Array<{ role: string; content: string }>;
@@ -284,7 +301,81 @@ describe('sidebar stream lifecycle ownership', () => {
     ports[3].emitMessage({ type: 'STREAM_COMPLETE', fullResponse: 'finished' });
     await vi.waitFor(() => expect(ports[3].disconnect).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(isStopMode()).toBe(false));
+
+    const copyButton = document.querySelector<HTMLButtonElement>('.response-copy-button');
+    expect(copyButton).not.toBeNull();
+    expect(copyButton?.closest('.response-action-anchor')).toBe(
+      document.querySelector('.tool-call-wrapper')
+    );
+    copyButton?.click();
+    await vi.waitFor(() =>
+      expect(clipboardWriteText).toHaveBeenCalledWith('first step\n\nfinished')
+    );
+    expect(document.querySelectorAll('.response-copy-button')).toHaveLength(1);
     expect(failureCount()).toBe(1);
+  });
+
+  it('preserves Markdown boundaries between streamed text blocks when copying', async () => {
+    const ports: MockPort[] = [];
+    chrome.runtime.connect = vi.fn(({ name }) => {
+      const port = createPort(name);
+      ports.push(port);
+      return port as unknown as chrome.runtime.Port;
+    });
+    chrome.runtime.sendMessage = vi.fn(async (message) =>
+      message.type === 'GET_SITE_TOOL_HINTS' ? { hints: [] } : { pong: true }
+    );
+    chrome.tabs.get = vi.fn().mockResolvedValue({
+      id: 123,
+      url: 'https://example.com/current',
+      title: 'Current page',
+    });
+
+    await import('../src/sidebar/index');
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await vi.waitFor(() => expect(configStorage.getDefaultAgent).toHaveBeenCalled());
+
+    sendMessage('Use a tool, then summarize');
+    await vi.waitFor(() => expect(ports[0]?.postMessage).toHaveBeenCalledOnce());
+
+    ports[0].emitMessage({ type: 'STREAM_TEXT_BLOCK_START', blockId: 'block-1' });
+    ports[0].emitMessage({
+      type: 'STREAM_TEXT_BLOCK_CHUNK',
+      blockId: 'block-1',
+      chunk: '**Checking.**',
+    });
+    ports[0].emitMessage({ type: 'STREAM_TEXT_BLOCK_END', blockId: 'block-1' });
+    ports[0].emitMessage({
+      type: 'STREAM_TOOL_CALL',
+      toolCall: {
+        id: 'tool-copy',
+        toolName: 'example_tool',
+        input: {},
+        status: 'running',
+        startTime: 0,
+      },
+    });
+    ports[0].emitMessage({ type: 'STREAM_TEXT_BLOCK_START', blockId: 'block-2' });
+    ports[0].emitMessage({
+      type: 'STREAM_TEXT_BLOCK_CHUNK',
+      blockId: 'block-2',
+      chunk: '## Result\n\n- done',
+    });
+    ports[0].emitMessage({ type: 'STREAM_TEXT_BLOCK_END', blockId: 'block-2' });
+    ports[0].emitMessage({
+      type: 'STREAM_COMPLETE',
+      fullResponse: '**Checking.**## Result\n\n- done',
+    });
+
+    const copyButton = await vi.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('.response-copy-button');
+      expect(button).not.toBeNull();
+      return button;
+    });
+    copyButton?.click();
+    await vi.waitFor(() =>
+      expect(clipboardWriteText).toHaveBeenCalledWith('**Checking.**\n\n## Result\n\n- done')
+    );
   });
 
   it('keeps workspace context hidden across turns and reloads it on clear or agent change', async () => {

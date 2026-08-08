@@ -377,7 +377,87 @@ body {
   color: var(--text-primary);
   margin-right: auto;
   padding: 8px 0;
-  max-width: 85%;
+  max-width: min(85%, calc(100% - 32px));
+}
+
+/* Keep the secondary action in the reply's right gutter instead of adding a toolbar row. */
+.response-action-anchor {
+  position: relative;
+}
+
+.response-action-anchor:is(.reasoning-wrapper, .tool-call-wrapper) {
+  padding-right: 44px;
+}
+
+.response-actions {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.response-copy-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease;
+}
+
+.response-copy-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.response-copy-button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.response-copy-button[data-state='copied'] {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.response-copy-button[data-state='error'] {
+  color: var(--error-color);
+}
+
+.response-copy-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .message-system .message-content {
