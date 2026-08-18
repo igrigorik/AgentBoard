@@ -1,11 +1,34 @@
 # Browser tests
 
-The browser suites exercise the built extension in Chrome rather than source modules in a simulated DOM.
+The browser suites exercise built browser artifacts in Chrome rather than source modules in a simulated DOM.
 
 - `pnpm run test:browser` builds and tests the compiled `agentboard_read_page` tool.
 - `pnpm run test:browser:mv3` builds and tests extension loading, settings migration, WebMCP execution, storage serialization, and fail-closed configuration handling.
+- `pnpm run test:browser:webmcp-wpt` builds and injects the compiled WebMCP polyfill into a pinned set of canonical Web Platform Tests.
 
-Use the corresponding `:built` script to test an existing `dist/` build. Set `CHROME_BIN` for the read-page suite and `CHROME_FOR_TESTING_BIN` for the MV3 suite when Chrome is not found automatically.
+Use the corresponding `:built` script to test an existing `dist/` build. Set `CHROME_BIN` for the read-page and WPT suites and `CHROME_FOR_TESTING_BIN` for the MV3 suite when Chrome is not found automatically.
+
+## WebMCP Web Platform Tests
+
+The WebMCP WPT harness uses upstream `wptrunner` rather than copying tests or implementing a private testharness reporter. On first use it creates a sparse checkout at `local/wpt`, checks out the pinned full commit SHA, installs WPT's Python environment and the ChromeDriver matching the selected local Chrome binary, then writes its report to `local/wpt-results/webmcp-polyfill.json`. Both directories are ignored through `local/`.
+
+Upstream `--inject-script` inserts the exact compiled `dist/content-scripts/webmcp-polyfill.js` before each secure test document's scripts. The browser runs in an isolated temporary WebDriver profile with native WebMCP explicitly disabled through `--disable-blink-features=WebMCP`; the harness adds a backend guard so silently selecting native WebMCP cannot produce false passes. This suite tests the page-level polyfill, while the MV3 suite remains responsible for extension packaging, relay, service-worker, and catalog behavior.
+
+Keep conformance claims to same-document imperative tests. WPT injects the script into every HTML document it serves, whereas AgentBoard intentionally installs its local backend only in the main frame. Running iframe or cross-origin files can still be useful for investigation, but their outcomes do not represent the shipped extension's scope.
+
+The default command runs all 19 same-document Tier-1 files and prints every file and subtest outcome after WPT's diagnostics. It exits non-zero while tracked parity gaps remain; that failure is the current conformance result, not a harness failure:
+
+```bash
+pnpm run test:browser:webmcp-wpt
+```
+
+Pass canonical WPT paths after `--` to run a focused or newly added case against an existing build:
+
+```bash
+pnpm run test:browser:webmcp-wpt:built -- webmcp/imperative/executeTool-abort.https.html
+```
+
+Use `AGENTBOARD_WPT_REVISION` with a full 40-character commit SHA to evaluate a candidate WPT revision before changing the pinned default in `tests/browser/webmcp-wpt.mjs`. `AGENTBOARD_WPT_ROOT`, `AGENTBOARD_WPT_RESULTS`, and `AGENTBOARD_WPT_CHANNEL` override the checkout, artifact directory, and inferred Chrome channel. The harness refuses to change a WPT checkout with tracked modifications.
 
 ## Manual Local Workspace check
 

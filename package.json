@@ -20,6 +20,8 @@
     "test:browser:built": "node tests/browser/read-page-headless.js",
     "test:browser:mv3": "pnpm run build && pnpm run test:browser:mv3:built",
     "test:browser:mv3:built": "node tests/browser/mv3-extension.mjs",
+    "test:browser:webmcp-wpt": "pnpm run build && pnpm run test:browser:webmcp-wpt:built",
+    "test:browser:webmcp-wpt:built": "node tests/browser/webmcp-wpt.mjs",
     "test:ai:integration": "vitest --run --config vitest.ai-integration.config.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
