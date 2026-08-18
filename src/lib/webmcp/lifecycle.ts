@@ -32,6 +32,8 @@ export interface PendingPromise {
   reject: (reason: unknown) => void;
   timeout: ReturnType<typeof setTimeout>;
   tabId: number;
+  port: chrome.runtime.Port;
+  documentId?: string;
   abortSignal?: AbortSignal;
   abortHandler?: () => void;
 }
@@ -119,13 +121,13 @@ export class TabManager {
 
       log.debug(`[WebMCP Lifecycle] Tab ${tabId} content script connected`);
 
-      // Clean up old port if exists. A different document cannot inherit outstanding calls or
-      // a catalog from its predecessor; cancel while the old port still owns the execution.
+      // Every tool call remains owned by the exact route that received it. A replacement port
+      // may recover the catalog, but it cannot inherit an already-issued side effect.
       const oldPort = this.contentPorts.get(tabId);
       const oldDocumentId = oldPort?.sender?.documentId;
       if (oldPort) {
+        this.cancelPendingCallsForPort(oldPort, true);
         if (oldDocumentId && documentId && oldDocumentId !== documentId) {
-          this.cancelPendingCallsForTab(tabId);
           this.toolRegistries.delete(tabId);
           getToolRegistry().removeToolsByOrigin(`tab-${tabId}`);
         }
@@ -171,21 +173,19 @@ export class TabManager {
         // issued to that document remains authoritative until its relay disconnects or a new
         // document takes ownership. Notifications stay blocked so stale tools cannot reappear.
         if (this.navigatingTabs.has(tabId) && !isResponse) return;
-        this.handleContentMessage(tabId, msg);
+        this.handleContentMessage(tabId, port, documentId, msg);
       });
 
       // Handle port disconnection
       port.onDisconnect.addListener(() => {
         log.debug(`[WebMCP Lifecycle] Tab ${tabId} port disconnected`);
 
-        // Only remove if it's the same port instance
+        // Only remove if it's the same port instance, but always reject calls owned by this route.
+        // A delayed disconnect from a replaced port must not affect its successor's calls.
         if (this.contentPorts.get(tabId) === port) {
           this.contentPorts.delete(tabId);
-
-          // Cancel any pending tool calls for this tab
-          // (could be navigation, tab close, or content script crash)
-          this.cancelPendingCallsForTab(tabId);
         }
+        this.cancelPendingCallsForPort(port, false);
       });
     });
   }
@@ -301,7 +301,12 @@ export class TabManager {
   /**
    * Handle messages from content scripts
    */
-  private handleContentMessage(tabId: number, msg: WebMCPMessage): void {
+  private handleContentMessage(
+    tabId: number,
+    port: chrome.runtime.Port,
+    documentId: string | undefined,
+    msg: WebMCPMessage
+  ): void {
     if (msg?.type !== 'webmcp') return;
 
     const payload = msg.payload;
@@ -316,9 +321,16 @@ export class TabManager {
     // Handle responses (with id)
     if (isResponse) {
       const pending = this.pendingPromises.get(payload.id);
-      // Request IDs correlate responses globally, but tab ownership must be structural rather than
-      // relying on UUID secrecy from another page that may share the same origin.
-      if (!pending || pending.tabId !== tabId) return;
+      // Request IDs correlate responses globally, but ownership must be structural rather than
+      // relying on UUID secrecy or transferring authority to a replacement route.
+      if (
+        !pending ||
+        pending.tabId !== tabId ||
+        pending.port !== port ||
+        pending.documentId !== documentId
+      ) {
+        return;
+      }
       const promise = this.takePendingPromise(payload.id);
       if (promise) {
         if ('error' in payload) {
@@ -475,10 +487,7 @@ export class TabManager {
     return promise;
   }
 
-  private sendToolCancellation(tabId: number, id: string): void {
-    const port = this.contentPorts.get(tabId);
-    if (!port) return;
-
+  private sendToolCancellation(port: chrome.runtime.Port, id: string): void {
     try {
       port.postMessage({
         type: 'webmcp',
@@ -493,17 +502,24 @@ export class TabManager {
     }
   }
 
-  /**
-   * Cancel all pending tool calls for a tab
-   */
+  private cancelPendingCallsForPort(port: chrome.runtime.Port, notifyPage: boolean): void {
+    for (const [id, pending] of this.pendingPromises.entries()) {
+      if (pending.port !== port) continue;
+
+      const promise = this.takePendingPromise(id);
+      if (!promise) continue;
+      if (notifyPage) this.sendToolCancellation(port, id);
+      promise.reject(new Error('Tool call cancelled'));
+    }
+  }
+
+  /** Cancel all pending tool calls when their tab can no longer own execution. */
   private cancelPendingCallsForTab(tabId: number): void {
     for (const [id, pending] of this.pendingPromises.entries()) {
       if (pending.tabId !== tabId) continue;
 
       const promise = this.takePendingPromise(id);
-      if (!promise) continue;
-      this.sendToolCancellation(tabId, id);
-      promise.reject(new Error('Tool call cancelled'));
+      if (promise) promise.reject(new Error('Tool call cancelled'));
     }
   }
 
@@ -673,7 +689,8 @@ export class TabManager {
     if (abortSignal?.aborted) throw abortSignal.reason;
 
     // Fail fast if no content script connection exists or its document is navigating away.
-    if (!this.contentPorts.has(tabId) || this.navigatingTabs.has(tabId)) {
+    const port = this.contentPorts.get(tabId);
+    if (!port || this.navigatingTabs.has(tabId)) {
       log.error(
         `[WebMCP Lifecycle] No content port for tab ${tabId}. Available ports:`,
         Array.from(this.contentPorts.keys())
@@ -681,6 +698,7 @@ export class TabManager {
       throw new Error(`No connection to tab ${tabId}. The page may have been closed or reloaded.`);
     }
 
+    const documentId = port.sender?.documentId;
     const id = globalThis.crypto.randomUUID();
     const request = {
       jsonrpc: JSONRPC,
@@ -693,7 +711,7 @@ export class TabManager {
       const timeout = setTimeout(() => {
         const pending = this.takePendingPromise(id);
         if (!pending) return;
-        this.sendToolCancellation(tabId, id);
+        this.sendToolCancellation(pending.port, id);
         pending.reject(new Error('Tool call timeout'));
       }, 10000);
 
@@ -701,7 +719,7 @@ export class TabManager {
         ? () => {
             const pending = this.takePendingPromise(id);
             if (!pending) return;
-            this.sendToolCancellation(tabId, id);
+            this.sendToolCancellation(pending.port, id);
             pending.reject(abortSignal.reason);
           }
         : undefined;
@@ -711,6 +729,8 @@ export class TabManager {
         reject,
         timeout,
         tabId,
+        port,
+        documentId,
         abortSignal,
         abortHandler,
       });
@@ -718,8 +738,14 @@ export class TabManager {
         abortSignal.addEventListener('abort', abortHandler, { once: true });
       }
 
-      // Send via port
-      this.sendToTab(tabId, { type: 'webmcp', payload: request });
+      // Side-effecting calls are one-shot: reconnect queues are for recoverable notifications,
+      // never for transferring execution into an unknown replacement document.
+      try {
+        port.postMessage({ type: 'webmcp', payload: request });
+      } catch {
+        const pending = this.takePendingPromise(id);
+        if (pending) pending.reject(new Error('Tool call delivery failed'));
+      }
     });
   }
 

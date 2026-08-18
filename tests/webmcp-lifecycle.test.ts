@@ -603,6 +603,105 @@ describe('TabManager', () => {
       expect(result).toEqual({ success: true });
     });
 
+    it('rejects failed delivery without replaying into a replacement route', async () => {
+      vi.useFakeTimers();
+      const makePort = () => ({
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'same-document' },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      });
+      const failedPort = makePort();
+      failedPort.postMessage.mockImplementation((message) => {
+        if (message?.payload?.method === 'tools/call') throw new Error('disconnected port');
+      });
+      portHandlers.onConnect(failedPort);
+
+      const controller = new AbortController();
+      const promise = lifecycle.callTool(123, 'one-shot-tool', {}, controller.signal);
+
+      await expect(promise).rejects.toThrow('Tool call delivery failed');
+      expect(
+        failedPort.postMessage.mock.calls.filter(
+          (call) => call[0]?.payload?.method === 'tools/call'
+        )
+      ).toHaveLength(1);
+
+      const replacementPort = makePort();
+      portHandlers.onConnect(replacementPort);
+      controller.abort(new Error('late abort'));
+      vi.advanceTimersByTime(10001);
+
+      expect(
+        replacementPort.postMessage.mock.calls.some(
+          (call) =>
+            call[0]?.payload?.method === 'tools/call' || call[0]?.payload?.method === 'tools/cancel'
+        )
+      ).toBe(false);
+      expect(
+        failedPort.postMessage.mock.calls.some(
+          (call) => call[0]?.payload?.method === 'tools/cancel'
+        )
+      ).toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('does not transfer pending calls or stale disconnects to a replacement port', async () => {
+      const makePort = () => ({
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'same-document' },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      });
+      const oldPort = makePort();
+      const replacementPort = makePort();
+      portHandlers.onConnect(oldPort);
+      const oldDisconnectHandler = oldPort.onDisconnect.addListener.mock.calls[0][0];
+      const oldPromise = lifecycle.callTool(123, 'old-route-tool', {});
+      const oldRequestId = oldPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
+      const oldRejection = expect(oldPromise).rejects.toThrow('Tool call cancelled');
+
+      portHandlers.onConnect(replacementPort);
+      const replacementMessageHandler = replacementPort.onMessage.addListener.mock.calls[0][0];
+      replacementMessageHandler({
+        type: 'webmcp',
+        payload: { jsonrpc: '2.0', id: oldRequestId, result: 'wrong-route' },
+      });
+
+      await oldRejection;
+      expect(oldPort.postMessage).toHaveBeenCalledWith({
+        type: 'webmcp',
+        payload: {
+          jsonrpc: '2.0',
+          method: 'tools/cancel',
+          params: { id: oldRequestId },
+        },
+      });
+      expect(
+        replacementPort.postMessage.mock.calls.some(
+          (call) => call[0]?.payload?.method === 'tools/cancel'
+        )
+      ).toBe(false);
+
+      const currentPromise = lifecycle.callTool(123, 'current-route-tool', {});
+      const currentRequestId = replacementPort.postMessage.mock.calls.find(
+        (call) => call[0]?.payload?.method === 'tools/call'
+      )![0].payload.id;
+      oldDisconnectHandler();
+      replacementMessageHandler({
+        type: 'webmcp',
+        payload: { jsonrpc: '2.0', id: currentRequestId, result: 'current-route' },
+      });
+
+      await expect(currentPromise).resolves.toBe('current-route');
+    });
+
     it('settles concurrent calls by request ID when responses arrive out of order', async () => {
       const mockPort = {
         name: 'webmcp-content-script',
