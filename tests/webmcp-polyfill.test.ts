@@ -380,7 +380,11 @@ describe('WebMCP local backend contract', () => {
     loadPolyfill(dom);
     const modelContext = (dom.window.document as any).modelContext;
     let receiver: unknown = 'not-called';
-    const execute = vi.fn(function (this: unknown, input: unknown) {
+    const execute = vi.fn(function (
+      this: unknown,
+      input: unknown,
+      _options: { signal: AbortSignal }
+    ) {
       receiver = this;
       return Promise.resolve({ echoed: input });
     });
@@ -393,7 +397,11 @@ describe('WebMCP local backend contract', () => {
 
     const result = await modelContext.executeTool(descriptor, JSON.stringify({ value: 7 }));
 
-    expect(execute).toHaveBeenCalledWith({ value: 7 });
+    expect(execute).toHaveBeenCalledWith(
+      { value: 7 },
+      { signal: expect.any(dom.window.AbortSignal) }
+    );
+    expect(execute.mock.calls[0][1].signal.aborted).toBe(false);
     expect(receiver).toBeUndefined();
     expect(result).toBe(JSON.stringify({ echoed: { value: 7 } }));
   });
@@ -473,12 +481,21 @@ describe('WebMCP local backend contract', () => {
     ).rejects.toMatchObject({ name: 'UnknownError' });
   });
 
-  it('supports pre-aborted and in-flight execution cancellation', async () => {
+  it('propagates per-execution cancellation with Chromium event ordering', async () => {
     const dom = createDom();
     loadPolyfill(dom);
     const modelContext = (dom.window.document as any).modelContext;
+    const events: string[] = [];
+    let callbackSignal!: AbortSignal;
     let finishExecution!: (value: unknown) => void;
-    const execute = vi.fn(() => new Promise((resolve) => (finishExecution = resolve)));
+    const execute = vi.fn((_input, options) => {
+      callbackSignal = options.signal;
+      callbackSignal.addEventListener('abort', () => events.push('signal aborted'), {
+        once: true,
+      });
+      events.push('tool started');
+      return new Promise((resolve) => (finishExecution = resolve));
+    });
     await modelContext.registerTool({
       name: 'slow_tool',
       description: 'Slow tool',
@@ -487,27 +504,55 @@ describe('WebMCP local backend contract', () => {
     const [descriptor] = await modelContext.getTools();
 
     const preAborted = new dom.window.AbortController();
-    preAborted.abort('ignored-by-chromium-contract');
+    const preAbortedReason = { reason: 'already cancelled' };
+    preAborted.abort(preAbortedReason);
     await expect(
       modelContext.executeTool(descriptor, '{}', { signal: preAborted.signal })
-    ).rejects.toMatchObject({ name: 'AbortError' });
-
-    const immediateController = new dom.window.AbortController();
-    const immediateReason = { reason: 'cancel-before-callback' };
-    const skippedExecution = modelContext.executeTool(descriptor, '{}', {
-      signal: immediateController.signal,
-    });
-    immediateController.abort(immediateReason);
-    await expect(skippedExecution).rejects.toBe(immediateReason);
+    ).rejects.toBe(preAbortedReason);
     expect(execute).not.toHaveBeenCalled();
+
+    dom.window.addEventListener(
+      'toolactivated',
+      (event) => {
+        expect((event as Event & { toolName: string }).toolName).toBe('slow_tool');
+        events.push('toolactivated');
+      },
+      { once: true }
+    );
+    const cancelled = new Promise<void>((resolve) => {
+      dom.window.addEventListener(
+        'toolcancel',
+        (event) => {
+          expect((event as Event & { toolName: string }).toolName).toBe('slow_tool');
+          events.push('toolcancel');
+          resolve();
+        },
+        { once: true }
+      );
+    });
 
     const controller = new dom.window.AbortController();
     const reason = { reason: 'cancelled' };
     const execution = modelContext.executeTool(descriptor, '{}', { signal: controller.signal });
-    await Promise.resolve();
-    controller.abort(reason);
-    await expect(execution).rejects.toBe(reason);
     expect(execute).toHaveBeenCalledOnce();
+    expect(events).toEqual(['tool started', 'toolactivated']);
+
+    controller.abort(reason);
+    const rejected = execution.catch((error: unknown) => {
+      expect(error).toBe(reason);
+      events.push('execution rejected');
+    });
+    await Promise.all([rejected, cancelled]);
+
+    expect(callbackSignal.aborted).toBe(true);
+    expect(callbackSignal.reason).toMatchObject({ name: 'AbortError' });
+    expect(events).toEqual([
+      'tool started',
+      'toolactivated',
+      'execution rejected',
+      'signal aborted',
+      'toolcancel',
+    ]);
 
     let serializationAttempted = false;
     finishExecution({

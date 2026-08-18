@@ -89,6 +89,16 @@
     return serialized || 'Operation succeeded';
   }
 
+  function dispatchToolEvent(type, toolName) {
+    const event = new Event(type);
+    Object.defineProperty(event, 'toolName', {
+      value: toolName,
+      configurable: true,
+      enumerable: true
+    });
+    window.dispatchEvent(event);
+  }
+
   class LocalModelContext extends EventTarget {
     #tools = new Map();
     #ontoolchange = null;
@@ -245,7 +255,7 @@
       if (signal !== undefined && !(signal instanceof AbortSignal)) {
         throw new TypeError("The 'signal' member must be an AbortSignal");
       }
-      if (signal?.aborted) return Promise.reject(abortError());
+      if (signal?.aborted) return Promise.reject(signal.reason);
 
       const entry =
         descriptor.window === window && origin === window.location.origin
@@ -265,33 +275,60 @@
 
       return new Promise((resolve, reject) => {
         let settled = false;
+        const callbackController = new AbortController();
         const finish = (callback, value) => {
-          if (settled) return;
+          if (settled) return false;
           settled = true;
           signal?.removeEventListener('abort', onAbort);
           callback(value);
+          return true;
         };
-        const onAbort = () => finish(reject, signal.reason);
+        const onAbort = () => {
+          if (!finish(reject, signal.reason)) return;
+          // Caller rejection runs first; target cancellation crosses a browser boundary in Chromium.
+          setTimeout(() => {
+            callbackController.abort(abortError());
+            dispatchToolEvent('toolcancel', name);
+          }, 0);
+        };
         signal?.addEventListener('abort', onAbort, { once: true });
 
-        Promise.resolve()
-          .then(() => (settled ? undefined : Reflect.apply(entry.execute, undefined, [input])))
-          .then(
-            (result) => {
-              if (settled) return;
-              try {
-                finish(resolve, serializeExecutionResult(result));
-              } catch {
-                diagnostics.serializationFailure();
-                finish(reject, unknownError());
-              }
-            },
-            () => {
-              if (settled) return;
-              diagnostics.callbackFailure();
+        let result;
+        let callbackFailed = false;
+        try {
+          result = Reflect.apply(entry.execute, undefined, [
+            input,
+            { signal: callbackController.signal }
+          ]);
+        } catch {
+          callbackFailed = true;
+        }
+        dispatchToolEvent('toolactivated', name);
+
+        if (callbackFailed) {
+          if (!settled) {
+            diagnostics.callbackFailure();
+            finish(reject, unknownError());
+          }
+          return;
+        }
+
+        Promise.resolve(result).then(
+          (value) => {
+            if (settled) return;
+            try {
+              finish(resolve, serializeExecutionResult(value));
+            } catch {
+              diagnostics.serializationFailure();
               finish(reject, unknownError());
             }
-          );
+          },
+          () => {
+            if (settled) return;
+            diagnostics.callbackFailure();
+            finish(reject, unknownError());
+          }
+        );
       });
     }
 

@@ -130,7 +130,9 @@ function response(harness: ReturnType<typeof createHarness>, id: string) {
 describe('WebMCP page bridge catalog and execution', () => {
   it('publishes and executes tools from the local document.modelContext polyfill', async () => {
     const harness = createHarness();
-    const execute = vi.fn(async (input) => ({ echoed: input }));
+    const execute = vi.fn(async (input: unknown, _options: { signal: AbortSignal }) => ({
+      echoed: input,
+    }));
     await harness.window.document.modelContext.registerTool({
       name: 'local_tool',
       description: 'Local tool',
@@ -164,7 +166,10 @@ describe('WebMCP page bridge catalog and execution', () => {
     });
     await flush(harness.window);
 
-    expect(execute).toHaveBeenCalledWith({ value: 7 });
+    expect(execute).toHaveBeenCalledWith(
+      { value: 7 },
+      { signal: expect.any(harness.window.AbortSignal) }
+    );
     expect(response(harness, 'local-call').result).toBe(JSON.stringify({ echoed: { value: 7 } }));
   });
 
