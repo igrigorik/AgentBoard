@@ -3502,13 +3502,14 @@ export async function execute(args = {}) {
 const YOUTUBE_ORIGIN = 'https://www.youtube.com';
 const TRANSCRIPT_PANEL_TARGET = 'engagement-panel-searchable-transcript';
 const TRANSCRIPT_LOAD_TIMEOUT_MS = 5_000;
+const TRANSCRIPT_CANCEL_CLEANUP_TIMEOUT_MS = 500;
 
 let transcriptPanelLoad = null;
 
 export const metadata = {
   name: 'youtube_transcript',
   namespace: 'agentboard',
-  version: '1.0.1',
+  version: '1.0.2',
   description:
     "Get the current YouTube video's transcript with timestamps and metadata. Retrieval may briefly open and close YouTube's transcript panel.",
   match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
@@ -3531,7 +3532,8 @@ export const metadata = {
   },
 };
 
-export async function execute(args = {}) {
+export async function execute(args = {}, { signal } = {}) {
+  signal?.throwIfAborted();
   const videoId = currentVideoId();
   if (!videoId) {
     throw new Error('Not on a YouTube video page (no video ID found)');
@@ -3573,10 +3575,12 @@ export async function execute(args = {}) {
   // Legacy timed-text remains the cheapest path and does not touch page UI. Newer
   // Gemini-generated captions can expose a valid track while returning an empty
   // timed-text body, so delegate the protected fallback to YouTube's own UI flow.
-  let segments = await fetchTimedTextSegments(selectedTrack);
+  let segments = await fetchTimedTextSegments(selectedTrack, signal);
+  signal?.throwIfAborted();
   if (segments.length === 0) {
-    segments = await loadTranscriptPanelSegments(videoId, selectedTrack);
+    segments = await loadTranscriptPanelSegments(videoId, selectedTrack, signal);
   }
+  signal?.throwIfAborted();
   if (segments.length === 0) {
     throw new Error('Failed to retrieve transcript from YouTube');
   }
@@ -3635,7 +3639,8 @@ function resolvePlayerResponse(videoId) {
   return currentResponse;
 }
 
-async function fetchTimedTextSegments(track) {
+async function fetchTimedTextSegments(track, signal) {
+  signal?.throwIfAborted();
   try {
     const transcriptUrl = new URL(track.baseUrl, YOUTUBE_ORIGIN);
     if (transcriptUrl.origin !== YOUTUBE_ORIGIN || transcriptUrl.pathname !== '/api/timedtext') {
@@ -3643,18 +3648,20 @@ async function fetchTimedTextSegments(track) {
     }
     transcriptUrl.searchParams.set('fmt', 'json3');
 
-    const response = await fetch(transcriptUrl, { credentials: 'include' });
+    const response = await fetch(transcriptUrl, { credentials: 'include', signal });
     if (!response.ok) {
       return [];
     }
 
     const body = await response.text();
+    signal?.throwIfAborted();
     if (!body.trim()) {
       return [];
     }
 
     return parseTimedTextJson(JSON.parse(body));
   } catch {
+    signal?.throwIfAborted();
     return [];
   }
 }
@@ -3664,13 +3671,24 @@ async function fetchTimedTextSegments(track) {
  * context. Let the site's own command load that data, then restore panel visibility,
  * rather than reading cookies or replaying opaque authorization material.
  */
-async function loadTranscriptPanelSegments(videoId, selectedTrack) {
+async function loadTranscriptPanelSegments(videoId, selectedTrack, signal) {
+  signal?.throwIfAborted();
+  const selectedTrackKey = trackKey(selectedTrack);
+  if (transcriptPanelLoad?.controller.signal.aborted) {
+    try {
+      await transcriptPanelLoad.promise;
+    } catch {
+      // The cancelled owner keeps the slot until its panel cleanup finishes.
+    }
+    signal?.throwIfAborted();
+    return loadTranscriptPanelSegments(videoId, selectedTrack, signal);
+  }
+
   const loaded = readTranscriptPanel(videoId, selectedTrack);
   if (loaded.length > 0) {
     return loaded;
   }
 
-  const selectedTrackKey = trackKey(selectedTrack);
   if (transcriptPanelLoad) {
     if (
       transcriptPanelLoad.videoId !== videoId ||
@@ -3678,21 +3696,55 @@ async function loadTranscriptPanelSegments(videoId, selectedTrack) {
     ) {
       return [];
     }
-    return transcriptPanelLoad.promise;
+    return consumeTranscriptPanelLoad(transcriptPanelLoad, signal);
   }
 
-  const promise = openAndReadTranscriptPanel(videoId, selectedTrack);
-  transcriptPanelLoad = { videoId, trackKey: selectedTrackKey, promise };
-  try {
-    return await promise;
-  } finally {
-    if (transcriptPanelLoad?.promise === promise) {
-      transcriptPanelLoad = null;
-    }
-  }
+  const controller = new AbortController();
+  const load = {
+    videoId,
+    trackKey: selectedTrackKey,
+    controller,
+    consumers: 0,
+    promise: null,
+  };
+  transcriptPanelLoad = load;
+  // Deferral installs the first consumer before the click can synchronously re-enter page code.
+  load.promise = Promise.resolve()
+    .then(() => openAndReadTranscriptPanel(videoId, selectedTrack, controller.signal))
+    .finally(() => {
+      if (transcriptPanelLoad === load) transcriptPanelLoad = null;
+    });
+  return consumeTranscriptPanelLoad(load, signal);
 }
 
-async function openAndReadTranscriptPanel(videoId, selectedTrack) {
+function consumeTranscriptPanelLoad(load, signal) {
+  signal?.throwIfAborted();
+  load.consumers += 1;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value, cancelled = false) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      load.consumers -= 1;
+      if (cancelled && load.consumers === 0 && !load.controller.signal.aborted) {
+        load.controller.abort(value);
+      }
+      callback(value);
+    };
+    const onAbort = () => finish(reject, signal.reason, true);
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    load.promise.then(
+      (segments) => finish(resolve, segments),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+async function openAndReadTranscriptPanel(videoId, selectedTrack, signal) {
+  signal.throwIfAborted();
   const expandedPanel = findExpandedEngagementPanel();
   if (expandedPanel && !isTranscriptPanel(expandedPanel)) {
     // Do not replace a panel the user is actively viewing.
@@ -3712,54 +3764,110 @@ async function openAndReadTranscriptPanel(videoId, selectedTrack) {
       clickable.click();
     }
 
-    const result = await waitForTranscriptPanel(videoId, selectedTrack);
+    const result = await waitForTranscriptPanel(videoId, selectedTrack, signal);
     ownedPanel = result.panel || ownedPanel;
     if (result.error) {
       throw result.error;
     }
     return result.segments;
+  } catch (error) {
+    if (openedByAgentBoard && signal.aborted && currentVideoId() === videoId) {
+      // YouTube may apply the click after the transcript wait has already observed cancellation.
+      // Keep only a short cleanup observer so the panel shell can be restored without retaining the
+      // five-second data observer or transferring ownership to later UI.
+      ownedPanel = ownedPanel || (await waitForOpenedTranscriptPanel(videoId));
+    }
+    throw error;
   } finally {
     if (openedByAgentBoard && currentVideoId() === videoId) {
       const currentPanel = findExpandedEngagementPanel();
-      const panelToClose = ownedPanel || currentPanel;
-      if (panelToClose && currentPanel === panelToClose && isTranscriptPanel(panelToClose)) {
-        panelToClose.querySelector('#visibility-button button')?.click();
+      if (ownedPanel && currentPanel === ownedPanel && isTranscriptPanel(ownedPanel)) {
+        ownedPanel.querySelector('#visibility-button button')?.click();
       }
     }
   }
 }
 
-function waitForTranscriptPanel(videoId, selectedTrack) {
-  return new Promise((resolve) => {
+function waitForTranscriptPanel(videoId, selectedTrack, signal) {
+  return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = (result) => {
+    let observer;
+    let timeout;
+    const finish = (callback, result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
-      observer.disconnect();
-      resolve(result);
+      if (timeout !== undefined) clearTimeout(timeout);
+      observer?.disconnect();
+      signal.removeEventListener('abort', onAbort);
+      callback(result);
     };
+    const onAbort = () => finish(reject, signal.reason);
     const check = () => {
       if (currentVideoId() !== videoId) {
-        finish({ segments: [], panel: null });
+        finish(resolve, { segments: [], panel: null });
         return;
       }
       const panel = findTranscriptPanelWithData(videoId);
       if (panel) {
         try {
-          finish({ segments: readTranscriptPanel(videoId, selectedTrack, panel), panel });
+          finish(resolve, {
+            segments: readTranscriptPanel(videoId, selectedTrack, panel),
+            panel,
+          });
         } catch (error) {
-          finish({ segments: [], panel, error });
+          finish(resolve, { segments: [], panel, error });
         }
       }
     };
 
-    const observer = new MutationObserver(check);
-    const timeout = setTimeout(
-      () => finish({ segments: [], panel: findExpandedEngagementPanel() }),
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    observer = new MutationObserver(check);
+    timeout = setTimeout(
+      () => finish(resolve, { segments: [], panel: findExpandedEngagementPanel() }),
       TRANSCRIPT_LOAD_TIMEOUT_MS
     );
+    signal.addEventListener('abort', onAbort, { once: true });
     observer.observe(document.documentElement, { childList: true, subtree: true });
+    check();
+  });
+}
+
+function waitForOpenedTranscriptPanel(videoId) {
+  const findPanel = () => {
+    if (currentVideoId() !== videoId) return null;
+    const panel = findExpandedEngagementPanel();
+    return panel && isTranscriptPanel(panel) ? panel : null;
+  };
+  const existingPanel = findPanel();
+  if (existingPanel) return Promise.resolve(existingPanel);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (panel) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      observer.disconnect();
+      resolve(panel);
+    };
+    const check = () => {
+      if (currentVideoId() !== videoId) {
+        finish(null);
+        return;
+      }
+      const panel = findPanel();
+      if (panel) finish(panel);
+    };
+    const observer = new MutationObserver(check);
+    const timeout = setTimeout(() => finish(null), TRANSCRIPT_CANCEL_CLEANUP_TIMEOUT_MS);
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+    });
     check();
   });
 }

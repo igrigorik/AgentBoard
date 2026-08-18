@@ -27,4 +27,11 @@ export interface YouTubeTranscriptResult {
   error?: string;
 }
 
-export function execute(args?: YouTubeTranscriptArguments): Promise<YouTubeTranscriptResult>;
+export interface YouTubeTranscriptExecutionOptions {
+  signal?: AbortSignal;
+}
+
+export function execute(
+  args?: YouTubeTranscriptArguments,
+  options?: YouTubeTranscriptExecutionOptions
+): Promise<YouTubeTranscriptResult>;

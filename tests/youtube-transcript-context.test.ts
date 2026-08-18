@@ -234,6 +234,34 @@ describe('YouTube transcript execution context', () => {
     expect(second.transcript?.text).toBe('video-b');
   });
 
+  it('forwards cancellation to the timed-text fetch without opening the panel fallback', async () => {
+    const videoId = 'CjLhd1WZwTE';
+    window.history.replaceState({}, '', `/watch?v=${videoId}`);
+    installPlayer(() => playerResponse(videoId));
+    const trigger = installTranscriptTrigger(() => appendTranscriptPanel(videoId));
+    let fetchSignal: AbortSignal | null | undefined;
+    const fetchMock = vi.fn(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          fetchSignal = init?.signal;
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const reason = new DOMException('execution cancelled', 'AbortError');
+
+    const execution = execute({}, { signal: controller.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    controller.abort(reason);
+
+    await expect(execution).rejects.toBe(reason);
+    expect(fetchSignal).toBe(controller.signal);
+    expect(trigger.click).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['an empty successful response', '', 200],
     ['malformed JSON', 'not-json', 200],
@@ -382,6 +410,47 @@ describe('YouTube transcript execution context', () => {
     expect(panel?.panel.getAttribute('visibility')).toBe('ENGAGEMENT_PANEL_VISIBILITY_HIDDEN');
   });
 
+  it('cancels panel waiting and restores the panel it opened', async () => {
+    vi.useFakeTimers();
+    const videoId = 'CjLhd1WZwTE';
+    window.history.replaceState({}, '', `/watch?v=${videoId}`);
+    installPlayer(() =>
+      playerResponse(videoId, [
+        captionTrack({
+          baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}`,
+          kind: 'asr',
+        }),
+      ])
+    );
+    let panel: ReturnType<typeof appendTranscriptPanel> | undefined;
+    const trigger = installTranscriptTrigger(() => {
+      setTimeout(() => {
+        panel = appendTranscriptPanel(videoId, { items: [] });
+      }, 10);
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 200 }))
+    );
+    const controller = new AbortController();
+    const reason = new DOMException('execution cancelled', 'AbortError');
+
+    const execution = execute({}, { signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger.click).toHaveBeenCalledOnce();
+    controller.abort(reason);
+
+    await expect(execution).rejects.toBe(reason);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(panel?.close).toHaveBeenCalledOnce();
+    expect(panel?.panel.getAttribute('visibility')).toBe('ENGAGEMENT_PANEL_VISIBILITY_HIDDEN');
+
+    panel!.list.data = { initialSegments: transcriptItems(videoId) };
+    panel!.list.append(document.createElement('span'));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(panel?.close).toHaveBeenCalledOnce();
+  });
+
   it('fails without mutating the page when no transcript command is available', async () => {
     const videoId = 'CjLhd1WZwTE';
     window.history.replaceState({}, '', `/watch?v=${videoId}`);
@@ -424,6 +493,48 @@ describe('YouTube transcript execution context', () => {
     await expect(execute()).rejects.toThrow(
       "YouTube's transcript panel opened a different caption track than requested"
     );
+  });
+
+  it('keeps a shared panel load alive when only one consumer is cancelled', async () => {
+    const videoId = 'CjLhd1WZwTE';
+    window.history.replaceState({}, '', `/watch?v=${videoId}`);
+    installPlayer(() =>
+      playerResponse(videoId, [
+        captionTrack({
+          baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}`,
+          kind: 'asr',
+        }),
+      ])
+    );
+
+    let panel: ReturnType<typeof appendTranscriptPanel> | undefined;
+    const trigger = installTranscriptTrigger(() => {
+      panel = appendTranscriptPanel(videoId, { items: [] });
+    });
+    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const reason = new DOMException('first consumer cancelled', 'AbortError');
+
+    const first = execute({ format: 'text' }, { signal: firstController.signal });
+    const second = execute({}, { signal: secondController.signal });
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(trigger.click).toHaveBeenCalledOnce();
+    });
+    firstController.abort(reason);
+
+    await expect(first).rejects.toBe(reason);
+    expect(panel?.close).not.toHaveBeenCalled();
+
+    panel!.list.data = { initialSegments: transcriptItems(videoId) };
+    panel!.list.append(document.createElement('span'));
+    await expect(second).resolves.toMatchObject({
+      transcript: { segmentCount: 2 },
+    });
+    expect(trigger.click).toHaveBeenCalledOnce();
+    expect(panel?.close).toHaveBeenCalledOnce();
   });
 
   it('shares one panel load across concurrent calls', async () => {

@@ -33,7 +33,7 @@ export const COMPILED_TOOLS: CompiledToolInfo[] = [
     id: 'agentboard_youtube_transcript',
     file: 'tools/agentboard_youtube_transcript.js',
     match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
-    version: '1.0.1',
+    version: '1.0.2',
     description:
       "Get the current YouTube video's transcript with timestamps and metadata. Retrieval may briefly open and close YouTube's transcript panel.",
   },
