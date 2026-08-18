@@ -398,43 +398,79 @@ describe('WebMCP local backend contract', () => {
     expect(result).toBe(JSON.stringify({ echoed: { value: 7 } }));
   });
 
-  it('rejects instead of hanging when result serialization throws', async () => {
+  it('maps callback rejection to UnknownError without exposing its details', async () => {
     const dom = createDom();
     loadPolyfill(dom);
+    const consoleError = vi.spyOn(dom.window.console, 'error').mockImplementation(() => {});
     const modelContext = (dom.window.document as any).modelContext;
-    const serializationError = new Error('cannot serialize result');
+    const callbackError = new Error('private callback failure');
     await modelContext.registerTool({
-      name: 'unserializable_tool',
-      description: 'Returns a hostile result',
-      execute: () => ({
-        toJSON() {
-          throw serializationError;
-        },
-        toString() {
-          throw serializationError;
-        },
-      }),
+      name: 'throwing_tool',
+      description: 'Rejects execution',
+      execute: async () => {
+        throw callbackError;
+      },
     });
     const [descriptor] = await modelContext.getTools();
 
-    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toBe(serializationError);
+    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toMatchObject({
+      name: 'UnknownError',
+      message: 'WebMCP tool execution failed',
+    });
+    expect(consoleError).toHaveBeenCalledWith('[AgentBoard] WebMCP tool callback failed');
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(callbackError.message);
   });
 
-  it('rejects malformed arguments and descriptors from another document', async () => {
+  it('maps result serialization failure to UnknownError instead of stringifying the object', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const consoleError = vi.spyOn(dom.window.console, 'error').mockImplementation(() => {});
+    const modelContext = (dom.window.document as any).modelContext;
+    const circularResult: Record<string, unknown> = {};
+    circularResult.self = circularResult;
+    await modelContext.registerTool({
+      name: 'unserializable_tool',
+      description: 'Returns a circular result',
+      execute: () => circularResult,
+    });
+    const [descriptor] = await modelContext.getTools();
+
+    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toMatchObject({
+      name: 'UnknownError',
+      message: 'WebMCP tool execution failed',
+    });
+    expect(consoleError).toHaveBeenCalledWith('[AgentBoard] WebMCP result serialization failed');
+  });
+
+  it('validates required descriptors and maps operational failures to UnknownError', async () => {
     const dom = createDom();
     loadPolyfill(dom);
     const modelContext = (dom.window.document as any).modelContext;
     await registerTool(modelContext);
     const [descriptor] = await modelContext.getTools();
 
-    await expect(modelContext.executeTool(descriptor, 'not-json')).rejects.toThrow(
-      'Failed to parse input arguments'
-    );
+    for (const member of ['name', 'description', 'window', 'origin']) {
+      const missingDescriptor = { ...descriptor };
+      delete missingDescriptor[member];
+      await expect(modelContext.executeTool(missingDescriptor, '{}')).rejects.toBeInstanceOf(
+        dom.window.TypeError
+      );
+      await expect(
+        modelContext.executeTool({ ...descriptor, [member]: undefined }, '{}')
+      ).rejects.toBeInstanceOf(dom.window.TypeError);
+    }
     await expect(
       modelContext.executeTool({ ...descriptor, window: {} }, '{}')
-    ).rejects.toMatchObject({
-      name: 'InvalidStateError',
-    });
+    ).rejects.toBeInstanceOf(dom.window.TypeError);
+
+    for (const input of ['not-json', '"primitive"', '123', 'true', 'null']) {
+      await expect(modelContext.executeTool(descriptor, input)).rejects.toMatchObject({
+        name: 'UnknownError',
+      });
+    }
+    await expect(
+      modelContext.executeTool({ ...descriptor, name: 'missing_tool' }, '{}')
+    ).rejects.toMatchObject({ name: 'UnknownError' });
   });
 
   it('supports pre-aborted and in-flight execution cancellation', async () => {

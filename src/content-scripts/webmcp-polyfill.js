@@ -11,7 +11,9 @@
 
   const diagnostics = Object.freeze({
     log: () => console.log('[AgentBoard] WebMCP bootstrap event'),
-    warn: () => console.warn('[AgentBoard] WebMCP bootstrap warning')
+    warn: () => console.warn('[AgentBoard] WebMCP bootstrap warning'),
+    callbackFailure: () => console.error('[AgentBoard] WebMCP tool callback failed'),
+    serializationFailure: () => console.error('[AgentBoard] WebMCP result serialization failed')
   });
 
   function ensureTrustedTypesPolicy() {
@@ -77,17 +79,13 @@
     return new DOMException(message, 'AbortError');
   }
 
-  function serializeExecutionResult(value) {
-    if (value !== null && typeof value === 'object') {
-      try {
-        const serialized = JSON.stringify(value);
-        if (serialized) return serialized;
-      } catch {
-        // Match Chromium's fallback to string conversion when JSON serialization fails.
-      }
-    }
+  function unknownError() {
+    return new DOMException('WebMCP tool execution failed', 'UnknownError');
+  }
 
-    const serialized = String(value);
+  function serializeExecutionResult(value) {
+    const serialized =
+      value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
     return serialized || 'Operation succeeded';
   }
 
@@ -225,6 +223,22 @@
       if (!tool || typeof tool !== 'object') {
         throw new TypeError('RegisteredTool must be an object');
       }
+      const descriptor = {};
+      for (const member of ['name', 'description', 'window', 'origin']) {
+        const value = tool[member];
+        if (value === undefined) {
+          return Promise.reject(new TypeError(`Required member '${member}' is undefined`));
+        }
+        descriptor[member] = value;
+      }
+
+      const name = String(descriptor.name);
+      // Trigger the required DOMString conversion even though routing does not use the description.
+      String(descriptor.description);
+      if (!(descriptor.window instanceof Window)) {
+        return Promise.reject(new TypeError("The 'window' member must be a Window"));
+      }
+      const origin = String(descriptor.origin).toWellFormed();
 
       const options = rawOptions ?? {};
       const signal = options.signal;
@@ -234,19 +248,19 @@
       if (signal?.aborted) return Promise.reject(abortError());
 
       const entry =
-        tool.window === window && String(tool.origin) === window.location.origin
-          ? this.#tools.get(String(tool.name))
+        descriptor.window === window && origin === window.location.origin
+          ? this.#tools.get(name)
           : null;
-      if (!entry) return Promise.reject(invalidState('Tool is not registered in this document'));
+      if (!entry) return Promise.reject(unknownError());
 
       let input;
       try {
         input = JSON.parse(String(inputArguments));
       } catch {
-        return Promise.reject(new TypeError('Failed to parse input arguments'));
+        return Promise.reject(unknownError());
       }
       if (input === null || typeof input !== 'object') {
-        return Promise.reject(new TypeError('Input arguments must contain a JSON object'));
+        return Promise.reject(unknownError());
       }
 
       return new Promise((resolve, reject) => {
@@ -262,10 +276,21 @@
 
         Promise.resolve()
           .then(() => (settled ? undefined : Reflect.apply(entry.execute, undefined, [input])))
-          .then((result) => (settled ? undefined : serializeExecutionResult(result)))
           .then(
-            (result) => finish(resolve, result),
-            (error) => finish(reject, error)
+            (result) => {
+              if (settled) return;
+              try {
+                finish(resolve, serializeExecutionResult(result));
+              } catch {
+                diagnostics.serializationFailure();
+                finish(reject, unknownError());
+              }
+            },
+            () => {
+              if (settled) return;
+              diagnostics.callbackFailure();
+              finish(reject, unknownError());
+            }
           );
       });
     }
