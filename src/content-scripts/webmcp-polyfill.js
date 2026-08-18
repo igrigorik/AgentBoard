@@ -135,9 +135,15 @@
         Object.prototype.hasOwnProperty.call(rawTool, 'inputSchema') &&
         rawTool.inputSchema !== undefined
       ) {
-        inputSchema = JSON.stringify(rawTool.inputSchema);
-        if (inputSchema === undefined) {
-          throw new TypeError('Invalid input schema: JSON.stringify() returned undefined');
+        try {
+          inputSchema = JSON.stringify(rawTool.inputSchema);
+          if (inputSchema === undefined) {
+            return Promise.reject(
+              new TypeError('Invalid input schema: JSON.stringify() returned undefined')
+            );
+          }
+        } catch (error) {
+          return Promise.reject(error);
         }
       }
 
@@ -156,7 +162,7 @@
       const entry = {
         name,
         title: Object.prototype.hasOwnProperty.call(rawTool, 'title')
-          ? String(rawTool.title)
+          ? String(rawTool.title).toWellFormed()
           : '',
         description,
         inputSchema,

@@ -270,6 +270,20 @@ describe('WebMCP local backend contract', () => {
     expect(first[0]).not.toBe(second[0]);
   });
 
+  it('converts tool titles as USVString values', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    await registerTool(modelContext, {
+      name: 'unicode_title',
+      title: 'Title with \uD800 unpaired surrogate',
+    });
+
+    const [descriptor] = await modelContext.getTools();
+
+    expect(descriptor.title).toBe('Title with \uFFFD unpaired surrogate');
+  });
+
   it('rejects duplicates and invalid registration metadata', async () => {
     const dom = createDom();
     loadPolyfill(dom);
@@ -293,21 +307,42 @@ describe('WebMCP local backend contract', () => {
     ).toThrow("Required member 'execute'");
   });
 
-  it('rejects an unserializable input schema synchronously', () => {
+  it('rejects invalid input schemas through the returned promise', async () => {
     const dom = createDom();
     loadPolyfill(dom);
     const modelContext = (dom.window.document as any).modelContext;
-    const schema: any = { type: 'object' };
-    schema.self = schema;
+    const circularSchema: any = { type: 'object' };
+    circularSchema.self = circularSchema;
+    const schemas = [{ toJSON: () => undefined }, circularSchema, BigInt(42)];
 
-    expect(() =>
-      modelContext.registerTool({
-        name: 'bad_schema',
-        description: 'Bad schema',
-        inputSchema: schema,
-        execute: async () => 'ok',
-      })
-    ).toThrow();
+    for (const [index, inputSchema] of schemas.entries()) {
+      let registration: Promise<unknown> | undefined;
+      expect(() => {
+        registration = modelContext.registerTool({
+          name: `bad_schema_${index}`,
+          description: 'Bad schema',
+          inputSchema,
+          execute: async () => 'ok',
+        });
+      }).not.toThrow();
+      expect(registration).toBeInstanceOf(dom.window.Promise);
+      await expect(registration).rejects.toBeInstanceOf(dom.window.TypeError);
+    }
+
+    const controller = new dom.window.AbortController();
+    controller.abort('registration cancelled');
+    await expect(
+      modelContext.registerTool(
+        {
+          name: 'bad_schema_with_aborted_signal',
+          description: 'Bad schema',
+          inputSchema: circularSchema,
+          execute: async () => 'ok',
+        },
+        { signal: controller.signal }
+      )
+    ).rejects.toBeInstanceOf(dom.window.TypeError);
+    expect(await modelContext.getTools()).toEqual([]);
   });
 
   it('uses AbortSignal to remove the exact registration', async () => {
