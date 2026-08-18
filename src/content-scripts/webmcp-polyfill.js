@@ -377,6 +377,7 @@
 
   let facade;
   let selectedBackend = null;
+  const modelContextConstructionKey = Symbol('ModelContext construction');
 
   function selectBackend() {
     if (selectedBackend) return selectedBackend;
@@ -396,8 +397,15 @@
     return selectedBackend;
   }
 
-  class ModelContextFacade extends EventTarget {
+  class ModelContext extends EventTarget {
     #ontoolchange = null;
+
+    constructor(...constructionArgs) {
+      if (constructionArgs[0] !== modelContextConstructionKey) {
+        throw new TypeError('Illegal constructor');
+      }
+      super();
+    }
 
     registerTool(...args) {
       if (this !== facade) throw new TypeError('Illegal invocation');
@@ -431,11 +439,16 @@
     }
   }
 
-  Object.defineProperty(ModelContextFacade.prototype, Symbol.toStringTag, {
+  Object.defineProperty(ModelContext.prototype, Symbol.toStringTag, {
     value: 'ModelContext'
   });
+  Object.defineProperty(window, 'ModelContext', {
+    value: ModelContext,
+    writable: true,
+    configurable: true
+  });
 
-  facade = new ModelContextFacade();
+  facade = new ModelContext(modelContextConstructionKey);
   Object.defineProperty(document, 'modelContext', {
     value: facade,
     writable: false,

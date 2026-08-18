@@ -164,6 +164,26 @@ describe('WebMCP bootstrap backend selection', () => {
     expect((dom.window.navigator as any).modelContextTesting).toBeUndefined();
   });
 
+  it('exposes browser-owned ModelContext interface identity', () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const ModelContext = (dom.window as any).ModelContext;
+    const modelContext = (dom.window.document as any).modelContext;
+
+    expect(typeof ModelContext).toBe('function');
+    expect(ModelContext).toHaveLength(0);
+    expect(Object.getPrototypeOf(ModelContext.prototype)).toBe(dom.window.EventTarget.prototype);
+    expect(Object.getPrototypeOf(modelContext)).toBe(ModelContext.prototype);
+    expect(modelContext).toBeInstanceOf(ModelContext);
+    expect(() => new ModelContext()).toThrow('Illegal constructor');
+    expect(Object.getOwnPropertyDescriptor(dom.window, 'ModelContext')).toMatchObject({
+      value: ModelContext,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  });
+
   it('does not crash on an existing ModelContext-shaped object with throwing getters', () => {
     const dom = createDom();
     const hostileContext = {};
