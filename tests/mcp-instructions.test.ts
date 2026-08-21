@@ -22,9 +22,14 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   })),
 }));
 
-vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
-  StreamableHTTPClientTransport: vi.fn(),
-}));
+vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@modelcontextprotocol/sdk/client/streamableHttp.js')>();
+  return {
+    ...actual,
+    StreamableHTTPClientTransport: vi.fn(),
+  };
+});
 
 // --- Import after mocks ---
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

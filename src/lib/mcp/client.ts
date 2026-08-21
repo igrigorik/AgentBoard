@@ -9,6 +9,12 @@ import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validatio
 import type { Tool, CallToolResult, Resource } from '@modelcontextprotocol/sdk/types.js';
 import log from '../logger';
 import type { MCPServerConfig } from '../storage/config';
+import {
+  isAuthError,
+  getActiveAuthBackoff,
+  recordAuthFailure,
+  clearAuthBackoff,
+} from './auth-backoff';
 
 export interface MCPClientStatus {
   connected: boolean;
@@ -34,6 +40,18 @@ export class MCPClientService {
   async connect(serverConfig: MCPServerConfig, serverName?: string): Promise<MCPClientStatus> {
     try {
       this.serverConfig = serverConfig;
+
+      // Auth rejections persist across service-worker restarts; skip the
+      // network attempt entirely while a backoff window is active.
+      const backoff = await getActiveAuthBackoff(serverConfig);
+      if (backoff) {
+        const retryInSeconds = Math.ceil((backoff.nextAttemptAt - Date.now()) / 1000);
+        return {
+          connected: false,
+          serverName: serverName || 'unknown',
+          error: `Authentication failed (HTTP 401/403). Retrying in ~${retryInSeconds}s; update the server URL or auth token to retry immediately.`,
+        };
+      }
 
       // Create StreamableHTTP transport with optional auth header
       const requestInit: RequestInit = {};
@@ -69,15 +87,27 @@ export class MCPClientService {
       // Extract server instructions (guidance for LLMs on how to use tools)
       const instructions = this.client.getInstructions();
 
+      await clearAuthBackoff(serverConfig);
+
       return {
         connected: true,
         serverName: serverName || 'unknown',
         tools: toolsList,
         ...(instructions && { instructions }),
       };
-    } catch {
+    } catch (error) {
       log.error('MCP server connection failed');
       await this.disconnect();
+
+      if (isAuthError(error)) {
+        await recordAuthFailure(serverConfig);
+        return {
+          connected: false,
+          serverName: serverName || 'unknown',
+          error:
+            'Authentication failed (HTTP 401/403). Automatic retries are paused; check the server auth token.',
+        };
+      }
 
       return {
         connected: false,
