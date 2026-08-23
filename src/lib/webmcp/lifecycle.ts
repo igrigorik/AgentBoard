@@ -17,6 +17,7 @@ import { matchesUrl } from './script-parser';
 import { ConfigStorage, type LogLevel } from '../storage/config';
 
 const JSONRPC = '2.0';
+const REGISTRATION_SETTLEMENT_TIMEOUT_MS = 5_000;
 
 function isJsonRpcResponse(payload: unknown): payload is JsonRpcResponse {
   return (
@@ -61,16 +62,42 @@ export class TabManager {
   private toolRegistries = new Map<number, ToolRegistry>();
   private pendingInjections = new Set<number>();
   private scriptOperations = new Map<number, Promise<void>>();
+  private pendingHistoryDocuments = new Map<number, string>();
+  private historyReconciliations = new Set<number>();
   // Track pending tools/list requests that need responses
   private pendingToolsRequests = new Map<
     number,
-    { resolve: (tools: ToolRegistry['tools']) => void; reject: (error: Error) => void }
+    {
+      promise: Promise<ToolRegistry['tools']>;
+      resolve: (tools: ToolRegistry['tools']) => void;
+      reject: (error: Error) => void;
+    }
   >();
 
   constructor() {
     this.setupPortHandler();
     this.setupNavigationMonitor();
     this.setupTabCleanup();
+  }
+
+  /** Return the exact top document currently owned by this tab's relay route. */
+  getOwnedDocument(tabId: number): { documentId: string } | null {
+    if (this.navigatingTabs.has(tabId)) return null;
+    const port = this.contentPorts.get(tabId);
+    const documentId = port?.sender?.documentId;
+    if (
+      !documentId ||
+      port?.sender?.frameId !== 0 ||
+      this.currentDocumentIds.get(tabId) !== documentId
+    ) {
+      return null;
+    }
+    return { documentId };
+  }
+
+  /** Whether an issued document-bound operation still belongs to this exact relay route. */
+  ownsDocument(tabId: number, documentId: string): boolean {
+    return this.getOwnedDocument(tabId)?.documentId === documentId;
   }
 
   /** Send only the validated logging preference into isolated relay worlds. */
@@ -230,29 +257,34 @@ export class TabManager {
       return existing.tools;
     }
 
-    // Create a promise that will be resolved when tools/listChanged arrives
-    return new Promise((resolve, reject) => {
-      // Set up timeout
-      const timeout = setTimeout(() => {
-        this.pendingToolsRequests.delete(tabId);
-        reject(new Error(`Timeout waiting for tools from tab ${tabId}`));
-      }, timeoutMs);
+    const currentRequest = this.pendingToolsRequests.get(tabId);
+    if (currentRequest) return currentRequest.promise;
 
-      // Store the promise handlers
-      this.pendingToolsRequests.set(tabId, {
-        resolve: (tools) => {
-          clearTimeout(timeout);
-          resolve(tools);
-        },
-        reject: (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        },
-      });
-
-      // Send the request
-      this.requestToolsFromTab(tabId);
+    let resolvePromise!: (tools: ToolRegistry['tools']) => void;
+    let rejectPromise!: (error: Error) => void;
+    const promise = new Promise<ToolRegistry['tools']>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
     });
+    const timeout = setTimeout(() => {
+      this.pendingToolsRequests.delete(tabId);
+      rejectPromise(new Error(`Timeout waiting for tools from tab ${tabId}`));
+    }, timeoutMs);
+
+    this.pendingToolsRequests.set(tabId, {
+      promise,
+      resolve: (tools) => {
+        clearTimeout(timeout);
+        resolvePromise(tools);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        rejectPromise(error);
+      },
+    });
+
+    this.requestToolsFromTab(tabId);
+    return promise;
   }
 
   /**
@@ -353,6 +385,17 @@ export class TabManager {
    * Update tool registry for a tab
    */
   private updateToolRegistry(tabId: number, params: ToolsListChangedParams): void {
+    if (params.unavailable === true) {
+      this.toolRegistries.delete(tabId);
+      getToolRegistry().removeToolsByOrigin(`tab-${tabId}`);
+      const pending = this.pendingToolsRequests.get(tabId);
+      if (pending) {
+        pending.reject(new Error('The page tool catalog is unavailable'));
+        this.pendingToolsRequests.delete(tabId);
+      }
+      return;
+    }
+
     // Parse inputSchema if it's a JSON string (Chrome's native API returns it as string)
     const normalizedTools = (params.tools || []).map((tool) => {
       let inputSchema = tool.inputSchema;
@@ -407,6 +450,7 @@ export class TabManager {
       // Clear stale tool registry so requestToolsAndWait doesn't return old data
       this.toolRegistries.delete(details.tabId);
       this.pendingInjections.add(details.tabId);
+      this.pendingHistoryDocuments.delete(details.tabId);
 
       // Clear stale tools from the unified registry immediately.
       // This fires notifyTabChange → sets toolsInvalidated in any active stream,
@@ -427,7 +471,36 @@ export class TabManager {
       // Until it connects, calls and messages remain blocked from the retiring document.
       log.debug(`[WebMCP Lifecycle] DOM ready for tab ${details.tabId}, injecting scripts...`);
 
-      await this.injectScripts(details.tabId);
+      await this.injectScripts(details.tabId, details.documentId);
+    });
+
+    chrome.webNavigation.onHistoryStateUpdated?.addListener((details) => {
+      if (details.frameId !== 0 || !details.documentId) return;
+      const documentId = details.documentId;
+      const ownedDocument = this.getOwnedDocument(details.tabId);
+      if (!ownedDocument || ownedDocument.documentId !== documentId) return;
+
+      this.pendingHistoryDocuments.set(details.tabId, documentId);
+      if (this.historyReconciliations.has(details.tabId)) return;
+      this.historyReconciliations.add(details.tabId);
+      void this.runScriptOperation(details.tabId, async () => {
+        while (true) {
+          const latestDocumentId = this.pendingHistoryDocuments.get(details.tabId);
+          this.pendingHistoryDocuments.delete(details.tabId);
+          if (!latestDocumentId || !this.ownsDocument(details.tabId, latestDocumentId)) return;
+          await this.reinjectDocumentScripts(details.tabId, latestDocumentId);
+          if (!this.pendingHistoryDocuments.has(details.tabId)) return;
+        }
+      })
+        .catch(() => {
+          this.pendingHistoryDocuments.delete(details.tabId);
+          log.error(
+            `[WebMCP Lifecycle] Failed to reconcile history update in tab ${details.tabId}`
+          );
+        })
+        .finally(() => {
+          this.historyReconciliations.delete(details.tabId);
+        });
     });
 
     // A cancelled provisional navigation leaves the old document alive. Restore its ownership and
@@ -453,6 +526,8 @@ export class TabManager {
     chrome.tabs.onRemoved.addListener((tabId) => {
       this.pendingInjections.delete(tabId);
       this.scriptOperations.delete(tabId);
+      this.pendingHistoryDocuments.delete(tabId);
+      this.historyReconciliations.delete(tabId);
       this.contentPorts.delete(tabId);
       this.currentDocumentIds.delete(tabId);
       this.navigatingTabs.delete(tabId);
@@ -533,7 +608,11 @@ export class TabManager {
     });
   }
 
-  private async injectBuiltInTools(tabId: number, tabUrl: string): Promise<void> {
+  private async injectBuiltInTools(
+    tabId: number,
+    tabUrl: string,
+    documentId?: string
+  ): Promise<void> {
     const configStorage = ConfigStorage.getInstance();
     const urlMatchingTools = COMPILED_TOOLS.filter((tool) =>
       matchesUrl(tabUrl, {
@@ -559,11 +638,43 @@ export class TabManager {
     );
 
     for (const tool of enabledTools) {
+      const target = documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [0] };
       await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
+        target,
         world: 'MAIN',
         injectImmediately: false,
         files: [tool.file],
+      });
+      await chrome.scripting.executeScript({
+        target,
+        world: 'MAIN',
+        injectImmediately: true,
+        func: async (registrationKey: string, settlementTimeoutMs: number) => {
+          const settlements = window.__agentboardBuiltinToolSettlements;
+          const settlement = settlements?.get(registrationKey);
+          if (!settlements || !settlement) {
+            throw new Error('Built-in registration did not publish settlement');
+          }
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const deadline = new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('WebMCP built-in registration timed out')),
+              settlementTimeoutMs
+            );
+          });
+          try {
+            await Promise.race([settlement, deadline]);
+          } catch (error) {
+            window.__agentboardBuiltinToolLifetimes?.get(registrationKey)?.abort(error);
+            throw error;
+          } finally {
+            if (timeout) clearTimeout(timeout);
+            if (settlements.get(registrationKey) === settlement) {
+              settlements.delete(registrationKey);
+            }
+          }
+        },
+        args: [tool.id, REGISTRATION_SETTLEMENT_TIMEOUT_MS],
       });
     }
   }
@@ -571,22 +682,42 @@ export class TabManager {
   /**
    * Inject WebMCP scripts into a tab
    */
-  async injectScripts(tabId: number): Promise<void> {
-    return this.runScriptOperation(tabId, () => this.injectScriptsNow(tabId));
+  async injectScripts(tabId: number, documentId?: string): Promise<void> {
+    return this.runScriptOperation(tabId, () => this.injectScriptsNow(tabId, documentId));
   }
 
-  private async injectScriptsNow(tabId: number): Promise<void> {
+  private async injectScriptsNow(tabId: number, documentId?: string): Promise<void> {
     try {
-      // Get tab info to check URL
-      const tab = await chrome.tabs.get(tabId);
-      if (!tab?.url) return;
+      let currentUrl: string | undefined;
+      if (documentId) {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId, documentIds: [documentId] },
+          world: 'ISOLATED',
+          injectImmediately: true,
+          func: () => globalThis.location.href,
+        });
+        const result = results.length === 1 ? results[0] : undefined;
+        if (
+          !result ||
+          result.documentId !== documentId ||
+          result.frameId !== 0 ||
+          typeof result.result !== 'string'
+        ) {
+          throw new Error('Document route changed');
+        }
+        currentUrl = result.result;
+      } else {
+        currentUrl = (await chrome.tabs.get(tabId))?.url;
+      }
+      if (!currentUrl) return;
 
-      if (!supportsWebMCPInjection(tab.url)) {
+      if (!supportsWebMCPInjection(currentUrl)) {
         log.debug('[WebMCP Lifecycle] Skipping unsupported injection target');
         return;
       }
 
-      log.debug(`[WebMCP Lifecycle] Injecting scripts into tab ${tabId} (${tab.url})`);
+      log.debug(`[WebMCP Lifecycle] Injecting scripts into tab ${tabId} (${currentUrl})`);
+      const target = documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [0] };
 
       // Polyfill is injected via manifest content_scripts (world: MAIN, run_at: document_start)
       // so it's guaranteed to be available before any page scripts run.
@@ -594,18 +725,18 @@ export class TabManager {
       // 1. Inject the relay content script (isolated world)
       // CRITICAL: Must be first so it's listening when bridge sends initial snapshot
       await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
+        target,
         world: 'ISOLATED',
         injectImmediately: true,
         files: ['content-scripts/relay.js'],
       });
 
       // 2. Inject URL-matched, enabled built-in tools via files:[] to bypass page CSP.
-      await this.injectBuiltInTools(tabId, tab.url);
+      await this.injectBuiltInTools(tabId, currentUrl, documentId);
 
       // 3. Inject page bridge LAST (after relay is ready)
       await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
+        target,
         world: 'MAIN',
         injectImmediately: false, // Wait for DOM to be ready
         files: ['content-scripts/page-bridge.js'],
@@ -614,17 +745,20 @@ export class TabManager {
       log.debug(`[WebMCP Lifecycle] Scripts injected successfully into tab ${tabId}`);
 
       // 4. Inject user scripts that match this URL
-      if (tab.url) {
-        await injectUserScripts({
-          tabId,
-          url: tab.url,
-          frameId: 0,
-        });
-      }
+      await injectUserScripts({
+        tabId,
+        url: currentUrl,
+        frameId: 0,
+        documentId,
+      });
     } catch (error) {
       // "No tab with id" is expected for prerendered/discarded tabs — not an error
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('No tab with id')) {
+      if (
+        msg.includes('No tab with id') ||
+        msg.includes('No document with id') ||
+        msg.includes('Document route changed')
+      ) {
         log.debug(`[WebMCP Lifecycle] Tab ${tabId} gone before injection (prerender/discard)`);
       } else if (isProtectedExtensionGalleryError(error)) {
         // Navigation can race the URL check above; browser extension stores remain protected.
@@ -677,9 +811,7 @@ export class TabManager {
     await this.injectScripts(tabId);
   }
 
-  /**
-   * Call a tool in a specific tab
-   */
+  /** Call a page tool against whichever exact route currently owns the tab. */
   async callTool(
     tabId: number,
     name: string,
@@ -763,11 +895,27 @@ export class TabManager {
     return new Map(this.toolRegistries);
   }
 
+  private async reinjectDocumentScripts(tabId: number, documentId: string): Promise<void> {
+    await reinjectScripts(
+      tabId,
+      (currentUrl, exactDocumentId) => this.injectBuiltInTools(tabId, currentUrl, exactDocumentId),
+      documentId
+    );
+    if (!this.ownsDocument(tabId, documentId)) return;
+
+    // Registration settlement precedes relay delivery. Force one fresh exact-route catalog before
+    // callers may treat the refresh as applied.
+    this.toolRegistries.delete(tabId);
+    getToolRegistry().removeToolsByOrigin(`tab-${tabId}`);
+    await this.requestToolsAndWait(tabId);
+  }
+
   /** Rebuild built-in and user-script registrations after an options change. */
   async reinjectAllScripts(): Promise<void> {
     log.debug('[WebMCP Lifecycle] Hot reload: Re-injecting WebMCP scripts');
 
     const tabs = await chrome.tabs.query({});
+    const failures: unknown[] = [];
 
     for (const tab of tabs) {
       const tabId = tab.id;
@@ -776,14 +924,22 @@ export class TabManager {
 
       if (!supportsWebMCPInjection(tabUrl)) continue;
 
+      const route = this.getOwnedDocument(tabId);
+      if (!route) continue;
+
       try {
         await this.runScriptOperation(tabId, () =>
-          reinjectScripts(tabId, (currentUrl) => this.injectBuiltInTools(tabId, currentUrl))
+          this.reinjectDocumentScripts(tabId, route.documentId)
         );
         log.debug(`[WebMCP Lifecycle] Re-injected scripts into tab ${tabId}`);
       } catch (error) {
-        log.error(`[WebMCP Lifecycle] Failed to re-inject into tab ${tabId}:`, error);
+        failures.push(error);
+        log.error(`[WebMCP Lifecycle] Failed to re-inject into tab ${tabId}`);
       }
+    }
+
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'One or more tabs could not refresh WebMCP tools');
     }
   }
 }

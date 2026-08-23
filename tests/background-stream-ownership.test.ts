@@ -1,4 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  issuePdfWorkerCapability,
+  releasePdfWorkerCapability,
+} from '../src/lib/webmcp/tools/read_page/pdf/capabilities';
 
 const mocks = vi.hoisted(() => ({
   aiClient: {
@@ -7,14 +11,21 @@ const mocks = vi.hoisted(() => ({
     cancelStream: vi.fn(),
   },
   configStorage: {
+    get: vi.fn(),
     onChange: vi.fn(),
   },
   configChange: undefined as ((config: unknown) => void | Promise<void>) | undefined,
   configError: undefined as ((error: { code: string }) => void) | undefined,
+  getEnabledSystemToolRegistrations: vi.fn(),
   toolRegistry: {
-    registerSystemTools: vi.fn(),
+    replaceSystemTools: vi.fn(),
     loadRemoteTools: vi.fn(),
     revokeRemoteTools: vi.fn(),
+    getToolForTab: vi.fn(),
+    getAllTools: vi.fn(),
+    getToolsForTab: vi.fn(),
+    hasSiteTool: vi.fn(),
+    isProtectedToolName: vi.fn(),
   },
   memoryManager: {
     pruneBindings: vi.fn().mockResolvedValue(undefined),
@@ -25,6 +36,7 @@ const mocks = vi.hoisted(() => ({
     setRelayLogLevel: vi.fn(),
     ensureContentScriptReady: vi.fn(),
     getAllRegistries: vi.fn(),
+    getOwnedDocument: vi.fn(),
     getToolRegistry: vi.fn(),
     callTool: vi.fn(),
     requestToolsAndWait: vi.fn(),
@@ -70,6 +82,10 @@ vi.mock('../src/lib/storage/config', () => {
 
 vi.mock('../src/lib/webmcp/lifecycle', () => ({
   getTabManager: () => mocks.tabManager,
+}));
+
+vi.mock('../src/lib/webmcp/system-tools', () => ({
+  getEnabledSystemToolRegistrations: mocks.getEnabledSystemToolRegistrations,
 }));
 
 vi.mock('../src/lib/webmcp/tool-registry', () => ({
@@ -132,11 +148,14 @@ function createPort(name: string): MockPort {
 
 beforeAll(async () => {
   mocks.aiClient.getAvailableAgents.mockResolvedValue([]);
+  mocks.configStorage.get.mockResolvedValue({ agents: [], builtinScripts: [] });
+  mocks.getEnabledSystemToolRegistrations.mockImplementation((config) => [
+    { name: 'system-tool-snapshot', tool: config },
+  ]);
   mocks.configStorage.onChange.mockImplementation((onChange, onError) => {
     mocks.configChange = onChange;
     mocks.configError = onError;
   });
-  mocks.toolRegistry.registerSystemTools.mockResolvedValue(undefined);
   mocks.toolRegistry.loadRemoteTools.mockReturnValue(remoteToolsReady);
   mocks.tabManager.getAllRegistries.mockReturnValue(new Map());
 
@@ -188,6 +207,29 @@ describe('background response privacy', () => {
     url: chrome.runtime.getURL('src/options/index.html'),
   });
 
+  it('claims PDF parser authority only while the issuing exact document remains current', () => {
+    const capability = issuePdfWorkerCapability(7, 'document-a');
+    if (!capability) throw new Error('failed to reserve PDF capability');
+    const sender = {
+      id: chrome.runtime.id,
+      url: chrome.runtime.getURL('src/lib/webmcp/tools/read_page/pdf/worker-host.html'),
+      tab: { id: 7 },
+    } as chrome.runtime.MessageSender;
+
+    mocks.tabManager.getOwnedDocument.mockReturnValue({ documentId: 'document-b' });
+    const staleResponse = vi.fn();
+    expect(
+      mocks.onMessage!({ type: 'PDF_WORKER_HOST_CLAIM', capability }, sender, staleResponse)
+    ).toBe(false);
+    expect(staleResponse).toHaveBeenCalledWith({ success: false });
+
+    mocks.tabManager.getOwnedDocument.mockReturnValue({ documentId: 'document-a' });
+    const currentResponse = vi.fn();
+    mocks.onMessage!({ type: 'PDF_WORKER_HOST_CLAIM', capability }, sender, currentResponse);
+    expect(currentResponse).toHaveBeenCalledWith({ success: true });
+    releasePdfWorkerCapability(capability);
+  });
+
   it('revokes runtime authority when changed configuration is invalid', () => {
     mocks.configError?.({ code: 'FUTURE_SCHEMA' });
 
@@ -212,6 +254,63 @@ describe('background response privacy', () => {
     await vi.waitFor(() =>
       expect(mocks.memoryManager.pruneBindings).toHaveBeenCalledWith(new Set(['remaining-agent']))
     );
+  });
+
+  it('reinjects page tools when imported configuration replaces their definitions', async () => {
+    mocks.tabManager.reinjectAllScripts.mockClear();
+    await mocks.configChange?.({
+      agents: [],
+      logLevel: 'warn',
+      builtinScripts: [],
+      userScripts: [{ id: 'imported-page-tool', code: 'fixture', enabled: false }],
+    });
+
+    await vi.waitFor(() => expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledOnce());
+  });
+
+  it('deduplicates the latest page refresh across an A-B-A overlap', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let releaseThird!: () => void;
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const second = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const third = new Promise<void>((resolve) => {
+      releaseThird = resolve;
+    });
+    mocks.tabManager.reinjectAllScripts.mockClear();
+    mocks.tabManager.reinjectAllScripts
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second)
+      .mockReturnValueOnce(third);
+    const configA = {
+      agents: [],
+      logLevel: 'warn',
+      userScripts: [{ id: 'aba', code: 'A', enabled: true }],
+    };
+    const configB = {
+      agents: [],
+      logLevel: 'warn',
+      userScripts: [{ id: 'aba', code: 'B', enabled: true }],
+    };
+
+    await mocks.configChange?.(configA);
+    await vi.waitFor(() => expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledTimes(1));
+    await mocks.configChange?.(configB);
+    await mocks.configChange?.(configA);
+    releaseFirst();
+    await vi.waitFor(() => expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledTimes(2));
+    releaseSecond();
+    await vi.waitFor(() => expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledTimes(3));
+
+    await mocks.configChange?.(configA);
+    expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledTimes(3);
+    releaseThird();
+    await Promise.resolve();
+    expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledTimes(3);
   });
 
   it('revokes memory authority when configuration reconciliation fails', async () => {
@@ -313,6 +412,9 @@ describe('background response privacy', () => {
 
   it('replaces WebMCP refresh failures with a fixed response', async () => {
     const rawError = 'confidential reinjection failure';
+    mocks.configStorage.get.mockReturnValueOnce(
+      Promise.resolve({ agents: [], userScripts: [{ id: 'refresh-failure' }] })
+    );
     mocks.tabManager.reinjectAllScripts.mockRejectedValueOnce(new Error(rawError));
     const sendResponse = vi.fn();
 
@@ -328,6 +430,196 @@ describe('background response privacy', () => {
       success: false,
       error: 'WebMCP script refresh failed',
     });
+  });
+
+  it('retries the same page-tool fingerprint after a failed reinjection', async () => {
+    const config = {
+      agents: [],
+      userScripts: [{ id: 'retry-refresh', code: 'fixture', enabled: true }],
+    };
+    mocks.configStorage.get.mockReturnValueOnce(Promise.resolve(config));
+    mocks.tabManager.reinjectAllScripts.mockClear();
+    mocks.tabManager.reinjectAllScripts.mockRejectedValueOnce(new Error('first refresh failed'));
+    const firstResponse = vi.fn();
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      firstResponse
+    );
+    await vi.waitFor(() =>
+      expect(firstResponse).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    );
+
+    mocks.configStorage.get.mockReturnValueOnce(Promise.resolve(config));
+    const secondResponse = vi.fn();
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      secondResponse
+    );
+    await vi.waitFor(() => expect(secondResponse).toHaveBeenCalledWith({ success: true }));
+    expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles extension-owned tools before reinjecting page implementations', async () => {
+    let releaseRefresh!: (config: unknown) => void;
+    const refresh = new Promise<unknown>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    mocks.configStorage.get.mockClear();
+    mocks.configStorage.get.mockReturnValueOnce(refresh);
+    mocks.toolRegistry.replaceSystemTools.mockClear();
+    mocks.tabManager.reinjectAllScripts.mockClear();
+    const sendResponse = vi.fn();
+
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+
+    await vi.waitFor(() => expect(mocks.configStorage.get).toHaveBeenCalled());
+    expect(mocks.toolRegistry.replaceSystemTools).not.toHaveBeenCalled();
+    expect(mocks.tabManager.reinjectAllScripts).not.toHaveBeenCalled();
+    releaseRefresh({
+      agents: [],
+      builtinScripts: [],
+      userScripts: [{ id: 'reconcile-before-reinject' }],
+    });
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ success: true }));
+    expect(mocks.toolRegistry.replaceSystemTools).toHaveBeenCalledOnce();
+    expect(mocks.tabManager.reinjectAllScripts).toHaveBeenCalledOnce();
+    expect(mocks.toolRegistry.replaceSystemTools.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.tabManager.reinjectAllScripts.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('waits for an in-flight system refresh before direct tool selection', async () => {
+    let releaseRefresh!: (config: unknown) => void;
+    const refresh = new Promise<unknown>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    mocks.configStorage.get.mockClear();
+    mocks.configStorage.get.mockReturnValueOnce(refresh);
+    const refreshResponse = vi.fn();
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      refreshResponse
+    );
+    await vi.waitFor(() => expect(mocks.configStorage.get).toHaveBeenCalled());
+
+    const execute = vi.fn().mockResolvedValue({ success: true });
+    mocks.toolRegistry.getToolForTab.mockReturnValue({ execute });
+    const sendResponse = vi.fn();
+    mocks.onMessage!(
+      { type: 'WEBMCP_CALL_TOOL', tabId: 7, toolName: 'agentboard_read_page', args: {} },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+
+    await Promise.resolve();
+    expect(mocks.toolRegistry.getToolForTab).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    releaseRefresh({ agents: [], builtinScripts: [] });
+    await vi.waitFor(() =>
+      expect(sendResponse).toHaveBeenCalledWith({
+        success: true,
+        result: { success: true },
+      })
+    );
+    expect(mocks.toolRegistry.getToolForTab).toHaveBeenCalledWith(7, 'agentboard_read_page');
+  });
+
+  it('drains a newer refresh queued while direct tool selection is waiting', async () => {
+    let releaseFirst!: (config: unknown) => void;
+    let releaseSecond!: (config: unknown) => void;
+    const first = new Promise<unknown>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const second = new Promise<unknown>((resolve) => {
+      releaseSecond = resolve;
+    });
+    mocks.configStorage.get.mockClear();
+    mocks.configStorage.get.mockReturnValueOnce(first).mockReturnValueOnce(second);
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      vi.fn()
+    );
+    await vi.waitFor(() => expect(mocks.configStorage.get).toHaveBeenCalledOnce());
+
+    const execute = vi.fn().mockResolvedValue('latest');
+    mocks.toolRegistry.getToolForTab.mockClear();
+    mocks.toolRegistry.getToolForTab.mockReturnValue({ execute });
+    const sendResponse = vi.fn();
+    mocks.onMessage!(
+      { type: 'WEBMCP_CALL_TOOL', tabId: 7, toolName: 'agentboard_read_page', args: {} },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      vi.fn()
+    );
+
+    releaseFirst({ agents: [], builtinScripts: [] });
+    await vi.waitFor(() => expect(mocks.configStorage.get).toHaveBeenCalledTimes(2));
+    expect(mocks.toolRegistry.getToolForTab).not.toHaveBeenCalled();
+    releaseSecond({ agents: [], builtinScripts: [] });
+
+    await vi.waitFor(() =>
+      expect(sendResponse).toHaveBeenCalledWith({ success: true, result: 'latest' })
+    );
+    expect(mocks.toolRegistry.getToolForTab).toHaveBeenCalledOnce();
+  });
+
+  it('does not infer tab authority for an unbound extension-owned tool call', async () => {
+    mocks.toolRegistry.getToolForTab.mockClear();
+    mocks.toolRegistry.isProtectedToolName.mockReturnValue(true);
+    mocks.tabManager.getAllRegistries.mockReturnValue(
+      new Map([
+        [
+          7,
+          {
+            tools: [{ name: 'agentboard_read_page' }],
+          },
+        ],
+      ])
+    );
+    const sendResponse = vi.fn();
+
+    mocks.onMessage!(
+      { type: 'WEBMCP_CALL_TOOL', toolName: 'agentboard_read_page' },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+
+    await vi.waitFor(() =>
+      expect(sendResponse).toHaveBeenCalledWith({
+        success: false,
+        error: 'WebMCP tool execution failed',
+      })
+    );
+    expect(mocks.toolRegistry.getToolForTab).not.toHaveBeenCalled();
+  });
+
+  it('normalizes omitted direct-call arguments to an empty object', async () => {
+    const execute = vi.fn().mockResolvedValue('ok');
+    mocks.toolRegistry.getToolForTab.mockReturnValue({ execute });
+    const sendResponse = vi.fn();
+
+    mocks.onMessage!(
+      { type: 'WEBMCP_CALL_TOOL', tabId: 7, toolName: 'page_tool' },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+
+    await vi.waitFor(() =>
+      expect(sendResponse).toHaveBeenCalledWith({ success: true, result: 'ok' })
+    );
+    expect(execute).toHaveBeenCalledWith({}, {});
   });
 });
 
@@ -352,6 +644,68 @@ describe('background stream ownership', () => {
       resolveRemoteTools();
       await remoteToolsReady;
     }
+  });
+
+  it('waits for an in-flight system refresh before publishing the tool catalog', async () => {
+    let releaseRefresh!: (config: unknown) => void;
+    const refresh = new Promise<unknown>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    mocks.configStorage.get.mockClear();
+    mocks.configStorage.get.mockReturnValueOnce(refresh);
+    mocks.toolRegistry.getAllTools.mockClear();
+    mocks.toolRegistry.getAllTools.mockReturnValue({});
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      vi.fn()
+    );
+    await vi.waitFor(() => expect(mocks.configStorage.get).toHaveBeenCalled());
+
+    const sendResponse = vi.fn();
+    mocks.onMessage!(
+      { type: 'WEBMCP_GET_TOOLS' },
+      {} as chrome.runtime.MessageSender,
+      sendResponse
+    );
+
+    await Promise.resolve();
+    expect(mocks.toolRegistry.getAllTools).not.toHaveBeenCalled();
+    releaseRefresh({ agents: [], builtinScripts: [] });
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ success: true, data: [] }));
+    expect(mocks.toolRegistry.getAllTools).toHaveBeenCalledOnce();
+  });
+
+  it('waits for an in-flight system refresh before starting an AI stream', async () => {
+    let releaseRefresh!: (config: unknown) => void;
+    const refresh = new Promise<unknown>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    mocks.configStorage.get.mockClear();
+    mocks.configStorage.get.mockReturnValueOnce(refresh);
+    mocks.onMessage!(
+      { type: 'WEBMCP_SCRIPTS_UPDATED' },
+      {} as chrome.runtime.MessageSender,
+      vi.fn()
+    );
+    await vi.waitFor(() => expect(mocks.configStorage.get).toHaveBeenCalledOnce());
+
+    mocks.aiClient.streamChat.mockClear();
+    mocks.aiClient.streamChat.mockResolvedValueOnce(undefined);
+    const sessionPort = createPort('ai-stream-system-refresh');
+    mocks.onConnect!(sessionPort.port);
+    const request = sessionPort.send({
+      type: 'STREAM_CHAT',
+      agentId: 'agent',
+      tabId: 7,
+      messages: [],
+    });
+
+    await Promise.resolve();
+    expect(mocks.aiClient.streamChat).not.toHaveBeenCalled();
+    releaseRefresh({ agents: [], builtinScripts: [] });
+    await request;
+    expect(mocks.aiClient.streamChat).toHaveBeenCalledOnce();
   });
 
   it('rejects a duplicate port without disturbing the current owner', async () => {

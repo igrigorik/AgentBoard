@@ -14,7 +14,9 @@ import {
   type StorageConfig,
 } from '../lib/storage/config';
 import { getTabManager } from '../lib/webmcp/lifecycle';
+import { getEnabledSystemToolRegistrations } from '../lib/webmcp/system-tools';
 import { getToolRegistry } from '../lib/webmcp/tool-registry';
+import { claimPdfWorkerCapability } from '../lib/webmcp/tools/read_page/pdf/capabilities';
 import type { CoreMessage } from 'ai';
 import type {
   ExtensionMessage,
@@ -325,18 +327,18 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       return true; // Keep channel open for async response
 
     case 'WEBMCP_SCRIPTS_UPDATED':
-      // Hot reload: rebuild built-in and user WebMCP registrations in all tabs
+      // Hot reload: reconcile extension-owned factories before rebuilding page registrations.
       log.debug('[Background] Received script update notification, triggering hot reload');
-      webmcp
-        .reinjectAllScripts()
-        .then(() => {
-          log.debug('[Background] Hot reload completed');
-          sendResponse({ success: true });
-        })
-        .catch(() => {
-          log.error('[Background] Hot reload failed');
-          sendResponse({ success: false, error: 'WebMCP script refresh failed' });
-        });
+      (async () => {
+        const config = await configStorage.get();
+        void queueSystemToolRefresh(config);
+        await queuePageToolRefresh(config);
+        log.debug('[Background] Hot reload completed');
+        sendResponse({ success: true });
+      })().catch(() => {
+        log.error('[Background] Hot reload failed');
+        sendResponse({ success: false, error: 'WebMCP script refresh failed' });
+      });
       return true; // Keep channel open for async response
 
     case 'TEST_CONNECTION':
@@ -383,6 +385,32 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       sendResponse({ pong: true });
       return false;
 
+    case 'PDF_WORKER_HOST_CLAIM': {
+      const tabId = sender.tab?.id;
+      let isWorkerHost = false;
+      try {
+        const senderUrl = new URL(sender.url ?? '');
+        const workerHostUrl = new URL(
+          chrome.runtime.getURL('src/lib/webmcp/tools/read_page/pdf/worker-host.html')
+        );
+        isWorkerHost =
+          sender.id === chrome.runtime.id &&
+          senderUrl.origin === workerHostUrl.origin &&
+          senderUrl.pathname === workerHostUrl.pathname;
+      } catch {
+        // Only the packaged worker host may claim parser capabilities.
+      }
+      const ownedDocument = typeof tabId === 'number' ? webmcp.getOwnedDocument(tabId) : null;
+      const claimed =
+        isWorkerHost &&
+        typeof tabId === 'number' &&
+        typeof request.capability === 'string' &&
+        ownedDocument !== null &&
+        claimPdfWorkerCapability(request.capability, tabId, ownedDocument.documentId);
+      sendResponse({ success: claimed });
+      return false;
+    }
+
     case 'MEMORY_BINDINGS_RESET':
       if (!isOptionsPageSender(sender)) {
         sendResponse({ success: false });
@@ -427,6 +455,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
         };
 
         try {
+          await waitForCurrentSystemTools();
           const {
             tabId: providedTabId,
             toolName,
@@ -460,8 +489,9 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
             }
           }
 
-          // Last resort: try to find any tab with the tool available
-          if (!tabId) {
+          // Last resort applies only to page-owned tools. Extension-owned names require explicit
+          // or sidebar-bound tab authority; a raw internal page registration is not tab consent.
+          if (!tabId && !getToolRegistry().isProtectedToolName(toolName)) {
             const registries = webmcp.getAllRegistries();
             for (const [tid, registry] of registries) {
               if (registry.tools.some((t) => t.name === toolName)) {
@@ -477,7 +507,13 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
             responseData = { success: false, error: 'WebMCP tool execution failed' };
           } else {
             log.debug(`[Background] Calling tool ${toolName} in tab ${tabId}`);
-            const result = await webmcp.callTool(tabId, toolName, args);
+            const selectedTool = getToolRegistry().getToolForTab(tabId, toolName);
+            if (!selectedTool || typeof selectedTool.execute !== 'function') {
+              throw new Error('Tab-scoped tool is unavailable');
+            }
+            // Runtime callers use the same system-name protection and tab selection as model calls.
+            const executionArgs = args === undefined ? {} : args;
+            const result = await selectedTool.execute(executionArgs, {});
             log.debug(`[Background] Tool ${toolName} returned:`, result);
             responseData = { success: true, result };
           }
@@ -499,6 +535,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       // Get available tools from unified registry with original schemas
       (async () => {
         await toolsReady;
+        await waitForCurrentSystemTools();
         const { tabId: providedTabId } = request as WebMCPGetToolsMessage;
 
         // Get tab ID - either provided or from sidebar binding
@@ -566,7 +603,7 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
     case 'GET_SITE_TOOL_HINTS': {
       (async () => {
         try {
-          await systemToolsReady;
+          await waitForCurrentSystemTools();
           const toolRegistry = getToolRegistry();
           const hints = toolRegistry.getSiteToolHints(request.tabId);
           sendResponse({ hints });
@@ -739,7 +776,10 @@ chrome.runtime.onConnect.addListener((port) => {
         log.debug('[Background] Starting stream for agent:', msg.agentId, 'tab:', msg.tabId);
 
         try {
-          await raceWithAbort(toolsReady, preparation.signal);
+          await raceWithAbort(
+            Promise.all([toolsReady, waitForCurrentSystemTools()]).then(() => undefined),
+            preparation.signal
+          );
           if (!isCurrentStream()) return;
           const { agentId, tabId, messages, workspaceContext } = msg;
 
@@ -915,17 +955,87 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+function applySystemTools(config: Pick<StorageConfig, 'builtinScripts'>): void {
+  getToolRegistry().replaceSystemTools(getEnabledSystemToolRegistrations(config));
+}
+
+function pageToolFingerprint(
+  config: Pick<StorageConfig, 'builtinScripts' | 'userScripts'>
+): string {
+  return JSON.stringify([config.builtinScripts ?? [], config.userScripts ?? []]);
+}
+
+let appliedPageToolFingerprint: string | undefined;
+let pendingPageToolRefresh: { fingerprint: string } | undefined;
+let pageToolRefreshHealthy = true;
+let pageToolRefreshes = Promise.resolve();
+
 // Local system tools are sufficient for page hints; remote MCP startup must not
 // block the sidebar from constructing a cancellable request.
-const systemToolsReady = getToolRegistry().registerSystemTools();
-let systemToolRefreshes = systemToolsReady;
+let systemToolRefreshes = configStorage.get().then((config) => {
+  appliedPageToolFingerprint = pageToolFingerprint(config);
+  applySystemTools(config);
+});
 
-// Handlers that send the full catalog wait for configured remote MCP tools too.
-const toolsReady = (async () => {
-  await systemToolsReady;
-  await getToolRegistry().loadRemoteTools();
-  log.debug('[Background] Tool registry initialized');
-})();
+function queueSystemToolRefresh(config?: Pick<StorageConfig, 'builtinScripts'>): Promise<void> {
+  systemToolRefreshes = systemToolRefreshes
+    .catch(() => undefined)
+    .then(async () => applySystemTools(config ?? (await configStorage.get())));
+  return systemToolRefreshes;
+}
+
+/** Drain through the latest queued generation rather than capturing one stale refresh promise. */
+async function waitForCurrentSystemTools(): Promise<void> {
+  for (;;) {
+    const pending = systemToolRefreshes;
+    try {
+      await pending;
+    } catch (error) {
+      if (pending === systemToolRefreshes) throw error;
+      continue;
+    }
+    if (pending === systemToolRefreshes) return;
+  }
+}
+
+function queuePageToolRefresh(
+  config: Pick<StorageConfig, 'builtinScripts' | 'userScripts'>
+): Promise<void> {
+  const fingerprint = pageToolFingerprint(config);
+  if (
+    fingerprint === pendingPageToolRefresh?.fingerprint ||
+    (fingerprint === appliedPageToolFingerprint &&
+      pendingPageToolRefresh === undefined &&
+      pageToolRefreshHealthy)
+  ) {
+    return pageToolRefreshes;
+  }
+
+  const refresh = { fingerprint };
+  pendingPageToolRefresh = refresh;
+  pageToolRefreshes = pageToolRefreshes
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        await waitForCurrentSystemTools();
+        await webmcp.reinjectAllScripts();
+        appliedPageToolFingerprint = fingerprint;
+        pageToolRefreshHealthy = true;
+      } catch (error) {
+        pageToolRefreshHealthy = false;
+        throw error;
+      } finally {
+        if (pendingPageToolRefresh === refresh) pendingPageToolRefresh = undefined;
+      }
+    });
+  return pageToolRefreshes;
+}
+
+// Remote startup is independent so a later valid system configuration can recover from an
+// unavailable initial storage read without leaving catalogs and streams permanently poisoned.
+const toolsReady = getToolRegistry()
+  .loadRemoteTools()
+  .then(() => log.debug('[Background] Tool registry initialized'));
 
 // Listen for config changes from Options page
 configStorage.onChange(
@@ -937,14 +1047,12 @@ configStorage.onChange(
 
     // Keep the storage callback non-blocking: the remote reconciler synchronously
     // revokes stale authority and independently fences superseded candidates.
-    if (newConfig.builtinScripts !== undefined) {
-      systemToolRefreshes = systemToolRefreshes
-        .catch(() => undefined)
-        .then(() => toolRegistry.registerSystemTools())
-        .catch(() => {
-          log.error('[Background] System tool refresh failed');
-        });
-    }
+    void queueSystemToolRefresh(newConfig).catch(() => {
+      log.error('[Background] System tool refresh failed');
+    });
+    void queuePageToolRefresh(newConfig).catch(() => {
+      log.error('[Background] Page tool refresh failed');
+    });
     void toolRegistry.loadRemoteTools(newConfig);
     try {
       // ConfigStorage serializes async change callbacks, so stale reconciliations

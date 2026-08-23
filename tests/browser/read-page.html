@@ -106,19 +106,8 @@
         },
       },
     ];
-
-    // Chrome 151 exposes a getter-only native modelContext. An own property keeps
-    // this fixture deterministic without registering the synthetic tool natively.
-    Object.defineProperty(document, 'modelContext', {
-      configurable: true,
-      value: {
-        registerTool(tool) {
-          window.registeredReadPage = tool;
-        },
-      },
-    });
   </script>
-  <script src="../../dist/tools/agentboard_read_page.js"></script>
+  <script src="../../dist/content-scripts/read-page-html-host.js"></script>
   <script>
     function emitResult(payload) {
       const bytes = new TextEncoder().encode(JSON.stringify(payload));
@@ -133,14 +122,15 @@
 
     (async () => {
       try {
-        if (!window.registeredReadPage) throw new Error('Compiled read_page tool did not register');
+        const reader = globalThis.__agentboardReadPageHtmlV1;
+        if (reader?.version !== 1) throw new Error('Built read_page HTML host did not install');
 
         const results = {};
         for (const scenario of scenarios) {
           document.title = scenario.title;
           document.body.innerHTML = scenario.html;
           scenario.setup?.();
-          results[scenario.name] = await window.registeredReadPage.execute({ maxLength: 10000 });
+          results[scenario.name] = await reader.execute({ maxLength: 10000 });
         }
         emitResult({ results });
       } catch (error) {

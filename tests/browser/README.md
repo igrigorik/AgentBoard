@@ -2,7 +2,7 @@
 
 The browser suites exercise built browser artifacts in Chrome rather than source modules in a simulated DOM.
 
-- `pnpm run test:browser` builds and tests the compiled `agentboard_read_page` tool.
+- `pnpm run test:browser` builds and tests the private `read_page` HTML host against the rendered-page corpus.
 - `pnpm run test:browser:mv3` builds and tests extension loading, settings migration, WebMCP execution, storage serialization, and fail-closed configuration handling.
 - `pnpm run test:browser:webmcp-wpt` builds and injects the compiled WebMCP polyfill into a pinned set of canonical Web Platform Tests.
 

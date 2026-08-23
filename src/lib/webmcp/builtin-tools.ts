@@ -11,6 +11,7 @@
 import { COMPILED_TOOLS, type CompiledToolInfo } from './tools/registry';
 import { FETCH_URL_TOOL_NAME, FETCH_URL_METADATA } from './tools/fetch';
 import { NAVIGATE_TOOL_NAME, NAVIGATE_TOOL_METADATA } from './tools/navigate';
+import { READ_PAGE_METADATA, READ_PAGE_TOOL_NAME } from './tools/read_page/metadata';
 
 export type BuiltinToolType = 'system' | 'webmcp';
 
@@ -49,6 +50,16 @@ const SYSTEM_TOOLS: BuiltinToolInfo[] = [
     version: NAVIGATE_TOOL_METADATA.version,
     match: ['<all_urls>'],
     inputSchema: NAVIGATE_TOOL_METADATA.inputSchema,
+  },
+  {
+    id: READ_PAGE_TOOL_NAME,
+    name: 'read_page',
+    namespace: 'agentboard',
+    type: 'system',
+    description: READ_PAGE_METADATA.description,
+    version: READ_PAGE_METADATA.version,
+    match: ['<all_urls>'],
+    inputSchema: READ_PAGE_METADATA.inputSchema,
   },
 ];
 

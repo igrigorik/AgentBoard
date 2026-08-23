@@ -29,10 +29,9 @@ describe('tool-patterns', () => {
         expect(score).toBeLessThan(70);
       });
 
-      it('scores agentboard_read_page low (30) due to <all_urls> pattern', () => {
-        // Pattern: <all_urls> has 0 literal chars
-        const score = calculateSpecificityScore('agentboard_read_page', 'site');
-        expect(score).toBe(30);
+      it('does not retain the system reader in the page-tool pattern registry', () => {
+        expect(calculateSpecificityScore('agentboard_read_page', 'system')).toBe(20);
+        expect(calculateSpecificityScore('agentboard_read_page', 'site')).toBe(100);
       });
     });
 
@@ -59,6 +58,7 @@ describe('tool-patterns', () => {
       it('orders tools correctly: site-provided > specific injected > generic injected > system > remote', () => {
         // Register user scripts with different specificity levels
         registerToolPatterns('user_medium', ['*://*.example.com/*']); // ~15 literal chars
+        registerToolPatterns('ordering_generic', ['<all_urls>']);
 
         const siteProvided = calculateSpecificityScore('unknown_site_tool', 'site');
         const youtubeTranscript = calculateSpecificityScore(
@@ -66,7 +66,7 @@ describe('tool-patterns', () => {
           'site'
         );
         const userMedium = calculateSpecificityScore('user_medium', 'site');
-        const genericInjected = calculateSpecificityScore('agentboard_read_page', 'site');
+        const genericInjected = calculateSpecificityScore('ordering_generic', 'site');
         const system = calculateSpecificityScore('fetch_url', 'system');
         const remote = calculateSpecificityScore('mcp_tool', 'remote');
 
@@ -79,11 +79,12 @@ describe('tool-patterns', () => {
       });
 
       it('sorts tools in correct order when collected', () => {
+        registerToolPatterns('sorting_generic', ['<all_urls>']);
         // Simulate what getToolsForTab does
         const tools = [
           { name: 'remote_tool', source: 'remote' as const },
           { name: 'fetch_url', source: 'system' as const },
-          { name: 'agentboard_read_page', source: 'site' as const },
+          { name: 'sorting_generic', source: 'site' as const },
           { name: 'agentboard_youtube_transcript', source: 'site' as const },
           { name: 'site_tool', source: 'site' as const }, // Not in registry = site-provided
         ];
@@ -98,7 +99,7 @@ describe('tool-patterns', () => {
         const names = scored.map((t) => t.name);
         expect(names[0]).toBe('site_tool'); // 100
         expect(names[1]).toBe('agentboard_youtube_transcript'); // ~65
-        expect(names[2]).toBe('agentboard_read_page'); // 30
+        expect(names[2]).toBe('sorting_generic'); // 30
         expect(names[3]).toBe('fetch_url'); // 20
         expect(names[4]).toBe('remote_tool'); // 10
       });

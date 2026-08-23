@@ -1,9 +1,15 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import { crx } from '@crxjs/vite-plugin';
 import manifest from './manifest.json' with { type: 'json' };
 import pkg from './package.json' with { type: 'json' };
 import path from 'node:path';
 import { webmcpCompilerPlugin } from './scripts/vite-plugin-webmcp-compiler';
+import {
+  HTML_READER_HOST_FILE,
+  HTML_READER_HOST_KEY,
+  HTML_READER_HOST_VERSION,
+} from './src/lib/webmcp/tools/read_page/html-protocol';
+import { PDF_DOCUMENT_HOST_FILE } from './src/lib/webmcp/tools/read_page/pdf/protocol';
 
 // Single source of truth: inject version from package.json into manifest
 const manifestWithVersion = {
@@ -12,10 +18,36 @@ const manifestWithVersion = {
 };
 const isReleaseBuild = process.env.RELEASE === '1';
 
+/** Wrap configured file-injected entries so their minified top-level bindings cannot collide. */
+function classicScriptIifePlugin(entries: Readonly<Record<string, string | undefined>>): Plugin {
+  return {
+    name: 'classic-script-iife',
+    enforce: 'post',
+    generateBundle(_options, bundle) {
+      for (const output of Object.values(bundle)) {
+        if (output.type !== 'chunk' || !(output.fileName in entries)) continue;
+        if (output.imports.length > 0 || output.dynamicImports.length > 0) {
+          throw new Error(`Classic script ${output.fileName} must be self-contained`);
+        }
+        if (output.exports.length > 0) {
+          throw new Error(`Classic script ${output.fileName} must not export module bindings`);
+        }
+        const alreadyInstalled = entries[output.fileName];
+        const guard = alreadyInstalled ? `if (${alreadyInstalled}) return;\n` : '';
+        output.code = `(() => {\n${guard}${output.code}\n})();\n`;
+      }
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     webmcpCompilerPlugin(), // Compile WebMCP tools first
     crx({ manifest: manifestWithVersion }),
+    classicScriptIifePlugin({
+      [HTML_READER_HOST_FILE]: `globalThis[${JSON.stringify(HTML_READER_HOST_KEY)}]?.version === ${HTML_READER_HOST_VERSION}`,
+      [PDF_DOCUMENT_HOST_FILE]: undefined,
+    }),
   ],
   resolve: {
     alias: [
@@ -47,6 +79,18 @@ export default defineConfig({
           'src/content-scripts/page-bridge.js'
         ),
         'content-scripts/relay': path.resolve(__dirname, 'src/content-scripts/relay.js'),
+        [HTML_READER_HOST_FILE.replace(/\.js$/, '')]: path.resolve(
+          __dirname,
+          'src/lib/webmcp/tools/read_page/html-host.ts'
+        ),
+        [PDF_DOCUMENT_HOST_FILE.replace(/\.js$/, '')]: path.resolve(
+          __dirname,
+          'src/lib/webmcp/tools/read_page/pdf/document-host.ts'
+        ),
+        'pdf-worker-host': path.resolve(
+          __dirname,
+          'src/lib/webmcp/tools/read_page/pdf/worker-host.html'
+        ),
       },
       output: {
         // Ensure consistent chunk naming
@@ -58,7 +102,7 @@ export default defineConfig({
     // The service-worker registry intentionally keeps provider and MCP adapters in
     // one graph; warn on growth beyond its reviewed release baseline instead of
     // Vite's web-page-oriented 500 kB default.
-    chunkSizeWarningLimit: 650,
+    chunkSizeWarningLimit: 660,
     // Chrome extensions have stricter CSP, can't use inline scripts
     // Only minify for release builds (`pnpm run build:release`).
     minify: isReleaseBuild ? 'terser' : false,

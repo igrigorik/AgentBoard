@@ -161,7 +161,7 @@ Save in Settings → My Tools. The AI can now call it when you ask about prices 
 
 **Built-in page/WebMCP tools:**
 
-- `agentboard_read_page` - Read the rendered page as article markdown, visible application text, or metadata context
+- `agentboard_read_page` - Read the current HTML/PDF document as bounded Markdown
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
 
 **Built-in system tools:**
@@ -218,7 +218,7 @@ Any MCP server that supports HTTP streaming. Add auth tokens if needed. Examples
 
 Any JavaScript that interacts with the page. Extract data with CSS selectors. Click buttons. Submit forms. Modify content. Access page JavaScript state. Read cookies. Trigger events. Use URL match patterns to scope tools to specific sites. Full DOM access, full page context. If you can do it in the browser console, you can script it as a WebMCP tool.
 
-URL match patterns are evaluated when a document loads or script settings are reapplied; AgentBoard does not rematch injected scripts after a same-document SPA route change. A script that remains registered still executes against the live document and should read route-specific state such as `window.location` inside `execute()` rather than capturing it during registration.
+URL match patterns are evaluated when a document loads, script settings are reapplied, or the top frame commits a same-document SPA history update. Scripts still execute against a live document whose route can change between registration and invocation, so read route-specific state such as `window.location` inside `execute()` rather than capturing it during registration.
 
 ## How do site CSP policies and WebMCP interact?
 

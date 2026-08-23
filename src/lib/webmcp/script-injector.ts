@@ -18,12 +18,15 @@ declare global {
     };
     __agentboardUserScriptLifetimes?: Map<string, AbortController>;
     __agentboardBuiltinToolLifetimes?: Map<string, AbortController>;
+    __agentboardUserScriptSettlements?: Map<string, Promise<void>>;
+    __agentboardBuiltinToolSettlements?: Map<string, Promise<void>>;
     __agentboardUserScriptGeneration?: string;
     __webmcpInjected?: Record<string, boolean>;
   }
 }
 
 const configStorage = ConfigStorage.getInstance();
+const REGISTRATION_SETTLEMENT_TIMEOUT_MS = 5_000;
 
 /** Keep programmatic injection aligned with manifest host permissions and browser-protected stores. */
 export function supportsWebMCPInjection(rawUrl: string): boolean {
@@ -51,6 +54,9 @@ export interface InjectionOptions {
   url: string;
   frameId?: number;
   generation?: string;
+  documentId?: string;
+  /** Hot reload needs an actionable failure after attempting every script. */
+  throwOnFailure?: boolean;
 }
 
 /**
@@ -85,6 +91,14 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
     ? window.__agentboardUserScriptLifetimes
     : new Map();
   window.__agentboardUserScriptLifetimes = registrations;
+  const settlements = window.__agentboardUserScriptSettlements instanceof Map
+    ? window.__agentboardUserScriptSettlements
+    : new Map();
+  window.__agentboardUserScriptSettlements = settlements;
+  const publishSettlement = (settlement) => {
+    settlements.set(scriptId, settlement);
+    void settlement.catch(() => undefined);
+  };
   registrations.get(scriptId)?.abort?.();
   const registrationController = new AbortController();
   registrations.set(scriptId, registrationController);
@@ -94,7 +108,10 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
 
     if (typeof shouldRegister === 'function') {
       try {
-        if (!shouldRegister({ signal: registrationController.signal })) return;
+        if (!shouldRegister({ signal: registrationController.signal })) {
+          publishSettlement(Promise.resolve());
+          return;
+        }
       } catch {
         // Continue with registration if shouldRegister throws (fail-open)
       }
@@ -113,23 +130,27 @@ function wrapScriptForInjection(code: string, metadata: UserScriptMetadata): str
         const registration = modelContext.registerTool(tool, {
           signal: registrationController.signal
         });
-        Promise.resolve(registration).then(
+        publishSettlement(Promise.resolve(registration).then(
           () => undefined,
           (error) => {
             if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
             if (registrationController.signal.aborted) return;
             registrationController.abort(error);
+            throw error;
           }
-        );
+        ));
       } catch (error) {
         if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
         throw error;
       }
+    } else {
+      publishSettlement(Promise.reject(new Error('WebMCP registration API is unavailable')));
     }
 
   } catch (error) {
     if (registrations.get(scriptId) === registrationController) registrations.delete(scriptId);
     registrationController.abort(error);
+    publishSettlement(Promise.reject(error));
   }
 })();
 //# sourceURL=webmcp-script:${scriptName}.js`;
@@ -149,23 +170,64 @@ export async function getAllScriptsForInjection(): Promise<UserScript[]> {
  * Inject user scripts into a tab that match the URL
  */
 export async function injectUserScripts(options: InjectionOptions): Promise<void> {
-  const { tabId, url, frameId = 0, generation = globalThis.crypto.randomUUID() } = options;
+  const {
+    tabId,
+    url,
+    frameId = 0,
+    generation = globalThis.crypto.randomUUID(),
+    documentId,
+    throwOnFailure = false,
+  } = options;
+  const failures: unknown[] = [];
 
+  let allScripts: UserScript[];
   try {
-    const allScripts = await getAllScriptsForInjection();
-    const enabledScripts = allScripts.filter((s) => s.enabled);
-
-    log.debug(`[WebMCP Injector] Processing ${enabledScripts.length} enabled scripts for ${url}`);
-
-    for (const script of enabledScripts) {
-      try {
-        await injectSingleScript(script, tabId, url, frameId, generation);
-      } catch (error) {
-        log.error(`[WebMCP Injector] Failed to inject script ${script.id}:`, error);
-      }
-    }
+    allScripts = await getAllScriptsForInjection();
   } catch (error) {
     log.error('[WebMCP Injector] Failed to get user scripts:', error);
+    if (throwOnFailure) throw new Error('User script configuration is unavailable');
+    return;
+  }
+
+  const enabledScripts = allScripts.filter((s) => s.enabled);
+  const matchedPublicNames = new Map<string, string[]>();
+  const publicNameByScriptId = new Map<string, string>();
+  for (const script of enabledScripts) {
+    try {
+      const { metadata } = parseUserScript(script.code, true);
+      if (!matchesUrl(url, metadata)) continue;
+      const publicName = `${metadata.namespace}_${metadata.name}`;
+      publicNameByScriptId.set(script.id, publicName);
+      const matchingIds = matchedPublicNames.get(publicName) ?? [];
+      matchingIds.push(script.id);
+      matchedPublicNames.set(publicName, matchingIds);
+    } catch {
+      // The injection pass below reports malformed scripts with full context.
+    }
+  }
+  const duplicatePublicNames = new Set(
+    [...matchedPublicNames].filter(([, ids]) => ids.length > 1).map(([name]) => name)
+  );
+  log.debug(`[WebMCP Injector] Processing ${enabledScripts.length} enabled scripts for ${url}`);
+
+  for (const script of enabledScripts) {
+    const publicName = publicNameByScriptId.get(script.id);
+    if (publicName && duplicatePublicNames.has(publicName)) {
+      const error = new Error(`Duplicate enabled WebMCP tool name: ${publicName}`);
+      failures.push(error);
+      log.error(`[WebMCP Injector] Rejected duplicate user script ${script.id}`);
+      continue;
+    }
+
+    try {
+      await injectSingleScript(script, tabId, url, frameId, generation, documentId);
+    } catch (error) {
+      failures.push(error);
+      log.error(`[WebMCP Injector] Failed to inject script ${script.id}:`, error);
+    }
+  }
+  if (throwOnFailure && failures.length > 0) {
+    throw new AggregateError(failures, 'One or more user scripts could not be injected');
   }
 }
 
@@ -177,7 +239,8 @@ async function injectSingleScript(
   tabId: number,
   url: string,
   frameId: number,
-  generation: string
+  generation: string,
+  documentId?: string
 ): Promise<void> {
   try {
     // Parse and validate the script (all scripts here are user scripts)
@@ -199,7 +262,12 @@ async function injectSingleScript(
     // Always inject at document_idle for consistent behavior
     const injectImmediately = false;
 
-    const injectionFunc = (codeToInject: string, expectedGeneration: string) =>
+    const injectionFunc = (
+      codeToInject: string,
+      expectedGeneration: string,
+      scriptId: string,
+      settlementTimeoutMs: number
+    ) =>
       new Promise<void>((resolve, reject) => {
         let blobUrl: string | undefined;
         let script: HTMLScriptElement | undefined;
@@ -252,7 +320,32 @@ async function injectSingleScript(
 
           script.onload = () => {
             cleanup();
-            resolve();
+            const settlements = window.__agentboardUserScriptSettlements;
+            const settlement = settlements?.get(scriptId);
+            if (!settlements || !settlement) {
+              resolve();
+              return;
+            }
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            const deadline = new Promise<never>((_, rejectDeadline) => {
+              timeout = setTimeout(
+                () => rejectDeadline(new Error('WebMCP user registration timed out')),
+                settlementTimeoutMs
+              );
+            });
+            Promise.race([settlement, deadline]).then(
+              () => {
+                if (timeout) clearTimeout(timeout);
+                if (settlements.get(scriptId) === settlement) settlements.delete(scriptId);
+                resolve();
+              },
+              (error) => {
+                if (timeout) clearTimeout(timeout);
+                if (settlements.get(scriptId) === settlement) settlements.delete(scriptId);
+                window.__agentboardUserScriptLifetimes?.get(scriptId)?.abort(error);
+                reject(error);
+              }
+            );
           };
           script.onerror = () => {
             cleanup();
@@ -268,20 +361,24 @@ async function injectSingleScript(
 
     // Inject the script
     await chrome.scripting.executeScript({
-      target: { tabId, frameIds: [frameId] },
+      target: documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [frameId] },
       world: 'MAIN',
       injectImmediately,
       func: injectionFunc,
-      args: [wrappedCode, generation],
+      args: [
+        wrappedCode,
+        generation,
+        `${metadata.namespace}:${metadata.name}`,
+        REGISTRATION_SETTLEMENT_TIMEOUT_MS,
+      ],
     });
 
     log.info(`[WebMCP Injector] Successfully injected ${metadata.name}`);
   } catch (error) {
     if (error instanceof ScriptParsingError) {
       log.error(`[WebMCP Injector] Invalid script format:`, error.message);
-    } else {
-      throw error;
     }
+    throw error;
   }
 }
 
@@ -346,20 +443,46 @@ export async function validateAllScripts(): Promise<
   return results;
 }
 
+async function getExactDocumentUrl(tabId: number, documentId: string): Promise<string> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, documentIds: [documentId] },
+    world: 'ISOLATED',
+    injectImmediately: true,
+    func: () => globalThis.location.href,
+  });
+  const result = results.length === 1 ? results[0] : undefined;
+  if (
+    !result ||
+    result.documentId !== documentId ||
+    result.frameId !== 0 ||
+    typeof result.result !== 'string'
+  ) {
+    throw new Error('Document route changed');
+  }
+  return result.result;
+}
+
 /**
  * Re-inject scripts into a tab (useful after script updates)
  */
 export async function reinjectScripts(
   tabId: number,
-  injectBuiltInTools?: (url: string) => Promise<void>
+  injectBuiltInTools?: (url: string, documentId?: string) => Promise<void>,
+  documentId?: string,
+  urlChangeAttempts = 0
 ): Promise<void> {
   try {
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.url) {
+    let currentUrl: string | undefined;
+    if (documentId) {
+      currentUrl = await getExactDocumentUrl(tabId, documentId);
+    } else {
+      currentUrl = (await chrome.tabs.get(tabId)).url;
+    }
+    if (!currentUrl) {
       log.debug(`[WebMCP Injector] Tab ${tabId} has no URL`);
       return;
     }
-    if (!supportsWebMCPInjection(tab.url)) {
+    if (!supportsWebMCPInjection(currentUrl)) {
       log.debug('[WebMCP Injector] Skipping unsupported injection target');
       return;
     }
@@ -368,7 +491,7 @@ export async function reinjectScripts(
 
     // First, clear the injection markers IMMEDIATELY to avoid race conditions
     await chrome.scripting.executeScript({
-      target: { tabId, frameIds: [0] },
+      target: documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [0] },
       world: 'MAIN',
       injectImmediately: true, // MUST run immediately before re-injection!
       func: (nextGeneration: string) => {
@@ -383,6 +506,8 @@ export async function reinjectScripts(
           for (const controller of builtInRegistrations.values()) controller.abort?.();
           builtInRegistrations.clear();
         }
+        window.__agentboardUserScriptSettlements?.clear();
+        window.__agentboardBuiltinToolSettlements?.clear();
 
         if (window.__webmcpInjected) {
           window.__webmcpInjected = {};
@@ -392,19 +517,43 @@ export async function reinjectScripts(
     });
 
     // Rebuild extension-owned tools before user tools so collision behavior is deterministic.
-    await injectBuiltInTools?.(tab.url);
+    await injectBuiltInTools?.(currentUrl, documentId);
     await injectUserScripts({
       tabId,
-      url: tab.url,
+      url: currentUrl,
       frameId: 0,
       generation,
+      documentId,
+      throwOnFailure: true,
     });
+
+    if (documentId) {
+      const settledUrl = await getExactDocumentUrl(tabId, documentId);
+      if (settledUrl !== currentUrl) {
+        if (urlChangeAttempts >= 2) {
+          throw new Error('Document URL changed repeatedly during hot reload');
+        }
+        await reinjectScripts(tabId, injectBuiltInTools, documentId, urlChangeAttempts + 1);
+      }
+    }
   } catch (error) {
     if (isProtectedExtensionGalleryError(error)) {
       // Navigation can race the URL check above; browser extension stores remain protected.
       log.debug('[WebMCP Injector] Skipping protected extension gallery');
       return;
     }
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes('No tab with id') ||
+      message.includes('Tab not found') ||
+      message.includes('No document with id') ||
+      message.includes('Document route changed') ||
+      /frame (?:with ID )?\d+ (?:was removed|not found)/i.test(message)
+    ) {
+      log.debug('[WebMCP Injector] Skipping a retired tab or frame during hot reload');
+      return;
+    }
     log.error(`[WebMCP Injector] Failed to re-inject scripts:`, error);
+    throw error;
   }
 }

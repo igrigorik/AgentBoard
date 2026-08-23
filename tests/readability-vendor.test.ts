@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_SOURCES } from '../src/lib/webmcp/builtin-sources';
 import canonicalSource from '../src/lib/webmcp/vendor/readability.js?raw';
-import readPageSource from '../src/lib/webmcp/tools/read_page/script.js?raw';
+import htmlReaderSource from '../src/lib/webmcp/tools/read_page/html-reader.js?raw';
+import readPageSource from '../src/lib/webmcp/tools/read_page/index.ts?raw';
 
 const COPYRIGHT_MARKER = '/*\n * Copyright (c) 2010 Arc90 Inc';
 const CANONICAL_END_MARKER = '\n\n// Export for ES module usage';
@@ -23,8 +24,14 @@ function replaceExactlyOnce(source: string, find: string, replacement: string): 
 
 describe('Readability vendor integration', () => {
   it('keeps the inlined implementation synchronized except for Trusted Types sinks', () => {
-    const canonical = implementationBetween(canonicalSource, CANONICAL_END_MARKER);
-    let inline = implementationBetween(readPageSource, INLINE_END_MARKER);
+    let canonical = implementationBetween(canonicalSource, CANONICAL_END_MARKER);
+    let inline = implementationBetween(htmlReaderSource, INLINE_END_MARKER);
+
+    canonical = replaceExactlyOnce(
+      canonical,
+      'if (typeof module === "object") {\n  /* global module */\n  module.exports = Readability;\n}',
+      ''
+    ).trimEnd();
 
     inline = replaceExactlyOnce(
       inline,
@@ -47,9 +54,9 @@ describe('Readability vendor integration', () => {
 
   it('records the 0.6.0 provenance in both controlled copies', () => {
     expect(canonicalSource).toContain('Mozilla Readability v0.6.0');
-    expect(readPageSource).toContain('Vendor Mozilla Readability v0.6.0');
+    expect(htmlReaderSource).toContain('Vendor Mozilla Readability v0.6.0');
     expect(canonicalSource).not.toContain('Mozilla Readability v0.5.0');
-    expect(readPageSource).not.toContain('Vendor Mozilla Readability v0.5.0');
+    expect(htmlReaderSource).not.toContain('Vendor Mozilla Readability v0.5.0');
   });
 
   it('bounds CVE-2025-2792 title parsing with a hard process deadline', () => {

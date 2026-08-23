@@ -10,7 +10,7 @@ import { CdpPipe, chromeSandboxArgs, findChrome, waitFor } from './chrome-harnes
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const harnessPath = path.join(repositoryRoot, 'tests/browser/read-page.html');
-const compiledToolPath = path.join(repositoryRoot, 'dist/tools/agentboard_read_page.js');
+const htmlHostPath = path.join(repositoryRoot, 'dist/content-scripts/read-page-html-host.js');
 const resultPattern = /AGENTBOARD_BROWSER_RESULT:([A-Za-z0-9+/=]+):END/;
 const maxOutputCharacters = 20 * 1024 * 1024;
 
@@ -21,8 +21,8 @@ async function startHarnessServer() {
       { body: readFileSync(harnessPath), contentType: 'text/html; charset=utf-8' },
     ],
     [
-      '/dist/tools/agentboard_read_page.js',
-      { body: readFileSync(compiledToolPath), contentType: 'text/javascript; charset=utf-8' },
+      '/dist/content-scripts/read-page-html-host.js',
+      { body: readFileSync(htmlHostPath), contentType: 'text/javascript; charset=utf-8' },
     ],
   ]);
   const server = http.createServer((request, response) => {
@@ -237,8 +237,8 @@ if (!chrome) {
     'Chrome or Chromium is required for browser tests. Set CHROME_BIN to the executable path.'
   );
 }
-if (!existsSync(compiledToolPath)) {
-  throw new Error('Compiled read_page tool is missing. Run pnpm run build before this test.');
+if (!existsSync(htmlHostPath)) {
+  throw new Error('Built read_page HTML host is missing. Run pnpm run build before this test.');
 }
 
 const profileDirectory = mkdtempSync(path.join(tmpdir(), 'agentboard-headless-chrome-'));

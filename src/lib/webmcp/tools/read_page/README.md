@@ -1,16 +1,17 @@
-# `read_page` Tool v5.0.0
+# `read_page` Tool v6.0.0
 
-A WebMCP tool that reads the current rendered page for LLM context. It uses Mozilla Readability for article-like pages and falls back to the browser's rendered text for dashboards, authenticated applications, navigation pages, and other non-article layouts.
+A single extension-owned AgentBoard capability that reads the current HTML page or PDF for LLM context. A tab-bound router inspects the browser-owned top document before invoking a private ISOLATED-world HTML host or AgentBoard's bounded local PDF.js worker. The model never chooses a MIME-specific tool, and the page never owns or observes AgentBoard's system reader.
 
 ## Extraction strategy
 
-The tool selects one of three modes:
+The tool selects one of four modes:
 
-1. `article`: Rendered paragraph-rich pages are cloned and parsed with Mozilla Readability, then converted to Markdown when the extracted text is fully represented in the live rendered page.
-2. `rendered-text`: Other pages use `innerText` from one unambiguous semantic content region.
-3. `metadata`: Pages without safely selectable rendered text still return their title, source, description when available, and an explicit status in `markdownContent`.
+1. `article`: Rendered paragraph-rich HTML pages are cloned and parsed with Mozilla Readability, then converted to Markdown when the extracted text is fully represented in the live rendered page.
+2. `rendered-text`: Other HTML pages use `innerText` from one unambiguous semantic content region.
+3. `metadata`: HTML pages without safely selectable rendered text still return their title, source, description when available, and an explicit status in `markdownContent`.
+4. `pdf`: The exact current PDF is reacquired with the page session, transferred directly to a dedicated local worker, and extracted sequentially with page boundaries and conservative geometry-based line/column ordering.
 
-The paragraph heuristic only chooses whether to attempt Readability. It never prevents the rendered-text fallback.
+The paragraph heuristic only chooses whether to attempt Readability. It never prevents the rendered-text fallback. The PDF branch does not run Readability against Chrome's viewer shell.
 
 ### Rendered-text root selection
 
@@ -37,27 +38,18 @@ The fallback does not reconstruct headings, lists, tables, controls, or repeated
 
 ## Usage
 
-```javascript
-async function readPage(args = {}) {
-  const tools = await document.modelContext.getTools();
-  const tool = tools.find(({ name }) => name === 'agentboard_read_page');
-  if (!tool) throw new Error('agentboard_read_page is not registered');
-  return JSON.parse(await document.modelContext.executeTool(tool, JSON.stringify(args)));
-}
-
-const result = await readPage({
-  maxLength: 32000,
-});
-```
+AgentBoard exposes `agentboard_read_page` directly to the configured model as a system built-in. The model may supply `maxLength`, `startPage`, and `maxPages`; MIME selection is internal. HTML extraction does not register a tool on `document.modelContext` or depend on the page's WebMCP bridge.
 
 `maxLength` applies to the complete Markdown document, including its metadata header. It defaults to 32,000 characters and is constrained to 1,000–100,000 characters. Truncated output ends with `[Content truncated]`.
+
+`startPage` and `maxPages` apply only to PDFs. Pages are one-indexed. `maxPages` defaults to 25 and has a maximum of 50; successful PDF results return `nextPage` when more pages remain or another resource bound stops extraction. HTML pages ignore both fields.
 
 ## Output
 
 ```javascript
 {
   success: true,
-  extractionMode: 'article' | 'rendered-text' | 'metadata',
+  extractionMode: 'article' | 'rendered-text' | 'metadata' | 'pdf',
   metadata: {
     title: 'Page title',
     url: 'https://example.com/page',
@@ -71,19 +63,35 @@ const result = await readPage({
   },
   markdownContent: '# Page title\n*Source: https://example.com/page*\n\n---\n\nPage content…',
   truncated: false,
+  warnings: [], // PDF results only
+  pdf: { // PDF results only
+    pageCount: 19,
+    startPage: 1,
+    endPage: 5,
+    nextPage: 6,
+    layoutMode: 'layout',
+  },
   stats: {
     characterCount: 1234,
     wordCount: 220,
     estimatedReadTime: 2,
+    extractedPageCount: 5, // PDF results only
   },
 }
 ```
 
-The result has one canonical content representation. It does not duplicate the page as HTML and plain text.
+The result has one canonical content representation. It does not duplicate the document as HTML, plain text, or raw PDF bytes. PDF acquisition, authentication, parser, permission, size, and navigation failures return `success: false` with a fixed typed error code; sensitive URL, content, and parser diagnostics are not included.
 
-## Migrating from v4
+## Migrating from v5
 
-Version 5 intentionally changes the result contract:
+Version 6 preserves the HTML result contract and adds the PDF branch under the same public tool name:
+
+- Native PDF-viewer tabs no longer return the viewer shell as successful metadata extraction.
+- `startPage` and `maxPages` provide bounded PDF pagination.
+- PDF successes add `warnings`, `pdf`, and `stats.extractedPageCount` while preserving `success`, `metadata`, `markdownContent`, `truncated`, and the existing statistics.
+- PDF failures use fixed typed codes such as `AUTH_REQUIRED`, `TOO_LARGE`, `COPY_NOT_PERMITTED`, `NO_EXTRACTABLE_TEXT`, `PARSE_FAILED`, `TIMEOUT`, and `NAVIGATED`.
+
+Version 5 intentionally changed the HTML result contract:
 
 - `extractionMode` replaces the article-specific `readable` flag.
 - Non-article pages and extraction failures now return useful `success: true` context instead of `markdownContent: null`.
@@ -101,11 +109,15 @@ Readability failure is not a tool failure. Clone, parse, conversion, visibility-
 
 The rendered-text fallback represents the browser's rendered text, not a complete DOM or accessibility snapshot. It intentionally does not expose input values, checkbox state, image alt attributes, closed details content, generated CSS content, hidden virtualized rows, canvas pixels, cross-origin iframe documents, or shadow-root internals that `innerText` omits. Text hidden only through opacity, off-screen positioning, or ARIA can still appear because those mechanisms do not remove it from layout text.
 
-These boundaries avoid a custom visibility engine, ARIA-name implementation, DOM serializer, debugger permission, or raw HTML fallback. If automation later requires control state or accessibility-tree inspection, that should be a separate explicit capability.
+Chrome exposes no cancellation handle for a running `chrome.scripting.executeScript()` function. HTML cancellation and the ten-second deadline therefore fence delivery and settlement at script boundaries but cannot preempt synchronous Readability work after it starts; exact-document navigation still revokes the result. Moving parsing away from the live document would sacrifice the layout-backed extraction contract and is intentionally out of scope.
+
+PDF extraction is text-only. It does not execute PDF JavaScript, enable XFA, OCR scanned pages, infer ambiguous tables, include figures, or claim authoritative semantic structure. Credentialed reacquisition is limited to the exact current top-document URL and cannot reproduce POST bodies, one-use responses, transient authorization headers, or every partitioned authentication flow. Input is capped at 32 MiB, text items and pages are bounded, copy-restricted documents fail closed, and navigation revokes settlement.
+
+These boundaries avoid a custom visibility engine, ARIA-name implementation, DOM serializer, debugger permission, MIME-handler ownership, hidden PDFium reuse, raw HTML fallback, or heavyweight OCR/layout stack. Features outside these bounds should be separate explicit product decisions.
 
 ## Verification
 
-`tests/webmcp-readability.test.ts` executes the production source in JSDOM for routing, result contracts, truncation, and failure recovery. `tests/browser/read-page.html` exercises browser-owned `innerText`, layout visibility, native modal, and compiled-registration behavior in real headless Chromium.
+`tests/webmcp-readability.test.ts` executes the production HTML extractor in JSDOM for result contracts, truncation, and failure recovery. `tests/pdf-formatter.test.ts` and `tests/pdf-read-page-adapter.test.ts` cover conservative geometry, MIME routing, pagination, cancellation, and document ownership. `tests/browser/read-page.html` exercises browser-owned `innerText`, layout visibility, native modal, and the built private HTML host; `tests/browser/mv3-extension.mjs` proves that the extension-owned public router reaches both private branches, remains authoritative over a same-name page registration, ignores MAIN-world monkey patches, and performs authenticated native-viewer PDF extraction through the packaged real worker.
 
 ```bash
 pnpm run test:browser
@@ -115,11 +127,11 @@ The browser command builds the extension first, runs without opening a window, a
 
 ## Architecture and CSP
 
-The tool inlines Mozilla Readability for CSP-safe injection through `chrome.scripting.executeScript({ files: [...] })`. It uses no `eval()` or `new Function()` at runtime.
+The public tab-bound router performs exact-document MIME detection before dispatch. For HTML, it injects a self-contained, idempotent classic-script host into the captured top document's ISOLATED world, invokes it by exact `documentId`, validates the one top-frame result, and rechecks route ownership before settlement. The host shares the live DOM and browser layout with the page but not page JavaScript globals, monkey patches, closures, framework state, or `document.modelContext`. For PDF, the router injects a separate self-contained ISOLATED-world host, which mounts a capability-authenticated extension page inside a closed shadow root and transfers bytes over a private `MessagePort`. The PDF-only web-accessible page stays a small bootstrap until the service worker consumes its one-time capability; only then does it load PDF.js and start one explicitly owned worker per call. Generic page-tool ingestion contains no `read_page` branch. Raw bytes never traverse the service worker, generic runtime messages, logs, storage, or model context. Neither extraction branch uses `eval()` or `new Function()` at runtime.
 
 **Readability source of truth:** `src/lib/webmcp/vendor/readability.js`
 
-After updating the vendored library, copy it into `script.js` as documented in [`vendor/README.md`](../../vendor/README.md).
+After updating the vendored library, copy it into `html-reader.js` as documented in [`vendor/README.md`](../../vendor/README.md).
 
 ## License
 

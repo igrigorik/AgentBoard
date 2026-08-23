@@ -6,12 +6,18 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { getEnabledSystemToolRegistrations } from '../src/lib/webmcp/system-tools';
 import { ToolRegistryManager } from '../src/lib/webmcp/tool-registry';
 import { FETCH_URL_TOOL_NAME } from '../src/lib/webmcp/tools/fetch';
 import { NAVIGATE_TOOL_NAME } from '../src/lib/webmcp/tools/navigate';
+import { READ_PAGE_TOOL_NAME } from '../src/lib/webmcp/tools/read_page';
 
 const mocks = vi.hoisted(() => ({
-  isBuiltinToolEnabled: vi.fn(),
+  createReadPageTool: vi.fn((tabId: number) => ({
+    systemReadPage: true,
+    tabId,
+    execute: vi.fn(),
+  })),
 }));
 
 // Mock the dependencies
@@ -36,11 +42,15 @@ vi.mock('../src/lib/mcp/manager', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/lib/webmcp/tools/read_page', () => ({
+  READ_PAGE_TOOL_NAME: 'agentboard_read_page',
+  createReadPageTool: mocks.createReadPageTool,
+}));
+
 vi.mock('../src/lib/storage/config', () => ({
   ConfigStorage: {
     getInstance: vi.fn(() => ({
       get: vi.fn().mockResolvedValue({}),
-      isBuiltinToolEnabled: mocks.isBuiltinToolEnabled,
     })),
   },
 }));
@@ -49,29 +59,85 @@ describe('ToolRegistryManager Tab Scoping', () => {
   let registry: ToolRegistryManager;
 
   beforeEach(() => {
-    mocks.isBuiltinToolEnabled.mockResolvedValue(true);
+    mocks.createReadPageTool.mockClear();
     registry = new ToolRegistryManager();
   });
 
   describe('system tool registration', () => {
-    it('applies fetch and navigate enablement independently and revokes disabled tools', async () => {
-      await registry.registerSystemTools();
+    it('atomically reconciles independently enabled system registrations', () => {
+      registry.replaceSystemTools(getEnabledSystemToolRegistrations({}));
       expect(registry.getToolsForTab(1)).toHaveProperty(FETCH_URL_TOOL_NAME);
       expect(registry.getToolsForTab(1)).toHaveProperty(NAVIGATE_TOOL_NAME);
+      expect(registry.getToolsForTab(1)).toHaveProperty(READ_PAGE_TOOL_NAME);
 
-      mocks.isBuiltinToolEnabled.mockImplementation(async (name: string) => {
-        return name === NAVIGATE_TOOL_NAME;
-      });
-      await registry.registerSystemTools();
+      registry.replaceSystemTools(
+        getEnabledSystemToolRegistrations({
+          builtinScripts: [
+            { id: FETCH_URL_TOOL_NAME, enabled: false },
+            { id: READ_PAGE_TOOL_NAME, enabled: false },
+          ],
+        })
+      );
       expect(registry.getToolsForTab(1)).not.toHaveProperty(FETCH_URL_TOOL_NAME);
       expect(registry.getToolsForTab(1)).toHaveProperty(NAVIGATE_TOOL_NAME);
+      expect(registry.getToolsForTab(1)).not.toHaveProperty(READ_PAGE_TOOL_NAME);
 
-      mocks.isBuiltinToolEnabled.mockImplementation(async (name: string) => {
-        return name === FETCH_URL_TOOL_NAME;
-      });
-      await registry.registerSystemTools();
+      registry.replaceSystemTools(
+        getEnabledSystemToolRegistrations({
+          builtinScripts: [
+            { id: NAVIGATE_TOOL_NAME, enabled: false },
+            { id: READ_PAGE_TOOL_NAME, enabled: false },
+          ],
+        })
+      );
       expect(registry.getToolsForTab(1)).toHaveProperty(FETCH_URL_TOOL_NAME);
       expect(registry.getToolsForTab(1)).not.toHaveProperty(NAVIGATE_TOOL_NAME);
+      expect(registry.getToolsForTab(1)).not.toHaveProperty(READ_PAGE_TOOL_NAME);
+    });
+  });
+
+  describe('remote/system collision projection', () => {
+    it('restores an unchanged remote candidate after a static system owner is disabled', async () => {
+      const remoteSession = {
+        getToolCapabilities: () => [
+          {
+            serverName: 'agentboard',
+            tool: {
+              name: 'fetch_url',
+              description: 'Remote collision',
+              inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+            },
+          },
+        ],
+        getMCPInstructions: () => undefined,
+        executeTool: vi.fn(),
+      };
+      const remoteManager = {
+        reconcile: vi.fn().mockResolvedValue(undefined),
+        getCurrentSession: vi.fn(() => remoteSession),
+        revoke: vi.fn(),
+      };
+      const collisionRegistry = new ToolRegistryManager(remoteManager as never);
+      await collisionRegistry.loadRemoteTools({ schemaVersion: 2, agents: [] });
+      expect(collisionRegistry.captureToolSnapshot().toolSources.get(FETCH_URL_TOOL_NAME)).toBe(
+        'remote'
+      );
+
+      const systemTool = { execute: vi.fn() };
+      collisionRegistry.replaceSystemTools([
+        { name: FETCH_URL_TOOL_NAME, tool: systemTool, description: 'System owner' },
+      ]);
+      expect(collisionRegistry.getAllTools()[FETCH_URL_TOOL_NAME]).toBe(systemTool);
+      expect(collisionRegistry.captureToolSnapshot().toolSources.get(FETCH_URL_TOOL_NAME)).toBe(
+        'system'
+      );
+
+      collisionRegistry.replaceSystemTools([]);
+      expect(collisionRegistry.getAllTools()).toHaveProperty(FETCH_URL_TOOL_NAME);
+      expect(collisionRegistry.getAllTools()[FETCH_URL_TOOL_NAME]).not.toBe(systemTool);
+      expect(collisionRegistry.captureToolSnapshot().toolSources.get(FETCH_URL_TOOL_NAME)).toBe(
+        'remote'
+      );
     });
   });
 
@@ -470,6 +536,44 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(registry.hasSiteTool(100, 'malformed_tool')).toBe(false);
       expect(listener).toHaveBeenCalledTimes(1);
       expect(Object.keys(listener.mock.calls[0][0])).toEqual(['first_tool', 'second_tool']);
+    });
+
+    it('keeps page-tool ingestion generic while the system reader owns the public name', () => {
+      registry.replaceSystemTools(getEnabledSystemToolRegistrations({}));
+      registry.updateWebMCPTools(100, [
+        {
+          name: READ_PAGE_TOOL_NAME,
+          description: 'Page-owned HTML reader',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        },
+      ]);
+
+      expect(mocks.createReadPageTool).not.toHaveBeenCalled();
+      expect(registry.hasSiteTool(100, READ_PAGE_TOOL_NAME)).toBe(true);
+
+      const selected = registry.getToolsForTab(100)[READ_PAGE_TOOL_NAME];
+      expect(mocks.createReadPageTool).toHaveBeenCalledWith(100);
+      expect(selected).toMatchObject({ systemReadPage: true, tabId: 100 });
+      expect(registry.getAllTools()).not.toHaveProperty(READ_PAGE_TOOL_NAME);
+    });
+
+    it('does not permanently reserve the reader name while its system registration is disabled', () => {
+      registry.replaceSystemTools(
+        getEnabledSystemToolRegistrations({
+          builtinScripts: [{ id: READ_PAGE_TOOL_NAME, enabled: false }],
+        })
+      );
+      registry.updateWebMCPTools(100, [
+        {
+          name: READ_PAGE_TOOL_NAME,
+          description: 'Internal page-owned HTML reader',
+        },
+      ]);
+
+      expect(registry.hasSiteTool(100, READ_PAGE_TOOL_NAME)).toBe(true);
+      expect(registry.getToolsForTab(100)).toHaveProperty(READ_PAGE_TOOL_NAME);
+      expect(registry.getAllTools()).toHaveProperty(READ_PAGE_TOOL_NAME);
+      expect(registry.captureToolSnapshot()).toHaveProperty(`tools.${READ_PAGE_TOOL_NAME}`);
     });
 
     it('should notify global listeners once with the complete replacement snapshot', () => {

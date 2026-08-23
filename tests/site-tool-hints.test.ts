@@ -8,6 +8,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolRegistryManager } from '../src/lib/webmcp/tool-registry';
+import { registerToolPatterns } from '../src/lib/webmcp/tool-patterns';
 
 vi.mock('../src/lib/logger', () => ({
   default: {
@@ -52,8 +53,8 @@ describe('getSiteToolHints', () => {
   });
 
   it('should exclude generic <all_urls> tools (score 30)', () => {
-    // agentboard_read_page is in COMPILED_TOOLS with <all_urls> pattern → score 30
-    registry.addTool('agentboard_read_page', {
+    registerToolPatterns('fixture_generic_tool', ['<all_urls>']);
+    registry.addTool('fixture_generic_tool', {
       tool: { execute: vi.fn() },
       source: 'site',
       origin: 'tab-100',
@@ -168,7 +169,8 @@ describe('getSiteToolHints', () => {
 
   it('should handle mixed tools: generic filtered, specific included', () => {
     // Generic tool (score 30) — should be filtered
-    registry.addTool('agentboard_read_page', {
+    registerToolPatterns('mixed_generic_tool', ['<all_urls>']);
+    registry.addTool('mixed_generic_tool', {
       tool: { execute: vi.fn() },
       source: 'site',
       origin: 'tab-100',
@@ -195,6 +197,6 @@ describe('getSiteToolHints', () => {
     expect(hints).toHaveLength(2);
     expect(hints.map((h) => h.name)).toContain('agentboard_youtube_transcript');
     expect(hints.map((h) => h.name)).toContain('site_custom_tool');
-    expect(hints.map((h) => h.name)).not.toContain('agentboard_read_page');
+    expect(hints.map((h) => h.name)).not.toContain('mixed_generic_tool');
   });
 });

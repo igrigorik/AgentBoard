@@ -62,6 +62,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 const SYSTEM_TOOL_SOURCES = [
   { id: 'agentboard_fetch_url', path: 'fetch/fetch-url.ts' },
   { id: 'agentboard_navigate', path: 'navigate/index.ts' },
+  { id: 'agentboard_read_page', path: 'read_page/index.ts' },
 ] as const;
 
 /**
@@ -282,9 +283,20 @@ function wrapInIIFE(code: string, metadata: ToolMetadata): string {
   // Tool implementation
 ${code}
   
+  const registrationKey = '${fullToolName}';
+  const settlements = window.__agentboardBuiltinToolSettlements instanceof Map
+    ? window.__agentboardBuiltinToolSettlements
+    : new Map();
+  window.__agentboardBuiltinToolSettlements = settlements;
+  const publishSettlement = (settlement) => {
+    settlements.set(registrationKey, settlement);
+    void settlement.catch(() => undefined);
+  };
+
   const modelContext = document.modelContext;
   if (!modelContext || typeof modelContext.registerTool !== 'function') {
     console.error('[WebMCP] document.modelContext is unavailable for ${fullToolName}');
+    publishSettlement(Promise.reject(new Error('WebMCP registration API is unavailable')));
     return;
   }
 
@@ -294,6 +306,7 @@ ${code}
       const shouldReg = shouldRegister();
       if (!shouldReg) {
         console.log('[WebMCP] Tool ${fullToolName} skipped registration (shouldRegister returned false)');
+        publishSettlement(Promise.resolve());
         return;
       }
     } catch (error) {
@@ -307,7 +320,6 @@ ${code}
     : new Map();
   window.__agentboardBuiltinToolLifetimes = registrations;
 
-  const registrationKey = '${fullToolName}';
   registrations.get(registrationKey)?.abort?.();
   const registrationController = new AbortController();
   registrations.set(registrationKey, registrationController);
@@ -319,7 +331,7 @@ ${code}
       inputSchema: metadata.inputSchema,
       execute: execute
     }, { signal: registrationController.signal });
-    Promise.resolve(registration).then(
+    publishSettlement(Promise.resolve(registration).then(
       () => console.log('[WebMCP] Registered tool ${fullToolName} v${metadata.version}'),
       (error) => {
         if (registrations.get(registrationKey) === registrationController) registrations.delete(registrationKey);
@@ -328,11 +340,13 @@ ${code}
           return;
         }
         console.error('[WebMCP] Failed to register ${fullToolName}:', error);
+        throw error;
       }
-    );
+    ));
   } catch (error) {
     if (registrations.get(registrationKey) === registrationController) registrations.delete(registrationKey);
     console.error('[WebMCP] Failed to register ${fullToolName}:', error);
+    publishSettlement(Promise.reject(error));
   }
 })();
 //# sourceURL=webmcp-tool:${fullToolName}.js

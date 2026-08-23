@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.x, 22.x]
+        node-version: [22.x, 24.x]
 
     steps:
       - name: Checkout code
@@ -41,25 +41,25 @@ jobs:
         run: pnpm test
 
       - name: Build development extension
-        if: matrix.node-version == '20.x'
+        if: matrix.node-version == '22.x'
         run: pnpm run build
 
       - name: Build release extension
-        if: matrix.node-version == '22.x'
+        if: matrix.node-version == '24.x'
         run: pnpm run build:release
 
       - name: Verify generated WebMCP sources
         run: pnpm run check:generated
 
       - name: Setup Chrome for Testing
-        if: matrix.node-version == '22.x'
+        if: matrix.node-version == '24.x'
         id: setup-chrome
         uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: stable
 
       - name: Run read-page browser tests
-        if: matrix.node-version == '22.x'
+        if: matrix.node-version == '24.x'
         run: pnpm run test:browser:built
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
@@ -67,7 +67,7 @@ jobs:
           AGENTBOARD_CHROME_NO_SANDBOX: '1'
 
       - name: Run built MV3 extension browser tests
-        if: matrix.node-version == '22.x'
+        if: matrix.node-version == '24.x'
         run: pnpm run test:browser:mv3:built
         env:
           CHROME_FOR_TESTING_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}

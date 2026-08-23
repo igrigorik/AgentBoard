@@ -120,6 +120,11 @@ export interface WebMCPScriptsUpdatedMessage {
   type: 'WEBMCP_SCRIPTS_UPDATED';
 }
 
+export interface PdfWorkerHostClaimMessage {
+  type: 'PDF_WORKER_HOST_CLAIM';
+  capability: string;
+}
+
 export interface GetSiteToolHintsMessage {
   type: 'GET_SITE_TOOL_HINTS';
   tabId: number;
@@ -160,6 +165,7 @@ export type ExtensionMessage =
   | WebMCPGetToolsMessage
   | WebMCPToolsChangedMessage
   | WebMCPScriptsUpdatedMessage
+  | PdfWorkerHostClaimMessage
   | GetSiteToolHintsMessage
   | MemoryBindingChangedMessage
   | MemoryBindingsResetMessage
@@ -336,6 +342,7 @@ export interface ToolsListChangedParams {
   }>;
   origin: string;
   timestamp?: number;
+  unavailable?: true;
 }
 
 // Error types

@@ -1019,7 +1019,7 @@ export function execute() { return {}; }`;
       linear_search_issues: {},
     };
     const toolSources = new Map<string, 'site' | 'remote' | 'system'>([
-      ['agentboard_read_page', 'site'],
+      ['agentboard_read_page', 'system'],
       ['page_search', 'site'],
       ['notes_find_context', 'site'],
       ['linear_search_issues', 'remote'],

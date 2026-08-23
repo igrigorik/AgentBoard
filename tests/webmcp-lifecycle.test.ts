@@ -34,6 +34,9 @@ const mockChrome = {
     onDOMContentLoaded: {
       addListener: vi.fn(),
     },
+    onHistoryStateUpdated: {
+      addListener: vi.fn(),
+    },
     onErrorOccurred: {
       addListener: vi.fn(),
     },
@@ -90,6 +93,10 @@ describe('TabManager', () => {
 
     mockChrome.webNavigation.onDOMContentLoaded.addListener = vi.fn((handler) => {
       navHandlers.onDOMContentLoaded = handler;
+    });
+
+    mockChrome.webNavigation.onHistoryStateUpdated.addListener = vi.fn((handler) => {
+      navHandlers.onHistoryStateUpdated = handler;
     });
 
     mockChrome.webNavigation.onErrorOccurred.addListener = vi.fn((handler) => {
@@ -434,10 +441,9 @@ describe('TabManager', () => {
       // Wait for async injection
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Should inject: relay + 1 matching tool + bridge = 3 scripts
-      // The manifest injects the polyfill; lifecycle injects relay, tools, and bridge.
-      // (youtube_transcript only matches youtube.com, not example.com)
-      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(3);
+      // No page-owned tool matches example.com, so lifecycle injects only relay + bridge.
+      // The manifest owns the polyfill; the system read_page host is injected only on demand.
+      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(2);
 
       // Check relay injection (FIRST - critical for race condition fix!)
       expect(mockChrome.scripting.executeScript).toHaveBeenCalledWith({
@@ -454,6 +460,92 @@ describe('TabManager', () => {
         injectImmediately: false,
         files: ['content-scripts/page-bridge.js'],
       });
+    });
+
+    it('should bind navigation injection to the DOM-ready document', async () => {
+      mockChrome.scripting.executeScript.mockResolvedValueOnce([
+        {
+          documentId: 'document-new',
+          frameId: 0,
+          result: 'https://example.com/',
+        },
+      ]);
+      mockChrome.scripting.executeScript.mockResolvedValue(undefined);
+
+      navHandlers.onBeforeNavigate({ tabId: 123, frameId: 0 });
+      navHandlers.onDOMContentLoaded({
+        tabId: 123,
+        frameId: 0,
+        documentId: 'document-new',
+      });
+      await vi.waitFor(() => expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(3));
+
+      for (const [injection] of mockChrome.scripting.executeScript.mock.calls) {
+        expect(injection.target).toEqual({ tabId: 123, documentIds: ['document-new'] });
+      }
+      expect(mockChrome.tabs.get).not.toHaveBeenCalled();
+    });
+
+    it('should await a fresh catalog after exact-document reinjection', async () => {
+      const port = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'document-a', frameId: 0 },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(port);
+      mockChrome.scripting.executeScript.mockImplementation((injection) =>
+        injection.world === 'ISOLATED' && injection.func
+          ? Promise.resolve([
+              {
+                documentId: 'document-a',
+                frameId: 0,
+                result: 'https://example.com/',
+              },
+            ])
+          : Promise.resolve(undefined)
+      );
+      const catalog = vi.spyOn(lifecycle, 'requestToolsAndWait').mockResolvedValue([]);
+
+      await (lifecycle as any).reinjectDocumentScripts(123, 'document-a');
+
+      expect(catalog).toHaveBeenCalledWith(123);
+    });
+
+    it('should reconcile same-document history updates against their exact document', async () => {
+      const port = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'document-a', frameId: 0 },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(port);
+      const reinject = vi
+        .spyOn(lifecycle as any, 'reinjectDocumentScripts')
+        .mockResolvedValue(undefined);
+
+      navHandlers.onHistoryStateUpdated({
+        tabId: 123,
+        frameId: 0,
+        documentId: 'document-a',
+      });
+
+      await vi.waitFor(() => expect(reinject).toHaveBeenCalledWith(123, 'document-a'));
+    });
+
+    it('should propagate a compiled tool registration settlement failure', async () => {
+      mockChrome.scripting.executeScript
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('registration rejected'));
+
+      await expect(
+        (lifecycle as any).injectBuiltInTools(123, 'https://www.youtube.com/watch?v=test')
+      ).rejects.toThrow('registration rejected');
+      expect(mockChrome.scripting.executeScript).toHaveBeenCalledTimes(2);
     });
 
     it('should ignore non-main frame navigation', () => {
@@ -536,6 +628,38 @@ describe('TabManager', () => {
       expect(registry).toBeDefined();
       expect(registry?.tools).toHaveLength(2);
       expect(registry?.origin).toBe('https://example.com');
+    });
+
+    it('should reject a pending catalog refresh when the page reports unavailable', async () => {
+      let messageHandler: ((message: unknown) => void) | undefined;
+      const mockPort = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'document-a' },
+        onMessage: {
+          addListener: vi.fn((handler) => {
+            messageHandler = handler;
+          }),
+        },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+      };
+      portHandlers.onConnect(mockPort);
+      const pending = lifecycle.requestToolsAndWait(123);
+
+      messageHandler?.({
+        type: 'webmcp',
+        payload: {
+          method: 'tools/listChanged',
+          params: {
+            tools: [],
+            origin: 'https://example.com',
+            unavailable: true,
+          },
+        },
+      });
+
+      await expect(pending).rejects.toThrow('page tool catalog is unavailable');
+      expect(lifecycle.getToolRegistry(123)).toBeUndefined();
     });
   });
 
@@ -1469,11 +1593,8 @@ describe('TabManager', () => {
         files: ['content-scripts/relay.js'],
       });
 
-      // 2. One matching compiled tool (in MAIN world, after polyfill)
-      // (We won't check it individually, just verify it's injected)
-
-      // 3. Bridge LAST (after relay is ready and tools are registered)
-      expect(calls[2][0]).toEqual({
+      // 2. Bridge LAST (after relay is ready; no page-owned tool matches this URL)
+      expect(calls[1][0]).toEqual({
         target: { tabId: 123, frameIds: [0] },
         world: 'MAIN',
         injectImmediately: false,

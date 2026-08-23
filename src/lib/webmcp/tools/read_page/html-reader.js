@@ -1,5 +1,3 @@
-'use webmcp-tool v1';
-
 // BEGIN VENDORED READABILITY
 // Vendor Mozilla Readability v0.6.0 (Apache License 2.0)
 // Inlined directly for CSP compatibility - no eval/Function needed
@@ -2786,10 +2784,6 @@ Readability.prototype = {
   },
 };
 
-if (typeof module === "object") {
-  /* global module */
-  module.exports = Readability;
-}
 // END VENDORED READABILITY
 
 // Attach Readability to window for CSP-safe global access
@@ -2807,29 +2801,6 @@ const MAX_READABILITY_NODES = 100000;
 const MAX_READABILITY_SOURCE_CHARACTERS = 2000000;
 const MAX_SEMANTIC_CANDIDATES = 100;
 const TRUNCATION_MARKER = '\n\n[Content truncated]';
-
-export const metadata = {
-  name: 'read_page',
-  namespace: 'agentboard',
-  version: '5.0.0',
-  description:
-    'Read the rendered page as article Markdown, visible page text, or metadata context.',
-  match: ['<all_urls>'],
-  inputSchema: {
-    type: 'object',
-    properties: {
-      maxLength: {
-        type: 'number',
-        description: 'Maximum characters in markdownContent',
-        // The build-time metadata parser requires literals; the contract test guards these copies.
-        minimum: 1000,
-        maximum: 100000,
-        default: 32000,
-      },
-    },
-    additionalProperties: false,
-  },
-};
 
 /**
  * Trusted Types passthrough policy for HTML parsing on TT-enforcing sites.
@@ -2854,9 +2825,9 @@ const _safeHTML = (() => {
  * Convert HTML to Markdown optimized for LLM consumption
  * Prioritizes structure and readability over formatting fidelity
  *
- * DUPLICATION: Similar code exists in fetch/html-to-markdown.ts
- * This version uses native document (page context), that one accepts doc parameter (service worker)
- * Cannot be shared due to WebMCP CSP injection requirements (tools must be self-contained)
+ * DUPLICATION: Similar code exists in fetch/html-to-markdown.ts.
+ * This private reader deliberately omits image attributes and applies its own Trusted Types path;
+ * sharing the converter would couple two different disclosure and execution policies.
  */
 function htmlToMarkdown(html) {
   const container = new DOMParser().parseFromString(_safeHTML(html), 'text/html').body;
@@ -3456,6 +3427,18 @@ function extractArticle(pageMetadata, config, liveRenderedText) {
 }
 
 export async function execute(args = {}) {
+  // Chrome's native viewer is a shell, not the PDF document. AgentBoard's extension-owned adapter
+  // handles PDF bytes; direct page execution must fail closed rather than return viewer metadata.
+  if (String(document.contentType).toLowerCase() === 'application/pdf') {
+    return {
+      success: false,
+      error: {
+        code: 'PDF_READER_REQUIRED',
+        message: 'This PDF must be read through AgentBoard’s local PDF reader.',
+      },
+    };
+  }
+
   const maxLength = normalizeMaxLength(args.maxLength);
   const config = {
     charThreshold: 100,

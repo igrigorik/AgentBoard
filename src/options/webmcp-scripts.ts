@@ -173,7 +173,7 @@ function createScriptCard(script: UserScript): HTMLElement {
   // Parse the script to get metadata
   let parsed: ParsedScript | null = null;
   try {
-    // All scripts here are user scripts (built-in tools are now always enabled via lifecycle)
+    // Built-ins are composed separately; this list contains only user-authored page tools.
     parsed = parseUserScript(script.code, true);
   } catch (error) {
     log.warn(`Failed to parse script ${script.id}:`, error);
@@ -444,27 +444,26 @@ async function saveScript() {
   }
 
   try {
+    let successMessage: string;
     if (editingScriptId) {
       await configStorage.updateUserScript(editingScriptId, {
         code,
         enabled: true, // Always enabled on save; use card toggle to disable
       });
-      showStatus('Script updated successfully!', 'success');
+      successMessage = 'Script updated successfully!';
     } else {
       await configStorage.addUserScript(code, true); // Always enabled on save
-      showStatus('Script created successfully!', 'success');
+      successMessage = 'Script created successfully!';
     }
 
     closeModal('script-modal');
     await loadScripts();
     await renderScripts();
 
-    // Trigger hot reload of scripts in all tabs
-    try {
-      await chrome.runtime.sendMessage({ type: 'WEBMCP_SCRIPTS_UPDATED' });
-      log.warn('[WebMCP Scripts] Triggered hot reload');
-    } catch (error) {
-      log.error('[WebMCP Scripts] Failed to trigger hot reload:', error);
+    if (await requestWebMCPRefresh()) {
+      showStatus(successMessage, 'success');
+    } else {
+      showStatus('Script saved, but open tabs could not be refreshed', 'warning');
     }
   } catch (error) {
     log.error('Failed to save script:', error);
@@ -750,14 +749,10 @@ async function toggleScript(scriptId: string) {
     await loadScripts();
     await renderScripts();
 
-    showStatus(newEnabled ? 'Script enabled' : 'Script disabled', 'success');
-
-    // Trigger hot reload
-    try {
-      await chrome.runtime.sendMessage({ type: 'WEBMCP_SCRIPTS_UPDATED' });
-      log.warn('[WebMCP Scripts] Triggered hot reload after toggle');
-    } catch (error) {
-      log.error('[WebMCP Scripts] Failed to trigger hot reload:', error);
+    if (await requestWebMCPRefresh()) {
+      showStatus(newEnabled ? 'Script enabled' : 'Script disabled', 'success');
+    } else {
+      showStatus('Setting saved, but open tabs could not be refreshed', 'warning');
     }
   } catch (error) {
     log.error('Failed to toggle script:', error);
@@ -768,23 +763,31 @@ async function toggleScript(scriptId: string) {
 async function deleteScript(scriptId: string) {
   try {
     await configStorage.deleteUserScript(scriptId);
-    showStatus('Script deleted successfully', 'success');
 
     closeModal('script-modal');
     await loadScripts();
     await renderScripts();
 
-    // Trigger hot reload
-    try {
-      await chrome.runtime.sendMessage({ type: 'WEBMCP_SCRIPTS_UPDATED' });
-      log.warn('[WebMCP Scripts] Triggered hot reload after delete');
-    } catch (error) {
-      log.error('[WebMCP Scripts] Failed to trigger hot reload:', error);
+    if (await requestWebMCPRefresh()) {
+      showStatus('Script deleted successfully', 'success');
+    } else {
+      showStatus('Script deleted, but open tabs could not be refreshed', 'warning');
     }
   } catch (error) {
     log.error('Failed to delete script:', error);
     showStatus('Failed to delete script', 'error');
   }
+}
+
+async function requestWebMCPRefresh(): Promise<boolean> {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'WEBMCP_SCRIPTS_UPDATED' });
+    if (response?.success === true) return true;
+  } catch {
+    // Persisted settings still apply on the next navigation when hot reload is unavailable.
+  }
+  log.error('[WebMCP Scripts] Failed to refresh tools in open tabs');
+  return false;
 }
 
 function showStatus(message: string, type: 'success' | 'error' | 'info' | 'warning') {
@@ -883,13 +886,21 @@ async function toggleBuiltinTool(toolId: string) {
     // Update storage
     await configStorage.toggleBuiltinScript(toolId, newEnabled);
 
+    // Reconcile extension-owned system and page tools before reporting runtime success.
+    const refreshed = await requestWebMCPRefresh();
+
     // Reload and re-render
     await loadScripts();
     await renderScripts();
 
-    showStatus(newEnabled ? 'Built-in tool enabled' : 'Built-in tool disabled', 'success');
-
-    // Trigger reload of tabs (they'll check enabled state on next navigation)
+    showStatus(
+      refreshed
+        ? newEnabled
+          ? 'Built-in tool enabled'
+          : 'Built-in tool disabled'
+        : 'Setting saved, but open tabs could not be refreshed',
+      refreshed ? 'success' : 'warning'
+    );
     log.debug('[WebMCP Scripts] Built-in tool toggled:', toolId, newEnabled);
   } catch (error) {
     log.error('Failed to toggle built-in tool:', error);

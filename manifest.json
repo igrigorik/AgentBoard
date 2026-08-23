@@ -45,6 +45,12 @@
       "all_frames": false
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/lib/webmcp/tools/read_page/pdf/worker-host.html"],
+      "matches": ["https://*/*", "http://localhost/*"]
+    }
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   }

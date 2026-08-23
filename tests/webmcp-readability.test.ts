@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseUserScript } from '../src/lib/webmcp/script-parser';
-// The tool is authored as self-contained JavaScript because Vite injects the compiled file in MAIN world.
-// @ts-expect-error TypeScript intentionally does not compile built-in WebMCP tool sources.
-import { execute } from '../src/lib/webmcp/tools/read_page/script.js';
-import readPageScript from '../src/lib/webmcp/tools/read_page/script.js?raw';
+import { getAllBuiltinTools } from '../src/lib/webmcp/builtin-tools';
+import { execute } from '../src/lib/webmcp/tools/read_page/html-reader.js';
+import {
+  READ_PAGE_METADATA,
+  READ_PAGE_TOOL_NAME,
+} from '../src/lib/webmcp/tools/read_page/metadata';
 
 type ReadPageResult = {
   success: boolean;
@@ -50,7 +51,7 @@ function hasLoneSurrogate(value: string): boolean {
   return false;
 }
 
-describe('WebMCP read_page tool', () => {
+describe('read-page HTML extractor', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     document.head.innerHTML = '<title>Test Page</title>';
@@ -59,14 +60,10 @@ describe('WebMCP read_page tool', () => {
     setInnerText(document.documentElement, '');
   });
 
-  it('publishes the rendered-page contract', () => {
-    const parsed = parseUserScript(readPageScript, false);
-
-    expect(parsed.metadata).toMatchObject({
-      name: 'read_page',
-      namespace: 'agentboard',
-      version: '5.0.0',
-      match: ['<all_urls>'],
+  it('shares the system reader contract', () => {
+    expect(READ_PAGE_TOOL_NAME).toBe('agentboard_read_page');
+    expect(READ_PAGE_METADATA).toMatchObject({
+      version: '6.0.0',
       inputSchema: {
         properties: {
           maxLength: {
@@ -74,10 +71,39 @@ describe('WebMCP read_page tool', () => {
             maximum: 100000,
             default: 32000,
           },
+          startPage: {
+            minimum: 1,
+            default: 1,
+          },
+          maxPages: {
+            minimum: 1,
+            maximum: 50,
+            default: 25,
+          },
         },
       },
     });
-    expect(parsed.metadata.description).toContain('visible page text');
+    expect(READ_PAGE_METADATA.description).toContain('HTML/PDF');
+    expect(getAllBuiltinTools()).toContainEqual(
+      expect.objectContaining({
+        id: READ_PAGE_TOOL_NAME,
+        type: 'system',
+        version: READ_PAGE_METADATA.version,
+        inputSchema: READ_PAGE_METADATA.inputSchema,
+      })
+    );
+  });
+
+  it('fails closed instead of treating Chrome PDF viewer metadata as document content', async () => {
+    vi.spyOn(document, 'contentType', 'get').mockReturnValue('application/pdf');
+
+    await expect(readPage()).resolves.toEqual({
+      success: false,
+      error: {
+        code: 'PDF_READER_REQUIRED',
+        message: 'This PDF must be read through AgentBoard’s local PDF reader.',
+      },
+    });
   });
 
   it('preserves the real Readability article path without duplicate formats', async () => {

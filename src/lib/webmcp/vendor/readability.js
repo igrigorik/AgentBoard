@@ -3,7 +3,7 @@
  * Mozilla Readability v0.6.0
  * Canonical vendor source used by:
  * - tools/fetch/content-extractor.ts (ES module import)
- * - tools/read_page/script.js (CSP-safe inlined copy)
+ * - tools/read_page/html-reader.js (CSP-safe inlined copy)
  *
  * See vendor/README.md for update instructions and required Trusted Types patches.
  */

@@ -22,11 +22,10 @@ import { convertMCPToAISDKTool } from '../mcp/tool-bridge';
 import { InvalidToolInputSchemaError } from '../schema/tool-input-schema';
 import { convertWebMCPToAISDKTool } from './tool-bridge';
 import { ConfigStorage, type StorageConfig } from '../storage/config';
-import { fetchUrlTool, FETCH_URL_TOOL_NAME } from './tools/fetch';
-import { createNavigateTool, NAVIGATE_TOOL_NAME } from './tools/navigate';
 import { calculateSpecificityScore } from './tool-patterns';
 
 export type ToolSourceType = 'site' | 'remote' | 'system';
+
 // AI SDK tool type - both MCP and WebMCP converters return the same shape
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AISDKTool = any; // The actual tool type from AI SDK
@@ -39,6 +38,21 @@ export interface ToolWithMetadata {
   /** Public tool name when the internal registry key is scoped by tab. */
   publicName?: string;
 }
+
+/** Declarative system registrations are composed outside the generic registry. */
+export type SystemToolRegistration =
+  | {
+      name: string;
+      tool: AISDKTool;
+      description?: string;
+      createForTab?: never;
+    }
+  | {
+      name: string;
+      createForTab: (tabId: number) => AISDKTool;
+      tool?: never;
+      description?: never;
+    };
 
 /** One synchronous stream snapshot keeps tools, their execution source, and MCP context coherent. */
 export interface ToolSnapshot {
@@ -65,11 +79,12 @@ export class ToolRegistryManager {
 
   /**
    * Tab-bound system tool factories: (tabId) => AISDKTool.
-   * These tools need tab context (e.g., navigate captures tabId in a closure)
+   * These tools need tab context (for navigation or exact-document reading)
    * so they can't be pre-registered as static entries. Instead, getToolsForTab
    * invokes these factories per-call to create ephemeral tool instances.
    */
   private tabBoundFactories = new Map<string, (tabId: number) => AISDKTool>();
+  private managedSystemToolNames = new Set<string>();
 
   /**
    * Tab-scoped tool change subscriptions.
@@ -79,46 +94,68 @@ export class ToolRegistryManager {
    */
   private tabChangeCallbacks = new Map<number, Set<() => void>>();
 
-  /**
-   * Register system tools on initialization
-   * System tools are global (not tab-specific) and execute in background worker
-   * They have elevated privileges (e.g., CORS-free fetching)
-   *
-   * Must be called explicitly after construction (constructors can't be async)
-   * Respects user enable/disable preferences (default: enabled)
-   */
-  async registerSystemTools(): Promise<void> {
-    const configStorage = ConfigStorage.getInstance();
-    const [isFetchEnabled, isNavigateEnabled] = await Promise.all([
-      configStorage.isBuiltinToolEnabled(FETCH_URL_TOOL_NAME),
-      configStorage.isBuiltinToolEnabled(NAVIGATE_TOOL_NAME),
-    ]);
+  /** Atomically reconcile extension-owned tools supplied by the system composition layer. */
+  replaceSystemTools(registrations: readonly SystemToolRegistration[]): void {
+    const nextNames = new Set<string>();
+    for (const registration of registrations) {
+      if (nextNames.has(registration.name)) {
+        throw new Error(`Duplicate system tool registration: ${registration.name}`);
+      }
+      nextNames.add(registration.name);
+    }
+
     let changed = false;
-
-    if (isFetchEnabled) {
-      const existingFetch = this.tools.get(FETCH_URL_TOOL_NAME);
-      if (existingFetch?.tool !== fetchUrlTool || existingFetch.source !== 'system') changed = true;
-      this.addTool(
-        FETCH_URL_TOOL_NAME,
-        {
-          tool: fetchUrlTool,
-          source: 'system',
-          origin: 'system',
-          description: 'Fetch content from external URLs (not the current page)',
-        },
-        { silent: true }
-      );
-    } else {
-      changed = this.tools.delete(FETCH_URL_TOOL_NAME) || changed;
+    let staticOwnershipChanged = false;
+    for (const name of this.managedSystemToolNames) {
+      if (nextNames.has(name)) continue;
+      if (this.tools.get(name)?.source === 'system') {
+        this.tools.delete(name);
+        changed = true;
+        staticOwnershipChanged = true;
+      }
+      changed = this.tabBoundFactories.delete(name) || changed;
     }
 
-    if (isNavigateEnabled) {
-      if (this.tabBoundFactories.get(NAVIGATE_TOOL_NAME) !== createNavigateTool) changed = true;
-      this.tabBoundFactories.set(NAVIGATE_TOOL_NAME, createNavigateTool);
-    } else {
-      changed = this.tabBoundFactories.delete(NAVIGATE_TOOL_NAME) || changed;
+    for (const registration of registrations) {
+      if (registration.createForTab) {
+        if (this.tools.get(registration.name)?.source === 'system') {
+          this.tools.delete(registration.name);
+          changed = true;
+          staticOwnershipChanged = true;
+        }
+        if (this.tabBoundFactories.get(registration.name) !== registration.createForTab) {
+          this.tabBoundFactories.set(registration.name, registration.createForTab);
+          changed = true;
+        }
+        continue;
+      }
+
+      changed = this.tabBoundFactories.delete(registration.name) || changed;
+      const existing = this.tools.get(registration.name);
+      if (
+        existing?.source !== 'system' ||
+        existing.tool !== registration.tool ||
+        existing.description !== registration.description
+      ) {
+        if (existing?.source !== 'system') staticOwnershipChanged = true;
+        this.addTool(
+          registration.name,
+          {
+            tool: registration.tool,
+            source: 'system',
+            origin: 'system',
+            description: registration.description,
+          },
+          { silent: true }
+        );
+        changed = true;
+      }
     }
 
+    if (staticOwnershipChanged) {
+      this.replaceRemoteSession(this.remoteSession, { force: true, silent: true });
+    }
+    this.managedSystemToolNames = nextNames;
     if (changed) {
       this.notifyListeners();
       for (const tabId of this.tabChangeCallbacks.keys()) this.notifyTabChange(tabId);
@@ -205,6 +242,7 @@ export class ToolRegistryManager {
     for (const [storageKey, meta] of this.tools.entries()) {
       const name = meta.publicName || storageKey;
       if (filter && !filter(name, meta)) continue;
+      if (this.tabBoundFactories.has(name) && meta.source !== 'system') continue;
 
       const candidates = grouped.get(name) || [];
       candidates.push({
@@ -288,6 +326,11 @@ export class ToolRegistryManager {
       remoteSession,
       ...(mcpInstructions && { mcpInstructions }),
     };
+  }
+
+  /** Return the selected public executable after applying tab scope and system-name protection. */
+  getToolForTab(tabId: number, name: string): AISDKTool | undefined {
+    return this.selectToolsForTab(tabId).tools[name];
   }
 
   /** Whether this exact tab currently owns an accepted page-tool capability. */
@@ -444,8 +487,11 @@ export class ToolRegistryManager {
     this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
   }
 
-  private replaceRemoteSession(session: RemoteMCPSession): void {
-    if (this.remoteSession === session) return;
+  private replaceRemoteSession(
+    session: RemoteMCPSession,
+    { force = false, silent = false }: { force?: boolean; silent?: boolean } = {}
+  ): void {
+    if (!force && this.remoteSession === session) return;
 
     for (const [name, meta] of this.tools) {
       if (meta.source === 'remote') this.tools.delete(name);
@@ -476,10 +522,12 @@ export class ToolRegistryManager {
     }
 
     this.remoteSession = session;
-    this.notifyListeners();
-    // Streams that captured the replaced session observe its AbortSignal directly.
-    // Publishing the first remote session must not interrupt streams that captured none.
-    log.info('[ToolRegistry] Remote MCP snapshot replaced');
+    if (!silent) {
+      this.notifyListeners();
+      // Streams that captured the replaced session observe its AbortSignal directly.
+      // Publishing the first remote session must not interrupt streams that captured none.
+      log.info('[ToolRegistry] Remote MCP snapshot replaced');
+    }
   }
 
   /**

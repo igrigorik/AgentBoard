@@ -22,14 +22,6 @@ export interface CompiledToolInfo {
  */
 export const COMPILED_TOOLS: CompiledToolInfo[] = [
   {
-    id: 'agentboard_read_page',
-    file: 'tools/agentboard_read_page.js',
-    match: ['<all_urls>'],
-    version: '5.0.0',
-    description:
-      'Read the rendered page as article Markdown, visible page text, or metadata context.',
-  },
-  {
     id: 'agentboard_youtube_transcript',
     file: 'tools/agentboard_youtube_transcript.js',
     match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
