@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { streamText, tool, type ToolSet } from 'ai';
+import { streamText, tool, type CoreMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
 import { AIClient } from '../src/lib/ai/client';
@@ -8,6 +8,7 @@ import { createModelRuntime } from '../src/lib/ai/model-runtime';
 import type { ApiProtocol } from '../src/lib/ai/protocol';
 import type { AgentConfig } from '../src/lib/storage/config';
 import { convertWebMCPToAISDKTool } from '../src/lib/webmcp/tool-bridge';
+import { createReadPageTool } from '../src/lib/webmcp/tools/read_page';
 import {
   eventSSE,
   sse,
@@ -33,6 +34,38 @@ const googleProbeJSONSchema = {
   type: 'object',
   properties: { value: { type: 'string' } },
 };
+
+const toolMediaSentinel = 'BASE64_TOOL_RESULT_MEDIA_SENTINEL';
+const richToolResultMessages: CoreMessage[] = [
+  {
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool-call',
+        toolCallId: 'probe-call',
+        toolName: 'probe',
+        input: { value: 'page' },
+      },
+    ],
+  },
+  {
+    role: 'tool',
+    content: [
+      {
+        type: 'tool-result',
+        toolCallId: 'probe-call',
+        toolName: 'probe',
+        output: {
+          type: 'content',
+          value: [
+            { type: 'text', text: 'Image 1 = PDF page 1' },
+            { type: 'media', mediaType: 'image/jpeg', data: toolMediaSentinel },
+          ],
+        },
+      },
+    ],
+  },
+];
 
 const shopifyUpdateCartSchema = {
   type: 'object',
@@ -86,6 +119,10 @@ const shopifyShowVariantSchema = {
     },
   },
 };
+
+function readPageWireTools(): ToolSet {
+  return { agentboard_read_page: createReadPageTool(100) };
+}
 
 function shopifyWebMCPTools(): ToolSet {
   return {
@@ -218,7 +255,8 @@ async function captureWireRequest(
   chunks: readonly string[],
   overrides: Partial<AgentConfig> = {},
   pathPrefix = '/nested/v1/',
-  tools: ToolSet = { probe: probeTool }
+  tools: ToolSet = { probe: probeTool },
+  messages: CoreMessage[] = [{ role: 'user', content: 'hello' }]
 ): Promise<CapturedWireRequest> {
   const server = await startAIWireServer({ chunks: [...chunks] });
   const controller = new AbortController();
@@ -231,7 +269,7 @@ async function captureWireRequest(
     const result = streamText({
       model: runtime.model,
       providerOptions: runtime.providerOptions,
-      messages: [{ role: 'user', content: 'hello' }],
+      messages,
       maxOutputTokens: 32,
       maxRetries: 0,
       abortSignal: controller.signal,
@@ -261,6 +299,21 @@ async function captureWireRequest(
     controller.abort();
     await server.close();
   }
+}
+
+function captureRichToolResultRequest(
+  apiProtocol: ApiProtocol,
+  chunks: readonly string[],
+  overrides: Partial<AgentConfig>
+): Promise<CapturedWireRequest> {
+  return captureWireRequest(
+    apiProtocol,
+    chunks,
+    overrides,
+    '/nested/v1/',
+    { probe: probeTool },
+    richToolResultMessages
+  );
 }
 
 describe('AI provider wire contracts', () => {
@@ -406,19 +459,135 @@ describe('AI provider wire contracts', () => {
     });
   });
 
+  it('sends rich tool-result media through OpenAI Responses native image parts', async () => {
+    const request = await captureRichToolResultRequest(
+      'openai-responses',
+      responseFixtures.responses,
+      { provider: 'openai', model: 'gpt-5-wire' }
+    );
+
+    expect(request.body).toMatchObject({
+      input: expect.arrayContaining([
+        {
+          type: 'function_call_output',
+          call_id: 'probe-call',
+          output: [
+            { type: 'input_text', text: 'Image 1 = PDF page 1' },
+            {
+              type: 'input_image',
+              image_url: `data:image/jpeg;base64,${toolMediaSentinel}`,
+            },
+          ],
+        },
+      ]),
+    });
+  });
+
+  it('removes rich tool-result media before OpenAI Chat can stringify it', async () => {
+    const request = await captureRichToolResultRequest(
+      'openai-chat-completions',
+      responseFixtures.chat,
+      { provider: 'openai', model: 'gpt-4o-wire' }
+    );
+
+    const serialized = JSON.stringify(request.body);
+    expect(serialized).not.toContain(toolMediaSentinel);
+    expect(serialized).not.toContain('image/jpeg');
+    expect(request.body).toMatchObject({
+      messages: expect.arrayContaining([
+        {
+          role: 'tool',
+          tool_call_id: 'probe-call',
+          content: expect.stringContaining(
+            'Tool-result media was omitted because this connection API accepts text-only tool results.'
+          ),
+        },
+      ]),
+    });
+  });
+
+  it('sends rich tool-result media through Anthropic image blocks', async () => {
+    const request = await captureRichToolResultRequest(
+      'anthropic-messages',
+      responseFixtures.anthropic,
+      { provider: 'anthropic', model: 'claude-wire' }
+    );
+
+    expect(request.body).toMatchObject({
+      messages: expect.arrayContaining([
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'probe-call',
+              content: [
+                { type: 'text', text: 'Image 1 = PDF page 1' },
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/jpeg',
+                    data: toolMediaSentinel,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ]),
+    });
+  });
+
+  it('sends rich tool-result media through Google inlineData parts', async () => {
+    const request = await captureRichToolResultRequest(
+      'google-generative-ai',
+      responseFixtures.google,
+      { provider: 'google', model: 'gemini-wire' }
+    );
+
+    expect(request.body).toMatchObject({
+      contents: expect.arrayContaining([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'probe-call',
+                name: 'probe',
+                response: { name: 'probe', content: 'Image 1 = PDF page 1' },
+              },
+            },
+            {
+              inlineData: {
+                mimeType: 'image/jpeg',
+                data: toolMediaSentinel,
+              },
+            },
+            { text: 'Tool executed successfully and returned this image as a response' },
+          ],
+        },
+      ]),
+    });
+  });
+
   it('preserves Shopify WebMCP schemas on the OpenAI Responses wire', async () => {
     const request = await captureWireRequest(
       'openai-responses',
       responseFixtures.responses,
       { provider: 'openai', model: 'gpt-5-wire' },
       '/nested/v1/',
-      shopifyWebMCPTools()
+      { ...shopifyWebMCPTools(), ...readPageWireTools() }
     );
 
     expect(request.body).toMatchObject({
       tools: [
         { name: 'update_cart', parameters: shopifyUpdateCartSchema },
         { name: 'show_variant', parameters: shopifyShowVariantSchema },
+        {
+          name: 'agentboard_read_page',
+          parameters: { properties: { includePageImages: { default: true } } },
+        },
       ],
     });
   });
@@ -446,13 +615,17 @@ describe('AI provider wire contracts', () => {
       responseFixtures.anthropic,
       { provider: 'anthropic', model: 'claude-wire' },
       '/nested/v1/',
-      shopifyWebMCPTools()
+      { ...shopifyWebMCPTools(), ...readPageWireTools() }
     );
 
     expect(request.body).toMatchObject({
       tools: [
         { name: 'update_cart', input_schema: shopifyUpdateCartSchema },
         { name: 'show_variant', input_schema: shopifyShowVariantSchema },
+        {
+          name: 'agentboard_read_page',
+          input_schema: { properties: { includePageImages: { default: true } } },
+        },
       ],
     });
   });
@@ -463,7 +636,7 @@ describe('AI provider wire contracts', () => {
       responseFixtures.google,
       { provider: 'google', model: 'gemini-wire' },
       '/nested/v1/',
-      shopifyWebMCPTools()
+      { ...shopifyWebMCPTools(), ...readPageWireTools() }
     );
 
     expect(request.body).toMatchObject({
@@ -508,6 +681,16 @@ describe('AI provider wire contracts', () => {
                 },
               },
             },
+            {
+              name: 'agentboard_read_page',
+              parameters: {
+                properties: {
+                  includePageImages: {
+                    description: expect.stringContaining('summaries should retain images'),
+                  },
+                },
+              },
+            },
           ],
         },
       ],
@@ -536,6 +719,20 @@ describe('AI provider wire contracts', () => {
         },
       ],
     });
+    const declarations = (
+      request.body as {
+        tools: Array<{
+          functionDeclarations: Array<{
+            name: string;
+            parameters?: { properties?: { includePageImages?: { default?: unknown } } };
+          }>;
+        }>;
+      }
+    ).tools[0].functionDeclarations;
+    expect(
+      declarations.find(({ name }) => name === 'agentboard_read_page')?.parameters?.properties
+        ?.includePageImages?.default
+    ).toBeUndefined();
   });
 
   it.each([

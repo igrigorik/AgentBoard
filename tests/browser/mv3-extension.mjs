@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { CdpPipe, chromeSandboxArgs, findChrome, waitFor } from './chrome-harness.mjs';
 
@@ -170,6 +170,7 @@ async function startWireServer() {
   const slowPdfRequests = [];
   const redirectPdfRequests = [];
   const redirectTargetRequests = [];
+  let chatContent = 'OK';
   const pdfFixture = createPdfFixture();
   const multipagePdfFixture = createPdfFixture([
     Array.from({ length: 24 }, (_, index) => `${index + 1} ${'A'.repeat(36)}`),
@@ -291,7 +292,7 @@ async function startWireServer() {
           choices: [
             {
               index: 0,
-              delta: { role: 'assistant', content: 'OK' },
+              delta: { role: 'assistant', content: chatContent },
               finish_reason: 'stop',
             },
           ],
@@ -320,6 +321,9 @@ async function startWireServer() {
     slowPdfRequests,
     redirectPdfRequests,
     redirectTargetRequests,
+    setChatContent: (content) => {
+      chatContent = content;
+    },
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
@@ -348,6 +352,26 @@ async function main() {
   );
 
   const wire = await startWireServer();
+  const configuredLocalPdf = process.env.AGENTBOARD_TEST_LOCAL_PDF;
+  const localPdfPath =
+    configuredLocalPdf || path.join(profileDirectory, 'AgentBoard local résumé #1.pdf');
+  if (!configuredLocalPdf) writeFileSync(localPdfPath, createPdfFixture([['Local PDF fixture']]));
+  const localPdfUrl = pathToFileURL(localPdfPath).href;
+  const hostileLocalPath = path.join(profileDirectory, 'hostile local parent.html');
+  writeFileSync(
+    hostileLocalPath,
+    '<!doctype html><title>Hostile local parent</title><body></body>'
+  );
+  const hostileLocalUrl = pathToFileURL(hostileLocalPath).href;
+  const markdownPrivateImagePath = path.join(profileDirectory, 'model-selected local image.png');
+  writeFileSync(
+    markdownPrivateImagePath,
+    Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64'
+    )
+  );
+  const markdownPrivateImageUrl = pathToFileURL(markdownPrivateImagePath).href;
   const detached = process.platform !== 'win32';
   const browser = spawn(
     chrome,
@@ -447,6 +471,10 @@ async function main() {
         'options page reload'
       );
     };
+    const sendExtensionMessage = (message) =>
+      evaluate(`chrome.runtime.sendMessage(${JSON.stringify(message)})`);
+    const callTool = (tabId, toolName, args) =>
+      sendExtensionMessage({ type: 'WEBMCP_CALL_TOOL', tabId, toolName, args });
     const getConfig = () =>
       evaluate(`chrome.storage.local.get('config').then(({ config }) => config)`);
     const configEvents = () => evaluate(`globalThis.__configEvents ?? []`);
@@ -746,9 +774,9 @@ async function main() {
         'Synthetic tool that returns while scheduling a full navigation'
       );
 
-      const callResponse = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: ${JSON.stringify(webMCPToolName)}, args: { value: ${JSON.stringify(webMCPInput)} } })`
-      );
+      const callResponse = await callTool(fixtureTabId, webMCPToolName, {
+        value: webMCPInput,
+      });
       assert.deepEqual(callResponse, { success: true, result: webMCPResult });
       assert.equal(
         wire.requests.length,
@@ -800,9 +828,11 @@ async function main() {
         'the private reader host must not be visible in MAIN world'
       );
 
-      const htmlReadResponse = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: 'agentboard_read_page', args: { maxLength: 4000, startPage: 123, maxPages: 10 } })`
-      );
+      const htmlReadResponse = await callTool(fixtureTabId, 'agentboard_read_page', {
+        maxLength: 4000,
+        startPage: 123,
+        maxPages: 10,
+      });
       assert.equal(htmlReadResponse.success, true, JSON.stringify(htmlReadResponse));
       assert.equal(htmlReadResponse.result.success, true, JSON.stringify(htmlReadResponse));
       assert.equal(htmlReadResponse.result.metadata.url, wire.webMCPFixtureUrl);
@@ -810,9 +840,9 @@ async function main() {
         ['article', 'rendered-text', 'metadata'].includes(htmlReadResponse.result.extractionMode)
       );
       assert.match(htmlReadResponse.result.markdownContent, /WebMCP execution proof/);
-      const repeatedHtmlReadResponse = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: 'agentboard_read_page', args: { maxLength: 4000 } })`
-      );
+      const repeatedHtmlReadResponse = await callTool(fixtureTabId, 'agentboard_read_page', {
+        maxLength: 4000,
+      });
       assert.equal(
         repeatedHtmlReadResponse.success,
         true,
@@ -834,9 +864,7 @@ async function main() {
         '✓ routed the private ISOLATED-world system reader across page collisions and MAIN monkey patches'
       );
 
-      const navigationResponse = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${fixtureTabId}, toolName: ${JSON.stringify(webMCPNavigationToolName)}, args: {} })`
-      );
+      const navigationResponse = await callTool(fixtureTabId, webMCPNavigationToolName, {});
       assert.deepEqual(navigationResponse, {
         success: true,
         result: webMCPNavigationResult,
@@ -865,14 +893,15 @@ async function main() {
       await cdp.send('Target.closeTarget', { targetId: fixtureTargetId });
     }
 
+    const pdfDocumentUrl = `${wire.pdfFixtureUrl}#page=1`;
     const { targetId: pdfTargetId } = await cdp.send('Target.createTarget', {
-      url: wire.pdfFixtureUrl,
+      url: pdfDocumentUrl,
     });
     try {
       const pdfTabId = await waitFor(
         () =>
           evaluate(
-            `chrome.tabs.query({ url: ${JSON.stringify(wire.pdfFixtureUrl)} }).then(([tab]) => tab?.id || false)`
+            `chrome.tabs.query({}).then((tabs) => tabs.find(({ url }) => url === ${JSON.stringify(pdfDocumentUrl)})?.id || false)`
           ),
         'PDF fixture tab ID'
       );
@@ -883,7 +912,7 @@ async function main() {
           ),
         'PDF top document'
       );
-      assert.equal(pdfFrame.url, wire.pdfFixtureUrl);
+      assert.equal(pdfFrame.url, pdfDocumentUrl);
       await waitFor(
         () =>
           evaluate(
@@ -899,18 +928,33 @@ async function main() {
         'read-page capability in PDF tab'
       );
 
-      const pdfCall = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${pdfTabId}, toolName: 'agentboard_read_page', args: { startPage: 1, maxPages: 5, maxLength: 32000 } })`
-      );
+      const pdfCall = await callTool(pdfTabId, 'agentboard_read_page', {
+        startPage: 1,
+        maxPages: 5,
+        maxLength: 32000,
+      });
       assert.equal(pdfCall.success, true, JSON.stringify(pdfCall));
       const pdfResult = pdfCall.result;
       assert.equal(pdfResult.success, true, JSON.stringify(pdfResult));
       assert.equal(pdfResult.extractionMode, 'pdf');
+      assert.equal(pdfResult.metadata.url, pdfDocumentUrl);
       assert.equal(pdfResult.pdf.pageCount, 1);
       assert.equal(pdfResult.pdf.startPage, 1);
       assert.equal(pdfResult.pdf.endPage, 1);
       assert.match(pdfResult.markdownContent, /AgentBoard PDF fixture/);
       assert.match(pdfResult.markdownContent, /Exact document worker extraction/);
+      assert.deepEqual(pdfResult.pdf.pageImages, [
+        {
+          imageIndex: 1,
+          pageNumber: 1,
+          width: 791,
+          height: 1024,
+          mediaType: 'image/jpeg',
+          detail: 'low',
+        },
+      ]);
+      assert.equal('pageImageData' in pdfResult, false);
+      assert.equal(JSON.stringify(pdfResult).includes('base64'), false);
       assert.equal(wire.pdfRequests[0]?.cookie || '', '');
       assert.ok(
         wire.pdfRequests
@@ -918,7 +962,9 @@ async function main() {
           .some(({ cookie }) => cookie.includes('agentboard_pdf_session=allowed')),
         'the exact-document refetch must carry the PDF page session cookie'
       );
-      console.log('✓ extracted an authenticated native-viewer PDF through a real local worker');
+      console.log(
+        '✓ extracted authenticated PDF text and private bounded page images through a real local worker'
+      );
     } finally {
       await cdp.send('Target.closeTarget', { targetId: pdfTargetId });
     }
@@ -941,18 +987,19 @@ async function main() {
           ),
         'read-page capability in multipage PDF tab'
       );
-      const paginatedPdfCall = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${multipagePdfTabId}, toolName: 'agentboard_read_page', args: { maxPages: 2 } })`
-      );
+      const paginatedPdfCall = await callTool(multipagePdfTabId, 'agentboard_read_page', {
+        maxPages: 2,
+      });
       assert.equal(paginatedPdfCall.success, true, JSON.stringify(paginatedPdfCall));
       assert.equal(paginatedPdfCall.result.success, true, JSON.stringify(paginatedPdfCall));
       assert.equal(paginatedPdfCall.result.pdf.endPage, 2);
       assert.equal(paginatedPdfCall.result.pdf.nextPage, 3);
       assert.equal(paginatedPdfCall.result.stats.extractedPageCount, 2);
 
-      const oversizedFirstPageCall = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${multipagePdfTabId}, toolName: 'agentboard_read_page', args: { maxLength: 1000, maxPages: 1 } })`
-      );
+      const oversizedFirstPageCall = await callTool(multipagePdfTabId, 'agentboard_read_page', {
+        maxLength: 1000,
+        maxPages: 1,
+      });
       assert.equal(oversizedFirstPageCall.success, true, JSON.stringify(oversizedFirstPageCall));
       assert.equal(
         oversizedFirstPageCall.result.success,
@@ -965,8 +1012,107 @@ async function main() {
       await cdp.send('Target.closeTarget', { targetId: multipagePdfTargetId });
     }
 
+    const { targetId: localPdfTargetId } = await cdp.send('Target.createTarget', {
+      url: localPdfUrl,
+    });
+    try {
+      const localPdfTabId = await waitFor(
+        () =>
+          evaluate(
+            `chrome.tabs.query({}).then((tabs) => tabs.find(({ url }) => url === ${JSON.stringify(localPdfUrl)})?.id || false)`
+          ),
+        'local PDF tab ID'
+      );
+      assert.equal(
+        await evaluate('chrome.extension.isAllowedFileSchemeAccess()'),
+        true,
+        'the unpacked browser fixture must grant its declared file access'
+      );
+      const localStartPage = configuredLocalPdf ? 2 : 1;
+      const localPdfCall = await callTool(localPdfTabId, 'agentboard_read_page', {
+        startPage: localStartPage,
+        maxPages: 1,
+        maxLength: 32000,
+      });
+      assert.equal(localPdfCall.success, true, JSON.stringify(localPdfCall));
+      assert.equal(localPdfCall.result.success, true, JSON.stringify(localPdfCall));
+      assert.equal(localPdfCall.result.extractionMode, 'pdf');
+      assert.equal(localPdfCall.result.pdf.startPage, localStartPage);
+      assert.equal(localPdfCall.result.pdf.endPage, localStartPage);
+      assert.equal(localPdfCall.result.metadata.url, '');
+      const publicLocalResult = JSON.stringify(localPdfCall.result);
+      assert.equal(publicLocalResult.includes('file:'), false);
+      assert.equal(publicLocalResult.includes(path.basename(localPdfPath)), false);
+      console.log('✓ read a local file PDF while keeping its path out of the public tool result');
+
+      wire.setChatContent(
+        `![private local image](${markdownPrivateImageUrl})\n[private local link](${markdownPrivateImageUrl})`
+      );
+      const sidebarUrl = `chrome-extension://${extensionId}/src/sidebar/index.html#tab=${localPdfTabId}`;
+      const { targetId: sidebarTargetId } = await cdp.send('Target.createTarget', {
+        url: sidebarUrl,
+      });
+      const { sessionId: sidebarSessionId } = await cdp.send('Target.attachToTarget', {
+        targetId: sidebarTargetId,
+        flatten: true,
+      });
+      await cdp.send('Runtime.enable', {}, sidebarSessionId);
+      await cdp.send('Page.enable', {}, sidebarSessionId);
+      const evaluateSidebar = async (expression) => {
+        const result = await cdp.send(
+          'Runtime.evaluate',
+          { expression, awaitPromise: true, returnByValue: true },
+          sidebarSessionId
+        );
+        if (result.exceptionDetails) throw new Error('Sidebar evaluation failed');
+        return result.result?.value;
+      };
+      try {
+        await waitFor(
+          () =>
+            evaluateSidebar(
+              `document.readyState === 'complete' && document.querySelector('#message-input')?.disabled === false && document.body.textContent.includes("Hello! I'm your AI assistant")`
+            ),
+          'sidebar security fixture'
+        );
+        const requestCount = wire.requests.length;
+        await evaluateSidebar(`(() => {
+          const input = document.querySelector('#message-input');
+          input.value = 'LOCAL_MARKDOWN_SECURITY_PROBE';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#send-button').click();
+          return true;
+        })()`);
+        await waitFor(() => wire.requests.length > requestCount, 'sidebar model request');
+        await waitFor(
+          () =>
+            evaluateSidebar(
+              `!!document.querySelector('.message-assistant.text-box:not(.streaming) img')`
+            ),
+          'rendered Markdown security probe'
+        );
+        const markdownSecurity = await evaluateSidebar(`(() => {
+          const message = [...document.querySelectorAll('.message-assistant.text-box')].at(-1);
+          const image = message?.querySelector('img');
+          const link = message?.querySelector('a');
+          return {
+            imageSrc: image?.getAttribute('src') ?? null,
+            imageWidth: image?.naturalWidth ?? 0,
+            linkHref: link?.getAttribute('href') ?? null,
+          };
+        })()`);
+        assert.deepEqual(markdownSecurity, { imageSrc: null, imageWidth: 0, linkHref: null });
+        console.log('✓ blocked model-authored Markdown from exercising local-file permission');
+      } finally {
+        wire.setChatContent('OK');
+        await cdp.send('Target.closeTarget', { targetId: sidebarTargetId });
+      }
+    } finally {
+      await cdp.send('Target.closeTarget', { targetId: localPdfTargetId });
+    }
+
     const { targetId: hostileHostTargetId } = await cdp.send('Target.createTarget', {
-      url: wire.webMCPNavigationDestinationUrl,
+      url: hostileLocalUrl,
     });
     const { sessionId: hostileHostSessionId } = await cdp.send('Target.attachToTarget', {
       targetId: hostileHostTargetId,
@@ -1000,7 +1146,7 @@ async function main() {
                 channel.port1.postMessage({
                   type: 'parse',
                   bytes,
-                  options: { maxLength: 32000, startPage: 1, maxPages: 5 },
+                  options: { maxLength: 32000, startPage: 1, maxPages: 5, includePageImages: true },
                   source: { title: 'hostile', url: location.href },
                 }, [bytes]);
               }, { once: true });
@@ -1036,9 +1182,7 @@ async function main() {
           ),
         'read-page capability in redirect PDF tab'
       );
-      const redirectPdfCall = await evaluate(
-        `chrome.runtime.sendMessage({ type: 'WEBMCP_CALL_TOOL', tabId: ${redirectPdfTabId}, toolName: 'agentboard_read_page', args: {} })`
-      );
+      const redirectPdfCall = await callTool(redirectPdfTabId, 'agentboard_read_page', {});
       assert.equal(redirectPdfCall.success, true, JSON.stringify(redirectPdfCall));
       assert.equal(redirectPdfCall.result.success, false);
       assert.equal(redirectPdfCall.result.error.code, 'REFETCH_FAILED');
@@ -1282,7 +1426,7 @@ async function main() {
 
 try {
   await main();
-  console.log('\n16 built-MV3 Chromium scenarios passed');
+  console.log('\n18 built-MV3 Chromium scenarios passed');
 } finally {
   rmSync(profileDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }

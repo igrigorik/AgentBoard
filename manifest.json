@@ -12,7 +12,7 @@
     "scripting",
     "webNavigation"
   ],
-  "host_permissions": ["https://*/*", "http://localhost/*"],
+  "host_permissions": ["https://*/*", "http://localhost/*", "file:///*"],
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"
@@ -48,7 +48,7 @@
   "web_accessible_resources": [
     {
       "resources": ["src/lib/webmcp/tools/read_page/pdf/worker-host.html"],
-      "matches": ["https://*/*", "http://localhost/*"]
+      "matches": ["https://*/*", "http://localhost/*", "file:///*"]
     }
   ],
   "content_security_policy": {

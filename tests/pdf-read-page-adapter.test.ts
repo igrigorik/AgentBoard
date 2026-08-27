@@ -1,6 +1,12 @@
+import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider';
+import { simulateReadableStream, stepCountIs, streamText } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createReadPageTool, type ReadPageInput } from '../src/lib/webmcp/tools/read_page';
-import type { PdfHostMessage, PdfReadResult } from '../src/lib/webmcp/tools/read_page/pdf/protocol';
+import type {
+  PdfHostMessage,
+  PdfParserResult,
+  PdfSuccess,
+} from '../src/lib/webmcp/tools/read_page/pdf/protocol';
 
 const mocks = vi.hoisted(() => ({
   getOwnedDocument: vi.fn(),
@@ -42,7 +48,7 @@ interface FakePort {
   onDisconnect: { addListener(listener: () => void): void };
 }
 
-function fakePdfPort(result?: PdfReadResult): FakePort {
+function fakePdfPort(result?: PdfParserResult): FakePort {
   const messageListeners: Array<(message: PdfHostMessage) => void> = [];
   const disconnectListeners: Array<() => void> = [];
   const port: FakePort = {
@@ -85,7 +91,7 @@ const htmlResult = {
   stats: { characterCount: 9, wordCount: 2, estimatedReadTime: 1 },
 };
 
-const pdfResult: PdfReadResult = {
+const pdfResult: PdfSuccess = {
   success: true,
   extractionMode: 'pdf',
   metadata: {
@@ -108,6 +114,7 @@ const pdfResult: PdfReadResult = {
     endPage: 1,
     nextPage: null,
     layoutMode: 'layout',
+    pageImages: [],
   },
   stats: {
     characterCount: 14,
@@ -116,6 +123,59 @@ const pdfResult: PdfReadResult = {
     extractedPageCount: 1,
   },
 };
+
+const pdfParserResult: PdfParserResult = {
+  ...pdfResult,
+  pageImageData: [],
+  pageHeadingOffsets: [],
+};
+
+const encodedPageImage = 'BASE64_PRIVATE_PAGE_IMAGE';
+const pdfMediaParserResult: PdfParserResult = {
+  ...pdfResult,
+  markdownContent: '# PDF: Fixture\n\n## Page 1\n\n[No extractable text]',
+  warnings: ['NO_PAGE_TEXT:page-1'],
+  pdf: {
+    ...pdfResult.pdf,
+    pageImages: [
+      {
+        imageIndex: 1,
+        pageNumber: 1,
+        width: 791,
+        height: 1_024,
+        mediaType: 'image/jpeg',
+        detail: 'low',
+      },
+    ],
+  },
+  pageImageData: [
+    {
+      imageIndex: 1,
+      pageNumber: 1,
+      width: 791,
+      height: 1_024,
+      mediaType: 'image/jpeg',
+      detail: 'low',
+      data: encodedPageImage,
+      byteLength: 123,
+    },
+  ],
+  pageHeadingOffsets: ['# PDF: Fixture\n\n'.length],
+};
+
+function installRelayPdf(result: PdfParserResult) {
+  const port = fakePdfPort(result);
+  const executeScript = vi.fn(async (details: { func?: unknown }) => [
+    {
+      documentId: 'doc-1',
+      frameId: 0,
+      result: details.func ? 'application/pdf' : undefined,
+    },
+  ]);
+  const connect = vi.fn(() => port);
+  vi.stubGlobal('chrome', { scripting: { executeScript }, tabs: { connect } });
+  return { port, executeScript, connect };
+}
 
 describe('read-page document router', () => {
   beforeEach(() => {
@@ -137,7 +197,12 @@ describe('read-page document router', () => {
       tabs: { connect: vi.fn() },
     });
     const tool = createReadPageTool(7);
-    const input: ReadPageInput = { maxLength: 4_000, startPage: 3, maxPages: 2 };
+    const input: ReadPageInput = {
+      maxLength: 4_000,
+      startPage: 3,
+      maxPages: 2,
+      includePageImages: false,
+    };
     const executionOptions = toolCallOptions(new AbortController().signal);
 
     await expect(tool.execute?.(input, executionOptions)).resolves.toEqual(htmlResult);
@@ -251,21 +316,148 @@ describe('read-page document router', () => {
     await expect(result).rejects.toBe(reason);
   });
 
-  it('runs the exact-document PDF host and never calls the HTML delegate', async () => {
-    const port = fakePdfPort(pdfResult);
-    const executeScript = vi.fn(async (details: { func?: unknown }) => [
-      {
-        documentId: 'doc-1',
-        frameId: 0,
-        result: details.func ? 'application/pdf' : undefined,
+  it('reports a neutral route failure for tabs that never had a readable document', async () => {
+    mocks.getOwnedDocument.mockReturnValue(null);
+    const executeScript = vi.fn();
+    vi.stubGlobal('chrome', {
+      scripting: { executeScript },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ url: 'chrome://settings/' }),
+        connect: vi.fn(),
       },
-    ]);
-    const connect = vi.fn(() => port);
-    vi.stubGlobal('chrome', { scripting: { executeScript }, tabs: { connect } });
+    });
+
+    // A PDF-branded code here would steer the model toward a nonexistent PDF remedy.
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toEqual({
+      success: false,
+      error: { code: 'ROUTE_UNAVAILABLE', message: 'The document route is unavailable.' },
+    });
+    expect(executeScript).not.toHaveBeenCalled();
+  });
+
+  it('returns an actionable local-file permission failure without attempting injection', async () => {
+    mocks.getOwnedDocument.mockReturnValue(null);
+    const executeScript = vi.fn();
+    vi.stubGlobal('chrome', {
+      extension: { isAllowedFileSchemeAccess: vi.fn().mockResolvedValue(false) },
+      scripting: { executeScript },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ url: 'file:///private/example.pdf' }),
+        connect: vi.fn(),
+      },
+    });
+
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toEqual({
+      success: false,
+      error: {
+        code: 'PDF_READER_REQUIRED',
+        message: 'Enable “Allow access to file URLs” for AgentBoard, then reload this local PDF.',
+      },
+    });
+    expect(executeScript).not.toHaveBeenCalled();
+  });
+
+  it('resolves an allowed local PDF without a generic WebMCP relay route', async () => {
+    mocks.getOwnedDocument.mockReturnValue(null);
+    const port = fakePdfPort({
+      ...pdfParserResult,
+      metadata: { ...pdfParserResult.metadata, title: 'Local PDF', url: '' },
+    });
+    const executeScript = vi.fn(async (details: { func?: unknown; files?: string[] }) => {
+      if (details.func) {
+        return [
+          {
+            documentId: 'local-doc',
+            frameId: 0,
+            result: { isLocal: true, contentType: 'application/pdf' },
+          },
+        ];
+      }
+      return [{ documentId: 'local-doc', frameId: 0 }];
+    });
+    const getFrame = vi.fn().mockResolvedValue({ documentId: 'local-doc' });
+    vi.stubGlobal('chrome', {
+      extension: { isAllowedFileSchemeAccess: vi.fn().mockResolvedValue(true) },
+      scripting: { executeScript },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ url: 'file:///private/example.pdf' }),
+        connect: vi.fn(() => port),
+      },
+      webNavigation: { getFrame },
+    });
+
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toMatchObject({
+      success: true,
+      extractionMode: 'pdf',
+      metadata: { title: 'Local PDF', url: '' },
+    });
+    expect(executeScript).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        target: { tabId: 7, frameIds: [0] },
+        world: 'ISOLATED',
+      })
+    );
+    expect(executeScript).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        target: { tabId: 7, documentIds: ['local-doc'] },
+        files: ['content-scripts/pdf-document-host.js'],
+      })
+    );
+    expect(getFrame).toHaveBeenCalledWith({ tabId: 7, frameId: 0 });
+  });
+
+  it('does not settle a local PDF after cancellation during final route verification', async () => {
+    mocks.getOwnedDocument.mockReturnValue(null);
+    const port = fakePdfPort(pdfParserResult);
+    const executeScript = vi.fn(async (details: { func?: unknown }) => {
+      if (details.func) {
+        return [
+          {
+            documentId: 'local-doc',
+            frameId: 0,
+            result: { isLocal: true, contentType: 'application/pdf' },
+          },
+        ];
+      }
+      return [{ documentId: 'local-doc', frameId: 0 }];
+    });
+    let resolveFrame!: (frame: { documentId: string }) => void;
+    const getFrame = vi.fn(
+      () =>
+        new Promise<{ documentId: string }>((resolve) => {
+          resolveFrame = resolve;
+        })
+    );
+    vi.stubGlobal('chrome', {
+      extension: { isAllowedFileSchemeAccess: vi.fn().mockResolvedValue(true) },
+      scripting: { executeScript },
+      tabs: {
+        get: vi.fn().mockResolvedValue({ url: 'file:///private/example.pdf' }),
+        connect: vi.fn(() => port),
+      },
+      webNavigation: { getFrame },
+    });
+    const controller = new AbortController();
+    const reason = new DOMException('caller cancelled', 'AbortError');
+    const execution = createReadPageTool(7).execute?.({}, toolCallOptions(controller.signal));
+
+    await vi.waitFor(() => expect(getFrame).toHaveBeenCalledOnce());
+    controller.abort(reason);
+    await expect(execution).rejects.toBe(reason);
+    resolveFrame({ documentId: 'local-doc' });
+  });
+
+  it('runs the exact-document PDF host and never calls the HTML delegate', async () => {
+    const { port, executeScript, connect } = installRelayPdf(pdfParserResult);
     const tool = createReadPageTool(7);
 
     await expect(
-      tool.execute?.({ maxLength: 32_000.75, startPage: 2, maxPages: 50 }, toolCallOptions())
+      tool.execute?.(
+        { maxLength: 32_000.75, startPage: 2, maxPages: 50, includePageImages: false },
+        toolCallOptions()
+      )
     ).resolves.toEqual(pdfResult);
     expect(executeScript).toHaveBeenNthCalledWith(
       1,
@@ -282,30 +474,182 @@ describe('read-page document router', () => {
     expect(port.postMessage).toHaveBeenCalledWith({
       type: 'start',
       capability: expect.any(String),
-      options: { maxLength: 32_000, startPage: 2, maxPages: 50 },
+      options: { maxLength: 32_000, startPage: 2, maxPages: 50, includePageImages: false },
     });
   });
 
-  it('uses the 25-page default for PDF calls', async () => {
-    const port = fakePdfPort(pdfResult);
-    const executeScript = vi.fn(async (details: { func?: unknown }) => [
-      {
-        documentId: 'doc-1',
-        frameId: 0,
-        result: details.func ? 'application/pdf' : undefined,
-      },
-    ]);
-    const connect = vi.fn(() => port);
-    vi.stubGlobal('chrome', { scripting: { executeScript }, tabs: { connect } });
+  it('applies the PDF defaults', async () => {
+    const tool = createReadPageTool(7);
+    const { port } = installRelayPdf(pdfParserResult);
 
-    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toEqual(
-      pdfResult
-    );
+    await expect(tool.execute?.({}, toolCallOptions())).resolves.toEqual(pdfResult);
     expect(port.postMessage).toHaveBeenCalledWith({
       type: 'start',
       capability: expect.any(String),
-      options: { maxLength: 32_000, startPage: 1, maxPages: 25 },
+      options: { maxLength: 32_000, startPage: 1, maxPages: 25, includePageImages: true },
     });
+  });
+
+  it('keeps encoded PDF media private while exposing repeatable model-only attachments', async () => {
+    installRelayPdf(pdfMediaParserResult);
+    const tool = createReadPageTool(7);
+    if (!tool.execute || !tool.toModelOutput) throw new Error('read_page media hooks unavailable');
+
+    const output = await tool.execute({}, toolCallOptions());
+    if (output && typeof output === 'object' && Symbol.asyncIterator in output) {
+      throw new Error('read_page unexpectedly returned a stream');
+    }
+    expect(JSON.stringify(output)).not.toContain(encodedPageImage);
+    expect(output).not.toHaveProperty('pageImageData');
+    expect(output).not.toHaveProperty('pageHeadingOffsets');
+    expect(output).toMatchObject({
+      pdf: {
+        pageImages: [
+          {
+            imageIndex: 1,
+            pageNumber: 1,
+            width: 791,
+            height: 1_024,
+            mediaType: 'image/jpeg',
+            detail: 'low',
+          },
+        ],
+      },
+    });
+
+    const firstModelOutput = tool.toModelOutput(output);
+    expect(firstModelOutput).toEqual({
+      type: 'content',
+      value: [
+        {
+          type: 'text',
+          text: expect.stringMatching(
+            /Image 1 = PDF page 1[\s\S]*## PDF page 1 — Image 1[\s\S]*No extractable text/
+          ),
+        },
+        { type: 'media', data: encodedPageImage, mediaType: 'image/jpeg' },
+      ],
+    });
+    expect(tool.toModelOutput(output)).toEqual(firstModelOutput);
+  });
+
+  it('uses trusted heading offsets instead of rewriting PDF-controlled heading text', async () => {
+    const header = '# PDF: Fixture';
+    const firstPage = '## Page 1\n\nBody reference:\n## Page 2\nnot a boundary';
+    const secondPage = '## Page 2\n\nActual second page';
+    const firstOffset = header.length + 2;
+    const secondOffset = firstOffset + firstPage.length + 2;
+    const descriptors = [1, 2].map((pageNumber) => ({
+      imageIndex: pageNumber,
+      pageNumber,
+      width: 791,
+      height: 1_024,
+      mediaType: 'image/jpeg' as const,
+      detail: 'low' as const,
+    }));
+    const parserResult: PdfParserResult = {
+      ...pdfResult,
+      markdownContent: `${header}\n\n${firstPage}\n\n${secondPage}`,
+      pdf: {
+        ...pdfResult.pdf,
+        pageCount: 2,
+        endPage: 2,
+        pageImages: descriptors,
+      },
+      stats: { ...pdfResult.stats, extractedPageCount: 2 },
+      pageImageData: descriptors.map((descriptor) => ({
+        ...descriptor,
+        data: `IMAGE_${descriptor.imageIndex}`,
+        byteLength: 100,
+      })),
+      pageHeadingOffsets: [firstOffset, secondOffset],
+    };
+    installRelayPdf(parserResult);
+    const tool = createReadPageTool(7);
+    if (!tool.execute || !tool.toModelOutput) throw new Error('read_page media hooks unavailable');
+    const output = await tool.execute({}, toolCallOptions());
+    if (output && typeof output === 'object' && Symbol.asyncIterator in output) {
+      throw new Error('read_page unexpectedly returned a stream');
+    }
+
+    const modelOutput = tool.toModelOutput(output);
+    expect(modelOutput.type).toBe('content');
+    if (modelOutput.type !== 'content') throw new Error('expected rich model output');
+    expect(modelOutput.value).toHaveLength(3);
+    const text = modelOutput.value[0];
+    if (text.type !== 'text') throw new Error('expected manifest text first');
+    expect(text.text).toContain('## Page 2\nnot a boundary');
+    expect(text.text.match(/## PDF page 2 — Image 2/gu)).toHaveLength(1);
+    expect(modelOutput.value.slice(1)).toEqual([
+      { type: 'media', data: 'IMAGE_1', mediaType: 'image/jpeg' },
+      { type: 'media', data: 'IMAGE_2', mediaType: 'image/jpeg' },
+    ]);
+  });
+
+  it('preserves private media identity through real AI SDK tool execution', async () => {
+    installRelayPdf(pdfMediaParserResult);
+    const prompts: unknown[] = [];
+    let invocation = 0;
+    const model = {
+      specificationVersion: 'v2' as const,
+      provider: 'test',
+      modelId: 'test',
+      supportedUrls: {},
+      doGenerate: vi.fn(),
+      doStream: async (options: LanguageModelV2CallOptions) => {
+        prompts.push(options.prompt);
+        invocation += 1;
+        const chunks: LanguageModelV2StreamPart[] =
+          invocation === 1
+            ? [
+                { type: 'stream-start', warnings: [] },
+                {
+                  type: 'tool-call',
+                  toolCallId: 'read-call',
+                  toolName: 'read_page',
+                  input: '{}',
+                },
+                {
+                  type: 'finish',
+                  finishReason: 'tool-calls',
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                },
+              ]
+            : [
+                { type: 'stream-start', warnings: [] },
+                { type: 'text-start', id: 'text' },
+                { type: 'text-delta', id: 'text', delta: 'Done.' },
+                { type: 'text-end', id: 'text' },
+                {
+                  type: 'finish',
+                  finishReason: 'stop',
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                },
+              ];
+        return {
+          stream: simulateReadableStream({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    };
+    const stream = streamText({
+      model,
+      messages: [{ role: 'user', content: 'Read the PDF' }],
+      tools: { read_page: createReadPageTool(7) },
+      stopWhen: stepCountIs(2),
+    });
+    const parts = [];
+    for await (const part of stream.fullStream) parts.push(part);
+
+    const rawResult = parts.find((part) => part.type === 'tool-result');
+    expect(JSON.stringify(rawResult)).not.toContain(encodedPageImage);
+    expect(prompts).toHaveLength(2);
+    const continuationPrompt = JSON.stringify(prompts[1]);
+    expect(continuationPrompt).toContain(encodedPageImage);
+    expect(continuationPrompt).toContain('Image 1 = PDF page 1');
   });
 
   it.each([null, { maxPages: 51 }])(
@@ -434,7 +778,7 @@ describe('read-page document router', () => {
   });
 
   it('fails closed when the captured document no longer owns settlement', async () => {
-    const port = fakePdfPort(pdfResult);
+    const port = fakePdfPort(pdfParserResult);
     vi.stubGlobal('chrome', {
       scripting: {
         executeScript: vi.fn(async (details: { func?: unknown }) => [

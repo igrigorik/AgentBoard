@@ -68,10 +68,20 @@ import 'prismjs/components/prism-git';
 import 'prismjs/components/prism-makefile';
 import 'prismjs/components/prism-nginx';
 
-/**
- * Map common language aliases to Prism language identifiers
- * This prevents recreating the object on every code block
- */
+const MARKDOWN_LINK_PROTOCOLS = new Set(['https:', 'http:', 'mailto:']);
+const MARKDOWN_IMAGE_PROTOCOLS = new Set(['https:', 'http:']);
+
+/** Model-authored Markdown must not turn extension host permissions into ambient URL authority. */
+function safeMarkdownUrl(value: string, allowedProtocols: ReadonlySet<string>): string | null {
+  try {
+    const url = new URL(value);
+    return allowedProtocols.has(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Map common language aliases to Prism language identifiers. */
 const LANGUAGE_ALIAS_MAP: Record<string, string> = {
   js: 'javascript',
   ts: 'typescript',
@@ -318,19 +328,24 @@ export class StreamingMarkdownRenderer {
     if (!current) return;
 
     switch (attr) {
-      case smd.HREF:
-        if (current.tagName === 'A') {
-          (current as HTMLAnchorElement).href = value;
-          (current as HTMLAnchorElement).target = '_blank';
-          (current as HTMLAnchorElement).rel = 'noopener noreferrer';
-        }
+      case smd.HREF: {
+        if (current.tagName !== 'A') break;
+        const href = safeMarkdownUrl(value, MARKDOWN_LINK_PROTOCOLS);
+        if (!href) break;
+        (current as HTMLAnchorElement).href = href;
+        (current as HTMLAnchorElement).target = '_blank';
+        (current as HTMLAnchorElement).rel = 'noopener noreferrer';
         break;
+      }
 
-      case smd.SRC:
-        if (current.tagName === 'IMG') {
-          (current as HTMLImageElement).src = value;
-        }
+      case smd.SRC: {
+        if (current.tagName !== 'IMG') break;
+        const src = safeMarkdownUrl(value, MARKDOWN_IMAGE_PROTOCOLS);
+        if (!src) break;
+        (current as HTMLImageElement).referrerPolicy = 'no-referrer';
+        (current as HTMLImageElement).src = src;
         break;
+      }
 
       case smd.LANG:
         // Store language for code block highlighting

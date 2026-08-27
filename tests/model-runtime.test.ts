@@ -107,10 +107,9 @@ describe('createModelRuntime', () => {
 
     expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('opaque-model');
     expect(mocks.openAIProvider.responses).not.toHaveBeenCalled();
-    expect(runtime).toEqual({
-      model: mocks.chatModel,
-      providerOptions: { openai: { reasoningEffort: 'low' } },
-    });
+    expect(runtime.model).not.toBe(mocks.chatModel);
+    expect(runtime.model).toMatchObject({ specificationVersion: 'v2' });
+    expect(runtime.providerOptions).toEqual({ openai: { reasoningEffort: 'low' } });
   });
 
   it('constructs native Anthropic with protocol-owned thinking options', () => {

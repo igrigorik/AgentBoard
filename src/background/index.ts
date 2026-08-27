@@ -400,15 +400,15 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       } catch {
         // Only the packaged worker host may claim parser capabilities.
       }
-      const ownedDocument = typeof tabId === 'number' ? webmcp.getOwnedDocument(tabId) : null;
-      const claimed =
-        isWorkerHost &&
-        typeof tabId === 'number' &&
-        typeof request.capability === 'string' &&
-        ownedDocument !== null &&
-        claimPdfWorkerCapability(request.capability, tabId, ownedDocument.documentId);
-      sendResponse({ success: claimed });
-      return false;
+      if (!isWorkerHost || typeof tabId !== 'number' || typeof request.capability !== 'string') {
+        sendResponse({ success: false });
+        return false;
+      }
+      void claimPdfWorkerCapability(request.capability, tabId).then(
+        (success) => sendResponse({ success }),
+        () => sendResponse({ success: false })
+      );
+      return true;
     }
 
     case 'MEMORY_BINDINGS_RESET':

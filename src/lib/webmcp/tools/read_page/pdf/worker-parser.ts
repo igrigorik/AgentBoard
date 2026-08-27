@@ -8,27 +8,38 @@ import {
   type PDFDocumentProxy,
 } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?worker&url';
+import { acquireParserBytes } from './acquisition';
 import { formatPdfPage } from './formatter';
+import {
+  PdfPageImageLimitError,
+  releaseCanvas,
+  renderPageImage,
+  type PdfPageImageResources,
+} from './page-image';
 import {
   PDF_HARD_MAX_LENGTH,
   PDF_HARD_MAX_PAGES,
   PDF_MAX_BYTES,
   PDF_MIN_MAX_LENGTH,
+  PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL,
+  PDF_PAGE_IMAGE_MAX_PIXELS,
+  PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS,
+  type PdfEncodedPageImage,
   type PdfFailure,
   type PdfFailureCode,
   type PdfParserMessage,
   type PdfParserRequest,
-  type PdfReadResult,
+  type PdfParserResult,
   type PdfSuccess,
 } from './protocol';
 import { collectTextItems } from './text-collector';
 
-interface ActiveParser {
-  cancelled: boolean;
+interface ActiveParser extends PdfPageImageResources {
   loadingTask?: PDFDocumentLoadingTask;
   document?: PDFDocumentProxy;
   pdfWorker?: PDFWorker;
   nativeWorker?: Worker;
+  acquisitionController?: AbortController;
   disposePromise?: Promise<void>;
 }
 
@@ -64,11 +75,24 @@ function validateParserRequest(value: unknown): PdfFailure | null {
     return failure('PARSE_FAILED', 'The PDF parser request was invalid.');
   }
   const request = value as Partial<PdfParserRequest>;
-  if (!(request.bytes instanceof ArrayBuffer)) {
+  const hasBytes = request.bytes instanceof ArrayBuffer;
+  const localFileUrl = request.localFileUrl;
+  const hasLocalFileUrl = typeof localFileUrl === 'string';
+  if (hasBytes === hasLocalFileUrl) {
     return failure('PARSE_FAILED', 'The PDF parser request was invalid.');
   }
-  if (request.bytes.byteLength > PDF_MAX_BYTES) {
+  if (hasBytes && request.bytes && request.bytes.byteLength > PDF_MAX_BYTES) {
     return failure('TOO_LARGE', 'This PDF exceeds the input byte limit.');
+  }
+  if (hasLocalFileUrl) {
+    try {
+      const url = new URL(localFileUrl);
+      if (url.protocol !== 'file:' || url.hash) {
+        return failure('PARSE_FAILED', 'The PDF parser request was invalid.');
+      }
+    } catch {
+      return failure('PARSE_FAILED', 'The PDF parser request was invalid.');
+    }
   }
   const options = request.options;
   if (
@@ -81,6 +105,7 @@ function validateParserRequest(value: unknown): PdfFailure | null {
     !Number.isInteger(options.maxPages) ||
     options.maxPages < 1 ||
     options.maxPages > PDF_HARD_MAX_PAGES ||
+    typeof options.includePageImages !== 'boolean' ||
     !request.source ||
     typeof request.source.title !== 'string' ||
     typeof request.source.url !== 'string'
@@ -137,11 +162,32 @@ function dispose(active: ActiveParser): Promise<void> {
     const loadingTask = active.loadingTask;
     const pdfWorker = active.pdfWorker;
     const nativeWorker = active.nativeWorker;
+    const renderTask = active.renderTask;
+    const canvas = active.canvas;
+    const fileReader = active.fileReader;
+    const acquisitionController = active.acquisitionController;
     active.document = undefined;
     active.loadingTask = undefined;
     active.pdfWorker = undefined;
     active.nativeWorker = undefined;
+    active.renderTask = undefined;
+    active.canvas = undefined;
+    active.fileReader = undefined;
+    active.acquisitionController = undefined;
 
+    acquisitionController?.abort();
+    try {
+      fileReader?.abort();
+    } catch {
+      // The encoder may already have settled.
+    }
+    try {
+      renderTask?.cancel();
+      await renderTask?.promise;
+    } catch {
+      // Cancellation rejects the render promise after releasing PDF.js's canvas lock.
+    }
+    releaseCanvas(canvas);
     try {
       await document?.cleanup();
     } catch {
@@ -166,9 +212,22 @@ function dispose(active: ActiveParser): Promise<void> {
   return active.disposePromise;
 }
 
-async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promise<PdfReadResult> {
+async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promise<PdfParserResult> {
   let workerReady = false;
   try {
+    const acquisitionController = new AbortController();
+    active.acquisitionController = acquisitionController;
+    let acquired: Awaited<ReturnType<typeof acquireParserBytes>>;
+    try {
+      acquired = await acquireParserBytes(request, acquisitionController.signal);
+    } finally {
+      if (active.acquisitionController === acquisitionController) {
+        active.acquisitionController = undefined;
+      }
+    }
+    if (acquired.failure) return acquired.failure;
+    if (!acquired.bytes) return failure('REFETCH_FAILED', 'The PDF could not be read.');
+
     const nativeWorker = new Worker(pdfWorkerUrl, { type: 'module', name: 'agentboard-pdfjs' });
     const pdfWorker = PDFWorker.create({
       port: nativeWorker,
@@ -181,11 +240,15 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
     if (active.cancelled) return failure('CANCELLED', 'PDF extraction was cancelled.');
 
     const loadingTask = getDocument({
-      data: new Uint8Array(request.bytes),
+      data: new Uint8Array(acquired.bytes),
       worker: pdfWorker,
       verbosity: VerbosityLevel.ERRORS,
       enableXfa: false,
-      stopAtErrors: false,
+      // Visual calls fail rather than silently omit source images above maxImageSize; callers can
+      // explicitly retry text-only extraction when a hostile or unusually large image is present.
+      stopAtErrors: request.options.includePageImages,
+      maxImageSize: PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS,
+      canvasMaxAreaInBytes: PDF_PAGE_IMAGE_MAX_PIXELS * 4,
       useSystemFonts: false,
       useWasm: false,
       useWorkerFetch: false,
@@ -213,9 +276,12 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
       'ltr'
     );
     const pages: Array<{ pageNumber: number; text: string }> = [];
+    const pageImages: PdfSuccess['pdf']['pageImages'] = [];
+    const pageImageData: PdfEncodedPageImage[] = [];
     const warnings = new Set<string>();
     let totalItems = 0;
     let totalCharacters = 0;
+    let totalImageBytes = 0;
     let textPageCount = 0;
     let rtlItems = 0;
     let ltrItems = 0;
@@ -242,8 +308,12 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
           }
           return collected.failure;
         }
-        const pageRtlItems = collected.items.filter(({ dir }) => dir === 'rtl').length;
-        const pageLtrItems = collected.items.filter(({ dir }) => dir === 'ltr').length;
+        let pageRtlItems = 0;
+        let pageLtrItems = 0;
+        for (const { dir } of collected.items) {
+          if (dir === 'rtl') pageRtlItems += 1;
+          else if (dir === 'ltr') pageLtrItems += 1;
+        }
         const viewport = page.getViewport({ scale: 1 });
         const formatted = formatPdfPage(collected.items, viewport.width, {
           rotation: page.rotate,
@@ -262,6 +332,41 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
           break;
         }
 
+        let image: PdfEncodedPageImage | null = null;
+        if (request.options.includePageImages) {
+          try {
+            image = await renderPageImage(
+              page,
+              pageNumber,
+              pageImages.length + 1,
+              PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL - totalImageBytes,
+              active
+            );
+          } catch (error) {
+            if (active.cancelled) {
+              return failure('CANCELLED', 'PDF extraction was cancelled.');
+            }
+            if (pages.length === 0) {
+              return error instanceof PdfPageImageLimitError
+                ? failure(
+                    'TOO_LARGE',
+                    'The first requested PDF page exceeds the media limit. Retry with includePageImages set to false for text-only extraction.'
+                  )
+                : failure(
+                    'PARSE_FAILED',
+                    'The first requested PDF page could not be rendered or encoded. Retry with includePageImages set to false for text-only extraction.'
+                  );
+            }
+            warnings.add(
+              `${error instanceof PdfPageImageLimitError ? 'PAGE_IMAGE_LIMIT_REACHED' : 'PAGE_IMAGE_FAILED'}:page-${pageNumber}`
+            );
+            nextPage = pageNumber;
+            truncated = true;
+            break;
+          }
+        }
+
+        // Commit text, counters, and media together only after every page resource fits.
         totalItems += collected.itemCount;
         totalCharacters += collected.characterCount;
         rtlItems += pageRtlItems;
@@ -274,12 +379,24 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
         else warnings.add(`NO_PAGE_TEXT:page-${pageNumber}`);
         pages.push({ pageNumber, text: pageMarkdown });
         bodyLength += separatorLength + pageMarkdown.length;
+        if (image) {
+          pageImages.push({
+            imageIndex: image.imageIndex,
+            pageNumber: image.pageNumber,
+            width: image.width,
+            height: image.height,
+            mediaType: image.mediaType,
+            detail: image.detail,
+          });
+          pageImageData.push(image);
+          totalImageBytes += image.byteLength;
+        }
       } finally {
         page.cleanup();
       }
     }
 
-    if (textPageCount === 0) {
+    if (textPageCount === 0 && pageImages.length === 0) {
       return failure('NO_EXTRACTABLE_TEXT', 'No extractable text is available in this PDF range.');
     }
 
@@ -291,6 +408,12 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
     };
     const header = markdownHeader(metadata, startPage, endPage, document.numPages);
     const markdownContent = `${header}\n\n${pages.map(({ text }) => text).join('\n\n')}`;
+    const pageHeadingOffsets: number[] = [];
+    let pageOffset = header.length + 2;
+    for (const page of pages) {
+      pageHeadingOffsets.push(pageOffset);
+      pageOffset += page.text.length + 2;
+    }
     if (markdownContent.length > request.options.maxLength) {
       return failure('TOO_LARGE', 'The requested PDF range exceeds the output limit.');
     }
@@ -309,6 +432,7 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
         endPage,
         nextPage,
         layoutMode,
+        pageImages,
       },
       stats: {
         characterCount: markdownContent.length,
@@ -316,6 +440,8 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
         estimatedReadTime: Math.ceil(words / 200),
         extractedPageCount: pages.length,
       },
+      pageImageData,
+      pageHeadingOffsets,
     };
   } catch (error) {
     if (active.cancelled) return failure('CANCELLED', 'PDF extraction was cancelled.');

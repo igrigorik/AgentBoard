@@ -27,7 +27,7 @@ export interface CardConfig {
     label: string;
     onToggle: () => void;
   };
-  onEdit: () => void;
+  onEdit?: () => void;
 }
 
 /**
@@ -36,11 +36,10 @@ export interface CardConfig {
  */
 export function createCard(config: CardConfig): HTMLElement {
   const card = document.createElement('div');
-  card.className = 'card card-clickable';
+  card.className = config.onEdit ? 'card card-clickable' : 'card';
   card.dataset.cardId = config.id;
 
-  // Make card clickable
-  card.addEventListener('click', config.onEdit);
+  if (config.onEdit) card.addEventListener('click', config.onEdit);
 
   // === Header ===
   const header = document.createElement('div');

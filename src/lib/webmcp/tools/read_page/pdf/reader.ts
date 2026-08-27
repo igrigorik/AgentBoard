@@ -1,15 +1,15 @@
 import log from '../../../../logger';
-import { getTabManager } from '../../../lifecycle';
 import { withAbortReason } from '../abort';
+import type { ExactDocumentRoute } from '../route';
+import { issuePdfWorkerCapability, releasePdfWorkerCapability } from './capabilities';
 import {
   PDF_DOCUMENT_HOST_FILE,
   PDF_HOST_PORT_PREFIX,
   type PdfFailure,
   type PdfHostMessage,
+  type PdfParserResult,
   type PdfReadOptions,
-  type PdfReadResult,
 } from './protocol';
-import { issuePdfWorkerCapability, releasePdfWorkerCapability } from './capabilities';
 
 const PDF_TIMEOUT_MS = 20_000;
 
@@ -17,31 +17,30 @@ function failure(code: PdfFailure['error']['code'], message: string): PdfFailure
   return { success: false, error: { code, message } };
 }
 
-async function injectPdfHost(tabId: number, documentId: string): Promise<void> {
+async function injectPdfHost(route: ExactDocumentRoute): Promise<void> {
   const results = await chrome.scripting.executeScript({
-    target: { tabId, documentIds: [documentId] },
+    target: { tabId: route.tabId, documentIds: [route.documentId] },
     world: 'ISOLATED',
     injectImmediately: true,
     files: [PDF_DOCUMENT_HOST_FILE],
   });
   const result = results.length === 1 ? results[0] : undefined;
-  if (!result || result.documentId !== documentId || result.frameId !== 0) {
+  if (!result || result.documentId !== route.documentId || result.frameId !== 0) {
     throw new Error('Document route changed');
   }
 }
 
 function runPdfHost(
-  tabId: number,
-  documentId: string,
+  route: ExactDocumentRoute,
   options: PdfReadOptions,
   capability: string,
   abortSignal: AbortSignal
-): Promise<PdfReadResult> {
+): Promise<PdfParserResult> {
   if (abortSignal.aborted) return Promise.reject(abortSignal.reason);
 
   return new Promise((resolve, reject) => {
-    const port = chrome.tabs.connect(tabId, {
-      documentId,
+    const port = chrome.tabs.connect(route.tabId, {
+      documentId: route.documentId,
       name: `${PDF_HOST_PORT_PREFIX}${globalThis.crypto.randomUUID()}`,
     });
     let settled = false;
@@ -55,7 +54,7 @@ function runPdfHost(
         // The document route may already be gone.
       }
     };
-    const finish = (result: PdfReadResult) => {
+    const finish = (result: PdfParserResult) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -92,11 +91,10 @@ function runPdfHost(
 }
 
 export async function readPdfDocument(
-  tabId: number,
-  documentId: string,
+  route: ExactDocumentRoute,
   options: PdfReadOptions,
   abortSignal?: AbortSignal
-): Promise<PdfReadResult> {
+): Promise<PdfParserResult> {
   if (abortSignal?.aborted) throw abortSignal.reason;
 
   const operation = new AbortController();
@@ -107,19 +105,19 @@ export async function readPdfDocument(
     timedOut = true;
     operation.abort(new DOMException('PDF extraction timed out', 'TimeoutError'));
   }, PDF_TIMEOUT_MS);
-  const capability = issuePdfWorkerCapability(tabId, documentId);
+  const capability = issuePdfWorkerCapability(route);
 
   try {
     if (!capability) {
       return failure('PDF_READER_REQUIRED', 'Another PDF read is already active.');
     }
-    await withAbortReason(injectPdfHost(tabId, documentId), operation.signal);
-    const result = await runPdfHost(tabId, documentId, options, capability, operation.signal);
+    await withAbortReason(injectPdfHost(route), operation.signal);
+    const result = await runPdfHost(route, options, capability, operation.signal);
     return timedOut ? failure('TIMEOUT', 'PDF extraction exceeded its time limit.') : result;
   } catch {
     if (timedOut) return failure('TIMEOUT', 'PDF extraction exceeded its time limit.');
     if (abortSignal?.aborted) throw abortSignal.reason;
-    if (!getTabManager().ownsDocument(tabId, documentId)) {
+    if (!(await route.isCurrent())) {
       return failure('NAVIGATED', 'The PDF document route was replaced.');
     }
     log.warn('[PDF Reader] Exact-document host unavailable');

@@ -258,7 +258,7 @@ function createBuiltinToolCard(tool: BuiltinToolInfo & { enabled: boolean }): HT
       label: '',
       onToggle: () => toggleBuiltinTool(tool.id),
     },
-    onEdit: () => openEditModal(tool.id, true),
+    ...(tool.type === 'webmcp' && { onEdit: () => openEditModal(tool.id, true) }),
   });
 }
 

@@ -228,9 +228,9 @@ describe('AIClient connection testing', () => {
     expect(result.success).toBe(true);
     expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('gpt-4o');
     expect(mocks.openAIProvider.responses).not.toHaveBeenCalled();
-    expect(mocks.streamText).toHaveBeenCalledWith(
-      expect.objectContaining({ model: mocks.chatModel })
-    );
+    const request = mocks.streamText.mock.calls[0][0];
+    expect(request.model).not.toBe(mocks.chatModel);
+    expect(request.model).toMatchObject({ specificationVersion: 'v2' });
   });
 
   it('routes saved agents through the same zero-retry probe path', async () => {
@@ -255,9 +255,7 @@ describe('AIClient connection testing', () => {
 
     expect(result.success).toBe(true);
     expect(mocks.openAIProvider.chat).toHaveBeenCalledWith('opaque-model');
-    expect(mocks.streamText).toHaveBeenCalledWith(
-      expect.objectContaining({ model: mocks.chatModel, maxRetries: 0 })
-    );
+    expect(mocks.streamText.mock.calls[0][0].maxRetries).toBe(0);
   });
 
   it('does not let a /v1 endpoint override explicit Responses selection', async () => {

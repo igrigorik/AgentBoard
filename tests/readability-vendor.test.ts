@@ -1,10 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { BUILTIN_SOURCES } from '../src/lib/webmcp/builtin-sources';
 import canonicalSource from '../src/lib/webmcp/vendor/readability.js?raw';
 import htmlReaderSource from '../src/lib/webmcp/tools/read_page/html-reader.js?raw';
-import readPageSource from '../src/lib/webmcp/tools/read_page/index.ts?raw';
 
 const COPYRIGHT_MARKER = '/*\n * Copyright (c) 2010 Arc90 Inc';
 const CANONICAL_END_MARKER = '\n\n// Export for ES module usage';
@@ -46,10 +44,6 @@ describe('Readability vendor integration', () => {
 
     expect(inline).toBe(canonical);
     expect(canonical).not.toContain('eslint-disable-next-line');
-  });
-
-  it('keeps generated built-in source synchronized with the canonical tool', () => {
-    expect(BUILTIN_SOURCES.agentboard_read_page).toBe(readPageSource);
   });
 
   it('records the 0.6.0 provenance in both controlled copies', () => {

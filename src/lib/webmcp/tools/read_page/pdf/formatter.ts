@@ -90,7 +90,9 @@ function joinLine(items: PositionedItem[]): TextLine {
 
 function groupLines(items: PositionedItem[], pageWidth: number): TextLine[] {
   const typicalHeight = median(items.map(({ fontHeight }) => fontHeight)) || 1;
-  const tolerance = Math.max(1.5, typicalHeight * 0.35);
+  // Superscripts commonly sit just above an author-line baseline. A 40% tolerance keeps those
+  // fragments attached without merging ordinary body lines, whose leading is normally larger.
+  const tolerance = Math.max(1.5, typicalHeight * 0.4);
   const groups: Array<{ y: number; items: PositionedItem[] }> = [];
 
   for (const item of [...items].sort((left, right) => right.y - left.y || left.x - right.x)) {
@@ -123,19 +125,72 @@ function groupLines(items: PositionedItem[], pageWidth: number): TextLine[] {
     .sort((a, b) => b.y - a.y || a.x - b.x);
 }
 
+function weightedMedianLineHeight(lines: TextLine[]): number {
+  const weighted = [...lines]
+    .map((line) => ({ height: line.height, weight: Math.max(1, line.text.length) }))
+    .sort((left, right) => left.height - right.height);
+  const midpoint = weighted.reduce((sum, { weight }) => sum + weight, 0) / 2;
+  let cumulative = 0;
+  for (const { height, weight } of weighted) {
+    cumulative += weight;
+    if (cumulative >= midpoint) return height;
+  }
+  return weighted.at(-1)?.height ?? 1;
+}
+
+function inferredHeadingLevel(
+  lines: TextLine[],
+  index: number,
+  typicalHeight: number
+): number | null {
+  const line = lines[index];
+  const text = line.text.replace(/:$/u, '').trim();
+  if (!text || text.length > 180) return null;
+
+  const previous = lines[index - 1];
+  const next = lines[index + 1];
+  const gapBefore = previous ? previous.y - line.y : Number.POSITIVE_INFINITY;
+  const gapAfter = next ? line.y - next.y : Number.POSITIVE_INFINITY;
+  const isolated =
+    gapBefore > Math.max(previous?.height ?? 0, line.height, typicalHeight) * 1.4 &&
+    gapAfter > Math.max(next?.height ?? 0, line.height, typicalHeight) * 1.4;
+  const relativeHeight = line.height / typicalHeight;
+  const numbered = /^(\d+(?:\.\d+)*)\s+\p{L}/u.exec(text);
+  if (numbered && isolated) {
+    return Math.min(6, 2 + numbered[1].split('.').length);
+  }
+  if (/\p{L}/u.test(text) && text.length <= 120 && relativeHeight >= 1.12 && isolated) return 3;
+
+  return null;
+}
+
 function formatLines(lines: TextLine[]): string {
   if (lines.length === 0) return '';
-  const typicalHeight = median(lines.map(({ height }) => height)) || 1;
+  // Dense body prose, rather than numerous tiny caption or code lines, establishes the baseline
+  // used for conservative heading inference.
+  const typicalHeight = weightedMedianLineHeight(lines);
   const output: string[] = [];
+  let previousWasHeading = false;
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
+    const headingLevel = inferredHeadingLevel(lines, index, typicalHeight);
+    const isHeading = headingLevel !== null;
     if (index > 0) {
       const previous = lines[index - 1];
       const gap = previous.y - line.y;
-      if (gap > Math.max(previous.height, line.height, typicalHeight) * 1.65) output.push('');
+      if (
+        isHeading ||
+        previousWasHeading ||
+        gap > Math.max(previous.height, line.height, typicalHeight) * 1.65
+      ) {
+        if (output.at(-1) !== '') output.push('');
+      }
     }
-    output.push(line.text);
+
+    const text = line.text.replace(/^[•◦▪‣]\s*/u, '- ');
+    output.push(isHeading ? `${'#'.repeat(headingLevel)} ${text}` : text);
+    previousWasHeading = isHeading;
   }
 
   return output.join('\n').trim();
@@ -229,29 +284,46 @@ export function formatPdfPage(
   pageWidth: number,
   { rotation = 0 }: PdfPageFormatOptions = {}
 ): FormattedPdfPage {
-  if (rotation % 360 !== 0 || items.some(hasUnsupportedOrientation)) {
+  if (rotation % 360 !== 0) {
     return {
       text: plainText(items),
       mode: 'plain',
       warnings: ['TEXT_ORIENTATION_UNCERTAIN'],
     };
   }
-  const positioned = items
-    .map(positionItem)
-    .filter((item): item is PositionedItem => item !== null);
-  if (positioned.length === 0 || positioned.length < items.length * 0.8) {
+
+  // PDF.js emits empty separator items as layout hints. They carry no user-visible text and must
+  // not influence either orientation or geometry confidence.
+  const meaningfulItems = items.filter((item) => normalizedText(item.str));
+  const horizontalItems = meaningfulItems.filter((item) => !hasUnsupportedOrientation(item));
+  const separatedItems = meaningfulItems.filter(hasUnsupportedOrientation);
+  if (horizontalItems.length < meaningfulItems.length * 0.8) {
     return {
       text: plainText(items),
       mode: 'plain',
-      warnings: positioned.length < items.length ? ['TEXT_GEOMETRY_INCOMPLETE'] : [],
+      warnings: ['TEXT_ORIENTATION_UNCERTAIN'],
+    };
+  }
+
+  const positioned = horizontalItems
+    .map(positionItem)
+    .filter((item): item is PositionedItem => item !== null);
+  if (positioned.length === 0 || positioned.length < horizontalItems.length * 0.8) {
+    return {
+      text: plainText(items),
+      mode: 'plain',
+      warnings: positioned.length < horizontalItems.length ? ['TEXT_GEOMETRY_INCOMPLETE'] : [],
     };
   }
 
   const lines = groupLines(positioned, pageWidth);
   const columns = orderColumns(lines, pageWidth);
-  return {
-    text: formatLines(columns.lines),
-    mode: 'layout',
-    warnings: columns.uncertain ? ['COLUMN_LAYOUT_UNCERTAIN'] : [],
-  };
+  const warnings = columns.uncertain ? ['COLUMN_LAYOUT_UNCERTAIN'] : [];
+  let text = formatLines(columns.lines);
+  const separatedText = plainText(separatedItems);
+  if (separatedText) {
+    text = `${text}\n\n### Rotated or vertical text (position uncertain)\n\n${separatedText}`;
+    warnings.push('TEXT_ORIENTATION_SEPARATED');
+  }
+  return { text, mode: 'layout', warnings };
 }

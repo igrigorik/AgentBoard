@@ -5,7 +5,7 @@
  * - System tools (background worker, TypeScript)
  * - WebMCP built-in tools (page context, pre-compiled)
  *
- * Used by Options UI to display tool information and source code.
+ * Used by Options UI to display tool information and page-tool source code.
  */
 
 import { COMPILED_TOOLS, type CompiledToolInfo } from './tools/registry';

@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { formatPdfPage, type PdfTextItem } from '../src/lib/webmcp/tools/read_page/pdf/formatter';
 
-function item(str: string, x: number, y: number, width = str.length * 5): PdfTextItem {
+function item(
+  str: string,
+  x: number,
+  y: number,
+  width = str.length * 5,
+  fontHeight = 10
+): PdfTextItem {
   return {
     str,
     dir: 'ltr',
-    transform: [10, 0, 0, 10, x, y],
+    transform: [fontHeight, 0, 0, fontHeight, x, y],
     width,
-    height: 10,
+    height: fontHeight,
     hasEOL: false,
   };
 }
@@ -24,6 +30,82 @@ describe('PDF text formatter', () => {
       mode: 'layout',
       warnings: [],
     });
+  });
+
+  it('preserves evidence-backed headings and list markers as Markdown', () => {
+    const result = formatPdfPage(
+      [
+        item('Paper title', 40, 740, 120, 16),
+        item('Summary text.', 40, 700),
+        item('1 Introduction', 40, 640, 100, 12),
+        item('• First contribution', 40, 620),
+        item('1.1 Prior work', 40, 580),
+        item('Prior-work body.', 40, 560),
+      ],
+      612
+    );
+
+    expect(result.text).toBe(
+      '### Paper title\n\nSummary text.\n\n### 1 Introduction\n\n- First contribution\n\n#### 1.1 Prior work\n\nPrior-work body.'
+    );
+    expect(result.mode).toBe('layout');
+  });
+
+  it('does not count empty PDF.js separator items as missing text geometry', () => {
+    const separators = Array.from({ length: 8 }, (_, index) => item(' ', 40, 680 - index * 10));
+    const result = formatPdfPage([item('Visible text', 40, 700), ...separators], 612);
+
+    expect(result).toEqual({ text: 'Visible text', mode: 'layout', warnings: [] });
+  });
+
+  it('does not promote ordinary prose or page numbers when small captions skew line counts', () => {
+    const result = formatPdfPage(
+      [
+        item('A full body line establishes the document prose size.', 40, 700, 300, 10),
+        item('automation). By treating these protocols as ordinary text', 40, 688, 300, 12),
+        item('Another full body line continues the paragraph.', 40, 676, 280, 10),
+        item('tiny caption one', 40, 640, 80, 6),
+        item('tiny caption two', 40, 632, 80, 6),
+        item('6', 300, 40, 5, 12),
+      ],
+      612
+    );
+
+    expect(result.text).not.toContain('### automation');
+    expect(result.text).not.toContain('### 6');
+  });
+
+  it('keeps sparse rotated marginalia without degrading the main page to plain text', () => {
+    const horizontal = Array.from({ length: 8 }, (_, index) =>
+      item(`line ${index + 1}`, 40, 700 - index * 12)
+    );
+    const marginalia = {
+      ...item('arXiv identifier', 20, 300),
+      transform: [0, 10, -10, 0, 20, 300],
+    };
+
+    const result = formatPdfPage([...horizontal, marginalia], 612);
+
+    expect(result.mode).toBe('layout');
+    expect(result.text).toContain('line 1');
+    expect(result.text).toContain(
+      '### Rotated or vertical text (position uncertain)\n\narXiv identifier'
+    );
+    expect(result.warnings).toEqual(['TEXT_ORIENTATION_SEPARATED']);
+  });
+
+  it('falls back when rotated or vertical text is more than a sparse minority', () => {
+    const horizontal = Array.from({ length: 7 }, (_, index) =>
+      item(`line ${index + 1}`, 40, 700 - index * 12)
+    );
+    const rotated = Array.from({ length: 3 }, (_, index) => ({
+      ...item(`vertical ${index + 1}`, 20, 300 - index * 12),
+      transform: [0, 10, -10, 0, 20, 300 - index * 12],
+    }));
+
+    expect(formatPdfPage([...horizontal, ...rotated], 612).mode).toBe('plain');
+    const separators = Array.from({ length: 20 }, (_, index) => item(' ', 40, 200 - index * 5));
+    expect(formatPdfPage([...horizontal, ...rotated, ...separators], 612).mode).toBe('plain');
   });
 
   it('reads unambiguous two-column pages down the left column before the right', () => {

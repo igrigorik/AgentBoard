@@ -59,11 +59,7 @@ const DEFAULT_CONFIG: PluginConfig = {
   sourcesOutputPath: 'src/lib/webmcp/builtin-sources.ts',
 };
 
-const SYSTEM_TOOL_SOURCES = [
-  { id: 'agentboard_fetch_url', path: 'fetch/fetch-url.ts' },
-  { id: 'agentboard_navigate', path: 'navigate/index.ts' },
-  { id: 'agentboard_read_page', path: 'read_page/index.ts' },
-] as const;
+const SYSTEM_TOOL_DIRS = new Set(['fetch', 'navigate', 'read_page']);
 
 /**
  * Main plugin function
@@ -71,7 +67,8 @@ const SYSTEM_TOOL_SOURCES = [
 export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin {
   const config = { ...DEFAULT_CONFIG, ...userConfig };
   let compiledTools: CompiledToolInfo[] = [];
-  const compiledToolsMap: Map<string, string> = new Map(); // Store compiled code for generateBundle
+  const compiledToolsMap = new Map<string, string>();
+  const pageToolSources = new Map<string, string>();
 
   return {
     name: 'webmcp-compiler',
@@ -97,14 +94,11 @@ export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin
             const fullPath = path.join(config.toolsSourceDir, name);
             return fs.statSync(fullPath).isDirectory();
           });
-        const systemToolDirs = new Set(
-          SYSTEM_TOOL_SOURCES.map(({ path: source }) => path.dirname(source))
-        );
         const pageToolDirs = allToolDirs.filter((toolDir) =>
           fs.existsSync(path.join(config.toolsSourceDir, toolDir, 'script.js'))
         );
         const invalidToolDirs = allToolDirs.filter(
-          (toolDir) => !pageToolDirs.includes(toolDir) && !systemToolDirs.has(toolDir)
+          (toolDir) => !pageToolDirs.includes(toolDir) && !SYSTEM_TOOL_DIRS.has(toolDir)
         );
         if (invalidToolDirs.length > 0) {
           throw new Error(`Tool directories missing script.js: ${invalidToolDirs.join(', ')}`);
@@ -112,19 +106,21 @@ export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin
 
         // eslint-disable-next-line no-console
         console.log(
-          `[WebMCP Compiler] Found ${pageToolDirs.length} page tools and ${systemToolDirs.size} system tools`
+          `[WebMCP Compiler] Found ${pageToolDirs.length} page tools and ${SYSTEM_TOOL_DIRS.size} system tools`
         );
 
         compiledTools = [];
         compiledToolsMap.clear();
+        pageToolSources.clear();
 
         // Compile each page tool
         for (const toolDir of pageToolDirs) {
           try {
             const scriptPath = path.join(config.toolsSourceDir, toolDir, 'script.js');
-            const { info, code } = await compileTool(scriptPath);
+            const { info, code, source } = await compileTool(scriptPath);
             compiledTools.push(info);
             compiledToolsMap.set(info.file, code);
+            pageToolSources.set(info.id, source);
             // eslint-disable-next-line no-console
             console.log(`[WebMCP Compiler] ✅ Compiled ${info.id}`);
           } catch (error) {
@@ -139,7 +135,7 @@ export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin
         console.log(`[WebMCP Compiler] ✅ Generated registry with ${compiledTools.length} tools`);
 
         // Generate source bundle for Options UI
-        generateBuiltinSources(config.toolsSourceDir, config.sourcesOutputPath);
+        generateBuiltinSources(pageToolSources, config.sourcesOutputPath);
         // eslint-disable-next-line no-console
         console.log('[WebMCP Compiler] ✅ Generated builtin sources bundle');
       } catch (error) {
@@ -180,10 +176,11 @@ export function webmcpCompilerPlugin(userConfig?: Partial<PluginConfig>): Plugin
 }
 
 /**
- * Compile a single tool from source to self-registering IIFE
- * Returns both the tool info and compiled code
+ * Compile a single tool from source to self-registering IIFE.
  */
-async function compileTool(scriptPath: string): Promise<{ info: CompiledToolInfo; code: string }> {
+async function compileTool(
+  scriptPath: string
+): Promise<{ info: CompiledToolInfo; code: string; source: string }> {
   // Read source code
   const sourceCode = fs.readFileSync(scriptPath, 'utf-8');
 
@@ -222,6 +219,7 @@ async function compileTool(scriptPath: string): Promise<{ info: CompiledToolInfo
       description: metadata.description,
     },
     code: wrappedCode,
+    source: sourceCode,
   };
 }
 
@@ -413,46 +411,11 @@ ${toolsArray},
 }
 
 /**
- * Generate builtin-sources.ts with tool source code as strings
- * Used by Options UI to display read-only source code for built-in tools
+ * Generate builtin-sources.ts with self-contained page-tool source code as strings.
+ * Internal system-tool entrypoints rely on bundled imports and are not useful copyable examples.
  */
-function generateBuiltinSources(toolsSourceDir: string, outputPath: string): void {
-  const sources: Record<string, string> = {};
-
-  // Read WebMCP tool sources (script.js files)
-  const toolDirs = fs
-    .readdirSync(toolsSourceDir)
-    .sort()
-    .filter((name) => {
-      const fullPath = path.join(toolsSourceDir, name);
-      return fs.statSync(fullPath).isDirectory();
-    });
-
-  for (const toolDir of toolDirs) {
-    const scriptPath = path.join(toolsSourceDir, toolDir, 'script.js');
-
-    if (fs.existsSync(scriptPath)) {
-      const sourceCode = fs.readFileSync(scriptPath, 'utf-8');
-
-      // Extract tool ID from metadata
-      const metadata = extractMetadata(sourceCode);
-      if (metadata && metadata.name && metadata.namespace) {
-        const toolId = `${metadata.namespace}_${metadata.name}`;
-        sources[toolId] = sourceCode;
-      }
-    }
-  }
-
-  // Read system tool sources (TypeScript)
-  for (const { id, path: sourcePath } of SYSTEM_TOOL_SOURCES) {
-    const toolPath = path.join(toolsSourceDir, sourcePath);
-    if (fs.existsSync(toolPath)) {
-      sources[id] = fs.readFileSync(toolPath, 'utf-8');
-    }
-  }
-
-  // Generate TypeScript source file
-  const sourcesArray = Object.entries(sources)
+function generateBuiltinSources(sources: ReadonlyMap<string, string>, outputPath: string): void {
+  const sourcesArray = [...sources]
     .map(([id, source]) => {
       // Escape for template literals:
       // 1. Backslashes must be escaped first (order matters!)
@@ -472,7 +435,7 @@ function generateBuiltinSources(toolsSourceDir: string, outputPath: string): voi
  * This file is AUTO-GENERATED by vite-plugin-webmcp-compiler.
  * DO NOT EDIT manually - changes will be overwritten on next build.
  *
- * Contains source code for all built-in tools (system + WebMCP).
+ * Contains self-contained source code for built-in page tools.
  * Used by Options UI to display read-only source code for learning/reference.
  */
 

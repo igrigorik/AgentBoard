@@ -26,4 +26,31 @@ describe('StreamingMarkdownRenderer', () => {
     expect(container.querySelectorAll(':scope > li')).toHaveLength(0);
     expect(container.querySelector('ul > li')?.innerHTML).toBe('Before<hr><br>After');
   });
+
+  it('does not turn model-authored Markdown into local or privileged URL access', () => {
+    const container = render(`
+[web](https://example.test/path)
+[mail](mailto:test@example.test)
+[local](file:///private/secret.txt)
+[extension](chrome-extension://example/private.html)
+![web image](https://images.example.test/image.png)
+![local image](file:///private/secret.png)
+![data image](data:image/png;base64,AAAA)
+`);
+    const links = [...container.querySelectorAll('a')];
+    const images = [...container.querySelectorAll('img')];
+
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      'https://example.test/path',
+      'mailto:test@example.test',
+      null,
+      null,
+    ]);
+    expect(images.map((image) => image.getAttribute('src'))).toEqual([
+      'https://images.example.test/image.png',
+      null,
+      null,
+    ]);
+    expect(images[0].referrerPolicy).toBe('no-referrer');
+  });
 });

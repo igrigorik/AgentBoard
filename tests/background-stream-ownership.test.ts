@@ -207,8 +207,13 @@ describe('background response privacy', () => {
     url: chrome.runtime.getURL('src/options/index.html'),
   });
 
-  it('claims PDF parser authority only while the issuing exact document remains current', () => {
-    const capability = issuePdfWorkerCapability(7, 'document-a');
+  it('lets only the packaged worker host consume a currently owned PDF capability', async () => {
+    const isCurrent = vi.fn().mockResolvedValue(true);
+    const capability = issuePdfWorkerCapability({
+      tabId: 7,
+      documentId: 'document-a',
+      isCurrent,
+    });
     if (!capability) throw new Error('failed to reserve PDF capability');
     const sender = {
       id: chrome.runtime.id,
@@ -216,17 +221,23 @@ describe('background response privacy', () => {
       tab: { id: 7 },
     } as chrome.runtime.MessageSender;
 
-    mocks.tabManager.getOwnedDocument.mockReturnValue({ documentId: 'document-b' });
-    const staleResponse = vi.fn();
+    const rejectedResponse = vi.fn();
     expect(
-      mocks.onMessage!({ type: 'PDF_WORKER_HOST_CLAIM', capability }, sender, staleResponse)
+      mocks.onMessage!(
+        { type: 'PDF_WORKER_HOST_CLAIM', capability },
+        { ...sender, url: chrome.runtime.getURL('src/options/index.html') },
+        rejectedResponse
+      )
     ).toBe(false);
-    expect(staleResponse).toHaveBeenCalledWith({ success: false });
+    expect(rejectedResponse).toHaveBeenCalledWith({ success: false });
+    expect(isCurrent).not.toHaveBeenCalled();
 
-    mocks.tabManager.getOwnedDocument.mockReturnValue({ documentId: 'document-a' });
     const currentResponse = vi.fn();
-    mocks.onMessage!({ type: 'PDF_WORKER_HOST_CLAIM', capability }, sender, currentResponse);
-    expect(currentResponse).toHaveBeenCalledWith({ success: true });
+    expect(
+      mocks.onMessage!({ type: 'PDF_WORKER_HOST_CLAIM', capability }, sender, currentResponse)
+    ).toBe(true);
+    await vi.waitFor(() => expect(currentResponse).toHaveBeenCalledWith({ success: true }));
+    expect(isCurrent).toHaveBeenCalledOnce();
     releasePdfWorkerCapability(capability);
   });
 

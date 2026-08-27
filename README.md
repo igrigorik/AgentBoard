@@ -161,7 +161,7 @@ Save in Settings → My Tools. The AI can now call it when you ask about prices 
 
 **Built-in page/WebMCP tools:**
 
-- `agentboard_read_page` - Read the current HTML/PDF document as bounded Markdown
+- `agentboard_read_page` - Read the current HTML/PDF document as bounded Markdown, with reduced-resolution PDF page images by default; local `file://` PDFs require Chrome’s “Allow access to file URLs” toggle for AgentBoard
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
 
 **Built-in system tools:**
@@ -185,7 +185,7 @@ Fast interactions with expansion templates.
 
 ## Privacy and data flow
 
-AgentBoard has no operated telemetry or AI proxy, but configured features are not local-only. When you send a chat, the selected AI endpoint receives the conversation plus URL and title snapshots captured for its user turns; switching agents can therefore send the existing in-memory conversation and its page-context snapshots to the newly selected endpoint. URLs may contain sensitive paths, query parameters, fragments, document identifiers, or tokens. AI endpoints can also receive attachments, tool definitions, tool arguments, and tool results. Remote MCP servers receive MCP protocol traffic and authorization tokens. Credential-free URL fetches contact the requested website. The built-in YouTube transcript tool contacts YouTube Innertube and caption endpoints; its same-origin Innertube request and explicit caption request can include browser YouTube/Google session credentials. User WebMCP scripts run with page-level capabilities defined by their source.
+AgentBoard has no operated telemetry or AI proxy, but configured features are not local-only. When you send a chat, the selected AI endpoint receives the conversation plus URL and title snapshots captured for its user turns; switching agents can therefore send the existing in-memory conversation and its page-context snapshots to the newly selected endpoint. URLs, including local `file://` URLs, may contain sensitive paths, query parameters, fragments, document identifiers, or tokens. AI endpoints can also receive attachments, tool definitions, tool arguments, and tool results. Remote MCP servers receive MCP protocol traffic and authorization tokens. Credential-free URL fetches contact the requested website. The built-in YouTube transcript tool contacts YouTube Innertube and caption endpoints; its same-origin Innertube request and explicit caption request can include browser YouTube/Google session credentials. User WebMCP scripts run with page-level capabilities defined by their source.
 
 Settings are stored in `chrome.storage.local`. Conversation traffic is kept in memory rather than extension storage. At DEBUG or TRACE, AgentBoard logs local diagnostic context that may contain sensitive application, page, and tool data. It applies basic credential sanitization, but review logs before sharing them externally. Other levels discard caller-supplied values. Generated page-tool registration wrappers and browser/provider code log independently and may include their own errors. Settings exports are plaintext and can contain AI credentials, MCP tokens, endpoint URLs, and executable user scripts; treat every backup as a secret.
 

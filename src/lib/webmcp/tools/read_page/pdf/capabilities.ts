@@ -1,10 +1,11 @@
+import type { ExactDocumentRoute } from '../route';
+
 const CAPABILITY_TTL_MS = 30_000;
 const MAX_ACTIVE_PDF_CAPABILITIES = 4;
 
 interface PdfWorkerCapability {
   token: string;
-  tabId: number;
-  documentId: string;
+  route: ExactDocumentRoute;
   expiresAt: number;
   claimed: boolean;
 }
@@ -23,42 +24,41 @@ function purgeExpired(now = Date.now()): void {
   }
 }
 
-/** Reserve one parser job for an exact document. State loss on MV3 restart intentionally revokes it. */
-export function issuePdfWorkerCapability(tabId: number, documentId: string): string | null {
+/** Reserve one parser job with the exact route verifier that authorized it. */
+export function issuePdfWorkerCapability(route: ExactDocumentRoute): string | null {
   purgeExpired();
   const documentReserved = [...capabilities.values()].some(
-    (capability) => capability.tabId === tabId && capability.documentId === documentId
+    ({ route: reserved }) =>
+      reserved.tabId === route.tabId && reserved.documentId === route.documentId
   );
   if (capabilities.size >= MAX_ACTIVE_PDF_CAPABILITIES || documentReserved) return null;
 
   const token = globalThis.crypto.randomUUID();
-  const capability: PdfWorkerCapability = {
+  capabilities.set(token, {
     token,
-    tabId,
-    documentId,
+    route,
     expiresAt: Date.now() + CAPABILITY_TTL_MS,
     claimed: false,
-  };
-  capabilities.set(token, capability);
+  });
   return token;
 }
 
-/** Consume the worker-host claim once while retaining the reservation until the caller releases it. */
-export function claimPdfWorkerCapability(
-  token: string,
-  tabId: number,
-  documentId: string
-): boolean {
+/** Verify and consume a capability once; async ownership checks are re-fenced before mutation. */
+export async function claimPdfWorkerCapability(token: string, tabId: number): Promise<boolean> {
   purgeExpired();
   const capability = capabilities.get(token);
-  if (
-    !capability ||
-    capability.claimed ||
-    capability.tabId !== tabId ||
-    capability.documentId !== documentId
-  ) {
+  if (!capability || capability.claimed || capability.route.tabId !== tabId) return false;
+
+  try {
+    if (!(await capability.route.isCurrent())) return false;
+  } catch {
     return false;
   }
+
+  purgeExpired();
+  const current = capabilities.get(token);
+  if (current !== capability || capability.claimed || capability.route.tabId !== tabId)
+    return false;
   capability.claimed = true;
   return true;
 }

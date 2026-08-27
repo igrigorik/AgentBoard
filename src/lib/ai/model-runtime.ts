@@ -3,6 +3,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { JSONValue, LanguageModel } from 'ai';
 import type { AgentConfig } from '../storage/config';
+import { withTextOnlyToolResults } from './tool-result-media';
 
 // AI SDK warnings bypass AgentBoard's logger and may interpolate model or tool values.
 globalThis.AI_SDK_LOG_WARNINGS = false;
@@ -111,7 +112,9 @@ export function createModelRuntime(agent: AgentConfig): ModelRuntime {
         ...(keylessFetch && { fetch: keylessFetch }),
       });
       return {
-        model: openai.chat(agent.model),
+        // The Chat adapter serializes rich tool outputs as JSON. Strip typed media at the model
+        // boundary so tools can remain provider-neutral without leaking base64 into prompt text.
+        model: withTextOnlyToolResults(openai.chat(agent.model)),
         providerOptions: buildOpenAIChatOptions(agent),
       };
     }

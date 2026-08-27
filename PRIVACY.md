@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: July 30, 2026
+Last updated: August 20, 2026
 
 AgentBoard is a browser extension that connects your browser to services and tools you choose. This policy explains what stays on your device, what is sent to AgentBoard, and what may be sent to third parties.
 
@@ -27,6 +27,10 @@ AgentBoard may make limited third-party requests to load its interface. Those se
 When you configure or use a provider, server, tool, or script, AgentBoard or that tool may send data to the relevant third-party services. These services can include model providers, proxies, MCP servers, websites, and services contacted by tools or scripts.
 
 Depending on the action, shared data may include content you provide, attachments, Local Workspace file contents, URL and title context from current or earlier conversation turns, page content, tool definitions and instructions, tool inputs and results, model settings, and credentials or browser-session data needed to access the selected service.
+
+When the current document is a PDF, the `agentboard_read_page` tool includes reduced-resolution full-page images by default for connection APIs that support media in tool results. These images can disclose photographs, signatures, handwriting, annotations, visual redactions, charts, diagrams, and layout relationships that are absent from extracted text. A tool call can set `includePageImages` to `false` for text-only PDF extraction. Raw PDF bytes are not sent to the model provider, and rendered page images are not stored in sidebar history or browser storage, but page images delivered to a configured model service are processed under that service's terms and privacy policy.
+
+Reading a local `file://` PDF requires you to enable Chrome’s “Allow access to file URLs” toggle for AgentBoard. Chrome grants this permission at the file-scheme level, but AgentBoard uses it only when `agentboard_read_page` is invoked against the exact current top-level PDF. Model-authored Markdown links and images reject `file:`, extension, data, and other privileged URL schemes so they cannot exercise that browser permission. Local bytes are read inside the capability-authenticated PDF worker path and are not sent through the extension service worker, generic runtime messages, logs, or storage. As with any attached tab, the configured AI endpoint can receive the local tab’s URL and title in page context; the tool’s public result does not duplicate the filesystem path.
 
 At the start of each new chat for an agent with a connected workspace, AgentBoard automatically reads recognized `IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`, and `MEMORY.md` files and sends their contents to that agent’s configured AI service. Other files in the selected folder may be read and sent through visible tool calls. Permitted memory writes and deletions also occur through visible tool calls. Switching a conversation to another configured agent may send its existing history, the selected agent’s Local Workspace content, and page context to the newly selected service.
 

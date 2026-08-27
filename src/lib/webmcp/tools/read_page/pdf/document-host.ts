@@ -5,8 +5,9 @@ import type {
   PdfHostControlMessage,
   PdfHostMessage,
   PdfParserMessage,
+  PdfParserReady,
+  PdfParserResult,
   PdfReadOptions,
-  PdfReadResult,
 } from './protocol';
 
 // chrome.scripting.executeScript({ files }) loads classic scripts, so this entry must remain a
@@ -22,13 +23,17 @@ import type {
     activePorts: Set<chrome.runtime.Port>;
   }
 
-  interface AcquiredPdf {
-    bytes: ArrayBuffer;
-    source: {
-      title: string;
-      url: string;
-    };
-  }
+  type AcquiredPdf =
+    | {
+        bytes: ArrayBuffer;
+        localFileUrl?: never;
+        source: { title: string; url: string };
+      }
+    | {
+        bytes?: never;
+        localFileUrl: string;
+        source: { title: string; url: string };
+      };
 
   function failure(code: PdfFailureCode, message: string): PdfFailure {
     return { success: false, error: { code, message } };
@@ -53,7 +58,10 @@ import type {
   async function readBoundedBody(response: Response, signal: AbortSignal): Promise<ArrayBuffer> {
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > PDF_MAX_BYTES) {
-      throw failure('TOO_LARGE', 'This PDF exceeds the input byte limit.');
+      return rejectResponse(
+        response,
+        failure('TOO_LARGE', 'This PDF exceeds the input byte limit.')
+      );
     }
     if (!response.body) {
       const bytes = await response.arrayBuffer();
@@ -106,12 +114,23 @@ import type {
     }
 
     const currentUrl = globalThis.location.href;
+    const requestUrl = new URL(currentUrl);
+    requestUrl.hash = '';
+    if (requestUrl.protocol === 'file:') {
+      // The page fetch API cannot read file URLs. Pass only the exact current URL to the claimed
+      // extension host; bytes never enter chrome.runtime or the public tool result.
+      return {
+        localFileUrl: requestUrl.href,
+        source: { title: 'Local PDF', url: '' },
+      };
+    }
+    if (requestUrl.protocol !== 'http:' && requestUrl.protocol !== 'https:') {
+      throw failure('REFETCH_FAILED', 'The current PDF URL cannot be reacquired.');
+    }
     const source = {
       title: document.title.slice(0, 800),
       url: currentUrl.slice(0, 4_000),
     };
-    const requestUrl = new URL(currentUrl);
-    requestUrl.hash = '';
     let response: Response;
     try {
       response = await globalThis.fetch(requestUrl.href, {
@@ -167,7 +186,7 @@ import type {
     options: PdfReadOptions,
     capability: string,
     signal: AbortSignal
-  ): Promise<PdfReadResult> {
+  ): Promise<PdfParserResult> {
     return new Promise((resolve) => {
       const mount = document.createElement('div');
       mount.setAttribute('aria-hidden', 'true');
@@ -182,7 +201,7 @@ import type {
 
       let settled = false;
       let parserPort: MessagePort | null = null;
-      const finish = (result: PdfReadResult) => {
+      const finish = (result: PdfParserResult) => {
         if (settled) return;
         settled = true;
         signal.removeEventListener('abort', cancel);
@@ -205,21 +224,35 @@ import type {
           }
           const channel = new MessageChannel();
           parserPort = channel.port1;
-          parserPort.onmessage = ({ data }: MessageEvent<PdfReadResult>) => finish(data);
+          parserPort.onmessage = ({ data }: MessageEvent<PdfParserReady | PdfParserResult>) => {
+            if (data && typeof data === 'object' && 'type' in data && data.type === 'ready') {
+              if (typeof acquired.localFileUrl === 'string') {
+                parserPort?.postMessage({
+                  type: 'parse',
+                  localFileUrl: acquired.localFileUrl,
+                  options,
+                  source: acquired.source,
+                } satisfies PdfParserMessage);
+              } else {
+                parserPort?.postMessage(
+                  {
+                    type: 'parse',
+                    bytes: acquired.bytes,
+                    options,
+                    source: acquired.source,
+                  } satisfies PdfParserMessage,
+                  [acquired.bytes]
+                );
+              }
+              return;
+            }
+            finish(data as PdfParserResult);
+          };
           parserPort.start();
           iframe.contentWindow.postMessage(
             { token: capability },
             chrome.runtime.getURL('/').slice(0, -1),
             [channel.port2]
-          );
-          parserPort.postMessage(
-            {
-              type: 'parse',
-              bytes: acquired.bytes,
-              options,
-              source: acquired.source,
-            } satisfies PdfParserMessage,
-            [acquired.bytes]
           );
         },
         { once: true }
@@ -265,7 +298,7 @@ import type {
       if (message?.type !== 'start' || started) return;
       started = true;
 
-      let result: PdfReadResult;
+      let result: PdfParserResult;
       try {
         const acquired = await acquirePdf(controller.signal);
         result = await parserHost(acquired, message.options, message.capability, controller.signal);

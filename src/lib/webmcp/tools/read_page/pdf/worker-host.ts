@@ -52,6 +52,7 @@ globalThis.addEventListener('message', async (event: MessageEvent) => {
       return;
     }
     parserSession = attachPdfParser(parserPort);
+    parserPort.postMessage({ type: 'ready' });
   } catch {
     close();
   }
