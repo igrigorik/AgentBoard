@@ -2,9 +2,11 @@ import { execute } from './html-reader.js';
 
 // A file-injected classic script must not import a shared chunk. Literal types keep this erased
 // copy synchronized with the router/build protocol at compile time.
+// The key's V1 suffix is a stable global namespace, deliberately independent of the payload
+// version below; bumping the version replaces an older host in place rather than renaming it.
 const HTML_READER_HOST_KEY: typeof import('./html-protocol').HTML_READER_HOST_KEY =
   '__agentboardReadPageHtmlV1';
-const HTML_READER_HOST_VERSION: typeof import('./html-protocol').HTML_READER_HOST_VERSION = 1;
+const HTML_READER_HOST_VERSION: typeof import('./html-protocol').HTML_READER_HOST_VERSION = 2;
 
 type HtmlReaderGlobal = typeof globalThis & {
   [HTML_READER_HOST_KEY]?: {

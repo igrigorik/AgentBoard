@@ -48,9 +48,18 @@ function isHtmlReadResult(value: unknown): value is HtmlReadResult {
 
   const metadata = value.metadata;
   const stats = value.stats;
+  const viewport = value.viewport;
   return (
     typeof value.extractionMode === 'string' &&
+    // 'viewport-only' is service-worker-assembled; the private host must never emit it.
     ['article', 'rendered-text', 'metadata'].includes(value.extractionMode) &&
+    isRecord(viewport) &&
+    typeof viewport.scrollPercent === 'number' &&
+    Number.isFinite(viewport.scrollPercent) &&
+    viewport.scrollPercent >= 0 &&
+    viewport.scrollPercent <= 100 &&
+    typeof viewport.firstVisibleText === 'string' &&
+    typeof viewport.lastVisibleText === 'string' &&
     isRecord(metadata) &&
     typeof metadata.title === 'string' &&
     typeof metadata.url === 'string' &&

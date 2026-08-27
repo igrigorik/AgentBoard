@@ -828,6 +828,8 @@ async function main() {
         'the private reader host must not be visible in MAIN world'
       );
 
+      // Viewport capture only runs while the bound tab is its window's active tab.
+      await evaluate(`chrome.tabs.update(${fixtureTabId}, { active: true }).then(() => true)`);
       const htmlReadResponse = await callTool(fixtureTabId, 'agentboard_read_page', {
         maxLength: 4000,
         startPage: 123,
@@ -863,6 +865,48 @@ async function main() {
       console.log(
         '✓ routed the private ISOLATED-world system reader across page collisions and MAIN monkey patches'
       );
+
+      const viewportResult = htmlReadResponse.result;
+      assert.equal(typeof viewportResult.viewport?.scrollPercent, 'number');
+      assert.equal(
+        viewportResult.warnings,
+        undefined,
+        `viewport capture degraded: ${JSON.stringify(viewportResult.warnings)}`
+      );
+      assert.deepEqual(
+        viewportResult.images?.map(({ kind, imageIndex, mediaType, detail }) => ({
+          kind,
+          imageIndex,
+          mediaType,
+          detail,
+        })),
+        [{ kind: 'viewport', imageIndex: 1, mediaType: 'image/jpeg', detail: 'low' }],
+        JSON.stringify(viewportResult.images)
+      );
+      assert.ok(
+        viewportResult.images[0].width <= 1024 && viewportResult.images[0].height <= 1024,
+        'viewport capture must honor the shared image budget'
+      );
+      assert.ok(
+        JSON.stringify(viewportResult).length < 20_000,
+        'the public result must stay byte-free'
+      );
+
+      const blankTabId = await evaluate(
+        `chrome.tabs.create({ url: 'about:blank', active: true }).then((tab) => tab.id)`
+      );
+      const inactiveReadResponse = await callTool(fixtureTabId, 'agentboard_read_page', {
+        maxLength: 4000,
+      });
+      assert.equal(inactiveReadResponse.result.success, true);
+      assert.deepEqual(
+        inactiveReadResponse.result.warnings,
+        ['VIEWPORT_UNAVAILABLE:inactive-tab'],
+        'an inactive bound tab must never be photographed'
+      );
+      assert.equal(Object.hasOwn(inactiveReadResponse.result, 'images'), false);
+      await evaluate(`chrome.tabs.remove(${blankTabId}).then(() => true)`);
+      console.log('✓ captured the viewport only while its exact tab remained active');
 
       const navigationResponse = await callTool(fixtureTabId, webMCPNavigationToolName, {});
       assert.deepEqual(navigationResponse, {
@@ -1426,7 +1470,7 @@ async function main() {
 
 try {
   await main();
-  console.log('\n18 built-MV3 Chromium scenarios passed');
+  console.log('\n19 built-MV3 Chromium scenarios passed');
 } finally {
   rmSync(profileDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 }

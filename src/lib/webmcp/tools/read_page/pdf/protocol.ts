@@ -1,3 +1,5 @@
+import { PAGE_IMAGE_MEDIA_TYPE } from '../image-budget';
+
 export const PDF_DOCUMENT_HOST_FILE = 'content-scripts/pdf-document-host.js';
 export const PDF_HOST_PORT_PREFIX = 'agentboard-pdf-reader:';
 export const PDF_MAX_BYTES = 32 * 1024 * 1024;
@@ -10,12 +12,8 @@ export const PDF_MAX_TEXT_ITEMS_PER_PAGE = 50_000;
 export const PDF_MAX_TEXT_ITEMS_PER_CALL = 100_000;
 export const PDF_MAX_TEXT_CHARACTERS_PER_PAGE = 250_000;
 export const PDF_MAX_TEXT_CHARACTERS_PER_CALL = 500_000;
-export const PDF_PAGE_IMAGE_MAX_EDGE = 1_024;
-export const PDF_PAGE_IMAGE_MAX_PIXELS = 1_000_000;
+/** pdf.js decoder guard on the source raster, not an output bound; see image-budget.ts. */
 export const PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS = 16_000_000;
-export const PDF_PAGE_IMAGE_JPEG_QUALITY = 0.7;
-export const PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL = 6 * 1024 * 1024;
-export const PDF_PAGE_IMAGE_MEDIA_TYPE = 'image/jpeg';
 
 export type PdfFailureCode =
   | 'ROUTE_UNAVAILABLE'
@@ -78,7 +76,7 @@ export interface PdfPageImageDescriptor {
   pageNumber: number;
   width: number;
   height: number;
-  mediaType: typeof PDF_PAGE_IMAGE_MEDIA_TYPE;
+  mediaType: typeof PAGE_IMAGE_MEDIA_TYPE;
   detail: 'low';
 }
 

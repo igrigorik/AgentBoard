@@ -12,7 +12,7 @@
     "scripting",
     "webNavigation"
   ],
-  "host_permissions": ["https://*/*", "http://localhost/*", "file:///*"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"

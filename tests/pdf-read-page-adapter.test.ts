@@ -1,6 +1,6 @@
 import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider';
 import { simulateReadableStream, stepCountIs, streamText } from 'ai';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createReadPageTool, type ReadPageInput } from '../src/lib/webmcp/tools/read_page';
 import type {
   PdfHostMessage,
@@ -89,6 +89,7 @@ const htmlResult = {
   markdownContent: '# Fixture',
   truncated: false,
   stats: { characterCount: 9, wordCount: 2, estimatedReadTime: 1 },
+  viewport: { scrollPercent: 0, firstVisibleText: 'Fixture', lastVisibleText: 'Fixture' },
 };
 
 const pdfResult: PdfSuccess = {
@@ -219,7 +220,7 @@ describe('read-page document router', () => {
       expect.objectContaining({
         target: { tabId: 7, documentIds: ['doc-1'] },
         world: 'ISOLATED',
-        args: ['__agentboardReadPageHtmlV1', 1, { maxLength: 4_000 }],
+        args: ['__agentboardReadPageHtmlV1', 2, { maxLength: 4_000 }],
       })
     );
   });
@@ -855,5 +856,224 @@ describe('read-page document router', () => {
       'caller cancelled'
     );
     expect(executeScript).not.toHaveBeenCalled();
+  });
+});
+
+describe('read-page viewport capture', () => {
+  const encodedViewportBytes = 'VIEWPORT_JPEG_BYTES';
+
+  beforeEach(() => {
+    mocks.getOwnedDocument.mockReturnValue({ documentId: 'doc-1' });
+    mocks.ownsDocument.mockReturnValue(true);
+    mocks.isBuiltinToolEnabled.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubViewportEnvironment() {
+    const bytes = new TextEncoder().encode(encodedViewportBytes);
+    class FakeOffscreenCanvas {
+      width: number;
+      height: number;
+      constructor(width: number, height: number) {
+        this.width = width;
+        this.height = height;
+      }
+      getContext() {
+        return { drawImage: vi.fn() };
+      }
+      // jsdom's Blob lacks arrayBuffer(); fake the exact encode contract the code consumes.
+      convertToBlob = vi.fn(
+        async () =>
+          ({ size: bytes.byteLength, arrayBuffer: async () => bytes.buffer.slice(0) }) as Blob
+      );
+    }
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 1_600, height: 900, close: vi.fn() }))
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ blob: async () => ({}) as Blob }))
+    );
+    return btoa(encodedViewportBytes);
+  }
+
+  function htmlExecuteScript(result: unknown) {
+    return vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args) return [{ documentId: 'doc-1', frameId: 0, result }];
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+  }
+
+  function stubChromeWithCapture(
+    executeScript: ReturnType<typeof vi.fn>,
+    tab: Record<string, unknown> = { active: true, windowId: 5 }
+  ) {
+    const captureVisibleTab = vi.fn(async () => 'data:image/png;base64,AAAA');
+    vi.stubGlobal('chrome', {
+      scripting: { executeScript },
+      tabs: { connect: vi.fn(), get: vi.fn().mockResolvedValue(tab), captureVisibleTab },
+    });
+    return { captureVisibleTab };
+  }
+
+  const viewportDescriptor = {
+    imageIndex: 1,
+    kind: 'viewport',
+    width: 1_024,
+    height: 576,
+    mediaType: 'image/jpeg',
+    detail: 'low',
+  };
+
+  it('attaches a byte-free viewport descriptor with identity-bound model media', async () => {
+    const expectedData = stubViewportEnvironment();
+    stubChromeWithCapture(htmlExecuteScript(structuredClone(htmlResult)));
+    const tool = createReadPageTool(7);
+    if (!tool.execute || !tool.toModelOutput) throw new Error('read_page media hooks unavailable');
+
+    const output = await tool.execute({}, toolCallOptions());
+    if (output && typeof output === 'object' && Symbol.asyncIterator in output) {
+      throw new Error('read_page unexpectedly returned a stream');
+    }
+    expect(JSON.stringify(output)).not.toContain(expectedData);
+    expect(output).toMatchObject({
+      extractionMode: 'article',
+      markdownContent: '# Fixture',
+      images: [viewportDescriptor],
+    });
+    expect(output).not.toHaveProperty('warnings');
+
+    expect(tool.toModelOutput(output)).toEqual({
+      type: 'content',
+      value: [
+        {
+          type: 'text',
+          text: expect.stringMatching(
+            /Image 1 = the user's current browser viewport \(~0% scrolled\)[\s\S]*Visible text spans "Fixture" through "Fixture"[\s\S]*# Fixture/
+          ),
+        },
+        { type: 'media', data: expectedData, mediaType: 'image/jpeg' },
+      ],
+    });
+    // Identity-bound: replayed or cloned results carry no private bytes.
+    expect(tool.toModelOutput(structuredClone(output))).toEqual({
+      type: 'json',
+      value: structuredClone(output),
+    });
+  });
+
+  it('downgrades to a warning without an image when the bound tab is inactive', async () => {
+    stubViewportEnvironment();
+    const { captureVisibleTab } = stubChromeWithCapture(
+      htmlExecuteScript(structuredClone(htmlResult)),
+      { active: false, windowId: 5 }
+    );
+    const tool = createReadPageTool(7);
+    if (!tool.execute || !tool.toModelOutput) throw new Error('read_page media hooks unavailable');
+
+    const output = await tool.execute({}, toolCallOptions());
+    if (output && typeof output === 'object' && Symbol.asyncIterator in output) {
+      throw new Error('read_page unexpectedly returned a stream');
+    }
+    expect(output).toMatchObject({
+      extractionMode: 'article',
+      warnings: ['VIEWPORT_UNAVAILABLE:inactive-tab'],
+    });
+    expect(output).not.toHaveProperty('images');
+    expect(captureVisibleTab).not.toHaveBeenCalled();
+    expect(tool.toModelOutput(output)).toMatchObject({ type: 'json' });
+  });
+
+  it('returns viewport-only success when extraction fails but the capture succeeded', async () => {
+    stubViewportEnvironment();
+    stubChromeWithCapture(htmlExecuteScript({ success: true }), {
+      active: true,
+      windowId: 5,
+      title: 'Fallback Tab',
+      url: 'https://example.test/spa',
+    });
+    const tool = createReadPageTool(7);
+    if (!tool.execute || !tool.toModelOutput) throw new Error('read_page media hooks unavailable');
+
+    const output = await tool.execute({}, toolCallOptions());
+    if (output && typeof output === 'object' && Symbol.asyncIterator in output) {
+      throw new Error('read_page unexpectedly returned a stream');
+    }
+    expect(output).toMatchObject({
+      success: true,
+      extractionMode: 'viewport-only',
+      metadata: { title: 'Fallback Tab', url: 'https://example.test/spa' },
+      markdownContent: '',
+      warnings: ['HTML_EXTRACTION_FAILED'],
+      images: [viewportDescriptor],
+    });
+    expect(tool.toModelOutput(output)).toEqual({
+      type: 'content',
+      value: [
+        {
+          type: 'text',
+          text: expect.stringMatching(/viewport image is the only available content/),
+        },
+        { type: 'media', data: btoa(encodedViewportBytes), mediaType: 'image/jpeg' },
+      ],
+    });
+  });
+
+  it('marks extraction deadline failures as timeouts in viewport-only results', async () => {
+    stubViewportEnvironment();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+    const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args) {
+        now.mockReturnValue(10_000);
+        return [{ documentId: 'doc-1', frameId: 0, result: structuredClone(htmlResult) }];
+      }
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+    stubChromeWithCapture(executeScript);
+
+    try {
+      await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toMatchObject({
+        success: true,
+        extractionMode: 'viewport-only',
+        warnings: ['HTML_EXTRACTION_TIMEOUT'],
+        images: [viewportDescriptor],
+      });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('drops warnings supplied by the private host rather than forwarding them', async () => {
+    stubViewportEnvironment();
+    // The host is validated by shape, not sanitized, so the service worker must own
+    // this field outright; a forwarded value would read as trusted extension output.
+    stubChromeWithCapture(
+      htmlExecuteScript({ ...structuredClone(htmlResult), warnings: ['HOST_SUPPLIED_WARNING'] })
+    );
+
+    const output = await createReadPageTool(7).execute?.(
+      { includePageImages: false },
+      toolCallOptions()
+    );
+    expect(output).not.toHaveProperty('warnings');
+  });
+
+  it('skips capture work entirely when includePageImages is false', async () => {
+    stubViewportEnvironment();
+    const { captureVisibleTab } = stubChromeWithCapture(
+      htmlExecuteScript(structuredClone(htmlResult))
+    );
+    const tool = createReadPageTool(7);
+
+    const output = await tool.execute?.({ includePageImages: false }, toolCallOptions());
+    expect(output).toEqual(htmlResult);
+    expect(captureVisibleTab).not.toHaveBeenCalled();
   });
 });

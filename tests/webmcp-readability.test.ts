@@ -63,7 +63,7 @@ describe('read-page HTML extractor', () => {
   it('shares the system reader contract', () => {
     expect(READ_PAGE_TOOL_NAME).toBe('agentboard_read_page');
     expect(READ_PAGE_METADATA).toMatchObject({
-      version: '7.1.0',
+      version: '7.2.0',
       inputSchema: {
         properties: {
           maxLength: {

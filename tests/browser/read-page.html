@@ -123,7 +123,7 @@
     (async () => {
       try {
         const reader = globalThis.__agentboardReadPageHtmlV1;
-        if (reader?.version !== 1) throw new Error('Built read_page HTML host did not install');
+        if (reader?.version !== 2) throw new Error('Built read_page HTML host did not install');
 
         const results = {};
         for (const scenario of scenarios) {

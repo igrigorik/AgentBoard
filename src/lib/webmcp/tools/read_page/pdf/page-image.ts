@@ -1,11 +1,12 @@
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import {
-  PDF_PAGE_IMAGE_JPEG_QUALITY,
-  PDF_PAGE_IMAGE_MAX_EDGE,
-  PDF_PAGE_IMAGE_MAX_PIXELS,
-  PDF_PAGE_IMAGE_MEDIA_TYPE,
-  type PdfEncodedPageImage,
-} from './protocol';
+  PAGE_IMAGE_JPEG_QUALITY,
+  PAGE_IMAGE_MAX_EDGE,
+  PAGE_IMAGE_MAX_PIXELS,
+  PAGE_IMAGE_MEDIA_TYPE,
+  boundedImageSize,
+} from '../image-budget';
+import { type PdfEncodedPageImage } from './protocol';
 
 export interface PdfPageImageResources {
   cancelled: boolean;
@@ -34,7 +35,7 @@ function encodedJpeg(
           reject(new DOMException('PDF extraction was cancelled', 'AbortError'));
           return;
         }
-        if (!blob || blob.type !== PDF_PAGE_IMAGE_MEDIA_TYPE) {
+        if (!blob || blob.type !== PAGE_IMAGE_MEDIA_TYPE) {
           reject(new Error('PDF page image encoding failed'));
           return;
         }
@@ -63,7 +64,7 @@ function encodedJpeg(
             return;
           }
           const result = reader.result;
-          const prefix = `data:${PDF_PAGE_IMAGE_MEDIA_TYPE};base64,`;
+          const prefix = `data:${PAGE_IMAGE_MEDIA_TYPE};base64,`;
           if (typeof result !== 'string' || !result.startsWith(prefix)) {
             reject(new Error('PDF page image encoding failed'));
             return;
@@ -72,8 +73,8 @@ function encodedJpeg(
         };
         reader.readAsDataURL(blob);
       },
-      PDF_PAGE_IMAGE_MEDIA_TYPE,
-      PDF_PAGE_IMAGE_JPEG_QUALITY
+      PAGE_IMAGE_MEDIA_TYPE,
+      PAGE_IMAGE_JPEG_QUALITY
     );
   });
 }
@@ -142,18 +143,17 @@ export async function renderPageImage(
     throw new Error('PDF page dimensions are invalid');
   }
 
-  const boundedScale = Math.min(
-    PDF_PAGE_IMAGE_MAX_EDGE / Math.max(width, height),
-    Math.sqrt(PDF_PAGE_IMAGE_MAX_PIXELS / area)
-  );
-  const pixelWidth = Math.max(1, Math.floor(width * boundedScale));
-  const pixelHeight = Math.max(1, Math.floor(height * boundedScale));
+  // Vector source: the bound is a render resolution, so upscaling small pages adds
+  // real detail (a 612x792 letter page intentionally rasterizes at 791x1024).
+  const { width: pixelWidth, height: pixelHeight } = boundedImageSize(width, height, {
+    allowUpscale: true,
+  });
   const renderScale = Math.min(pixelWidth / width, pixelHeight / height);
   if (
     !Number.isFinite(renderScale) ||
     renderScale <= 0 ||
-    Math.max(pixelWidth, pixelHeight) > PDF_PAGE_IMAGE_MAX_EDGE ||
-    pixelWidth * pixelHeight > PDF_PAGE_IMAGE_MAX_PIXELS
+    Math.max(pixelWidth, pixelHeight) > PAGE_IMAGE_MAX_EDGE ||
+    pixelWidth * pixelHeight > PAGE_IMAGE_MAX_PIXELS
   ) {
     throw new Error('PDF page dimensions are invalid');
   }
@@ -190,7 +190,7 @@ export async function renderPageImage(
       pageNumber,
       width: pixelWidth,
       height: pixelHeight,
-      mediaType: PDF_PAGE_IMAGE_MEDIA_TYPE,
+      mediaType: PAGE_IMAGE_MEDIA_TYPE,
       detail: 'low',
       ...encoded,
     };

@@ -202,6 +202,11 @@ const verifiers = {
     assert.match(result.markdownContent, /Substantive article prose/);
     assert.equal(Object.hasOwn(result, 'alternateFormats'), false);
     assert.equal(Object.hasOwn(result.metadata, 'excerpt'), false);
+    // Real-engine viewport context: rects exist in Chromium, unlike jsdom.
+    assert.equal(typeof result.viewport.scrollPercent, 'number');
+    assert.ok(result.viewport.scrollPercent >= 0 && result.viewport.scrollPercent <= 100);
+    assert.ok(result.viewport.firstVisibleText.length > 0, 'expected visible text on screen');
+    assert.ok(result.viewport.lastVisibleText.length > 0);
   },
   hiddenText(result) {
     assert.equal(result.extractionMode, 'rendered-text');

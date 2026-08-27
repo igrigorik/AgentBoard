@@ -161,7 +161,7 @@ Save in Settings → My Tools. The AI can now call it when you ask about prices 
 
 **Built-in page/WebMCP tools:**
 
-- `agentboard_read_page` - Read the current HTML/PDF document as bounded Markdown, with reduced-resolution PDF page images by default; local `file://` PDFs require Chrome’s “Allow access to file URLs” toggle for AgentBoard
+- `agentboard_read_page` - Read the current HTML page or PDF as bounded Markdown, with visuals by default: a viewport screenshot for pages, full-page images for PDFs (local `file://` PDFs need Chrome’s “Allow access to file URLs”)
 - `agentboard_youtube_transcript` - Video transcript extraction with timestamps (YouTube only)
 
 **Built-in system tools:**

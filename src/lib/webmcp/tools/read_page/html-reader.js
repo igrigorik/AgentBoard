@@ -3297,7 +3297,7 @@ function buildMarkdownDocument(metadata, body) {
   return `${header}\n\n---\n\n${body}`;
 }
 
-function buildResult(extractionMode, metadata, body, maxLength) {
+function buildResult(extractionMode, metadata, body, maxLength, viewport) {
   const publicMetadata = compactMetadata(metadata);
   const limited = truncateDocument(buildMarkdownDocument(publicMetadata, body), maxLength);
   const words = limited.content.split(/\s+/).filter(Boolean).length;
@@ -3313,7 +3313,61 @@ function buildResult(extractionMode, metadata, body, maxLength) {
       wordCount: words,
       estimatedReadTime: Math.ceil(words / 200),
     },
+    viewport,
   };
+}
+
+const VIEWPORT_SNIPPET_LENGTH = 80;
+// Sampled as fractions of viewport height, inward from the top and bottom edges, so a
+// gap, image, or margin at the first probe falls through to the next one.
+const VIEWPORT_PROBE_FRACTIONS = [0.02, 0.1, 0.2, 0.35, 0.5];
+
+function textAtViewportPoint(x, y) {
+  try {
+    const caret = document.caretPositionFromPoint
+      ? document.caretPositionFromPoint(x, y)
+      : undefined;
+    const node = caret ? caret.offsetNode : document.caretRangeFromPoint?.(x, y)?.startContainer;
+    return node?.nodeType === Node.TEXT_NODE ? normalizeInlineText(node.data) : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Report where the user's viewport sits: scroll position plus the first and last
+ * on-screen text. Hit-testing a few points costs the same on any page size, and it
+ * returns what is actually painted on top, so an occluding overlay is reported instead
+ * of the text beneath it - these snippets describe the screenshot, not the article.
+ * Read-only: never scrolls or mutates the page.
+ */
+function collectViewportContext() {
+  try {
+    const viewportHeight = window.innerHeight;
+    const scrollable = Math.max(0, document.documentElement.scrollHeight - viewportHeight);
+    const scrollPercent =
+      scrollable > 0 ? Math.min(100, Math.max(0, Math.round((window.scrollY / scrollable) * 100))) : 0;
+
+    const x = Math.floor(window.innerWidth / 2);
+    let firstVisibleText = '';
+    let lastVisibleText = '';
+    for (const fraction of VIEWPORT_PROBE_FRACTIONS) {
+      if (!firstVisibleText) {
+        firstVisibleText = textAtViewportPoint(x, Math.floor(viewportHeight * fraction));
+      }
+      if (!lastVisibleText) {
+        lastVisibleText = textAtViewportPoint(x, Math.floor(viewportHeight * (1 - fraction)));
+      }
+      if (firstVisibleText && lastVisibleText) break;
+    }
+    return {
+      scrollPercent,
+      firstVisibleText: limitInlineText(firstVisibleText, VIEWPORT_SNIPPET_LENGTH),
+      lastVisibleText: limitInlineText(lastVisibleText, VIEWPORT_SNIPPET_LENGTH),
+    };
+  } catch {
+    return { scrollPercent: 0, firstVisibleText: '', lastVisibleText: '' };
+  }
 }
 
 function comparableText(text) {
@@ -3453,18 +3507,19 @@ export async function execute(args = {}) {
   const article = selected.blocksArticle
     ? null
     : extractArticle(pageMetadata, config, selected.text);
+  const viewport = collectViewportContext();
 
   if (article) {
-    return buildResult('article', article.metadata, article.body, maxLength);
+    return buildResult('article', article.metadata, article.body, maxLength, viewport);
   }
 
   const renderedText = normalizeRenderedText(selected.text);
   if (renderedText) {
-    return buildResult('rendered-text', pageMetadata, renderedText, maxLength);
+    return buildResult('rendered-text', pageMetadata, renderedText, maxLength, viewport);
   }
 
   const metadataSummary =
     firstNonBlank(pageMetadata.description, pageMetadata.ogDescription) ||
     'No rendered text content is available on this page.';
-  return buildResult('metadata', pageMetadata, metadataSummary, maxLength);
+  return buildResult('metadata', pageMetadata, metadataSummary, maxLength, viewport);
 }

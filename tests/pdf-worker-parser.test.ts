@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL,
-  PDF_PAGE_IMAGE_MAX_PIXELS,
+  PAGE_IMAGE_MAX_BYTES_PER_CALL,
+  PAGE_IMAGE_MAX_PIXELS,
+} from '../src/lib/webmcp/tools/read_page/image-budget';
+import {
   PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS,
   type PdfParserMessage,
   type PdfParserResult,
@@ -313,7 +315,7 @@ describe('PDF worker parser ownership and page images', () => {
       expect.objectContaining({
         stopAtErrors: true,
         maxImageSize: PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS,
-        canvasMaxAreaInBytes: PDF_PAGE_IMAGE_MAX_PIXELS * 4,
+        canvasMaxAreaInBytes: PAGE_IMAGE_MAX_PIXELS * 4,
       })
     );
     expect(pdfPage.render).toHaveBeenCalledWith(
@@ -399,7 +401,7 @@ describe('PDF worker parser ownership and page images', () => {
   });
 
   it('admits text and images atomically under the aggregate media budget', async () => {
-    encodeJpegs(PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL - 10, PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL - 10);
+    encodeJpegs(PAGE_IMAGE_MAX_BYTES_PER_CALL - 10, PAGE_IMAGE_MAX_BYTES_PER_CALL - 10);
 
     const { result } = await parse([page(), page()], { maxPages: 2 });
 

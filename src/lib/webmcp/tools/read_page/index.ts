@@ -2,9 +2,10 @@ import { tool } from 'ai';
 import { prepareToolInputSchema } from '../../../schema/tool-input-schema';
 import { ConfigStorage } from '../../../storage/config';
 import { withAbortReason } from './abort';
+import type { HtmlReadResult, HtmlReadSuccess } from './html-protocol';
 import { readHtmlDocument } from './html-runner';
 import { READ_PAGE_DESCRIPTION, READ_PAGE_METADATA, READ_PAGE_TOOL_NAME } from './metadata';
-import { publishPdfResult, readPageModelOutput } from './pdf/model-output';
+import { publishHtmlResult, publishPdfResult, readPageModelOutput } from './model-output';
 import {
   PDF_DEFAULT_MAX_LENGTH,
   PDF_DEFAULT_MAX_PAGES,
@@ -12,7 +13,13 @@ import {
   type PdfReadOptions,
 } from './pdf/protocol';
 import { readPdfDocument } from './pdf/reader';
+import type { ExactDocumentRoute } from './route';
 import { resolveReadRoute } from './route';
+import {
+  captureViewport,
+  viewportUnavailable,
+  type ViewportCaptureOutcome,
+} from './viewport-capture';
 
 export { READ_PAGE_TOOL_NAME } from './metadata';
 
@@ -33,6 +40,95 @@ function validateInput(value: unknown): ReadPageInput {
   const validation = preparedInput.validateInput(value === undefined ? {} : value);
   if (!validation.success) throw new Error('WebMCP tool arguments are invalid');
   return validation.value as ReadPageInput;
+}
+
+/** Assembled when extraction failed but the viewport capture succeeded on the current route. */
+async function viewportOnlyResult(tabId: number, warning: string): Promise<HtmlReadSuccess> {
+  let title = 'Untitled page';
+  let url = '';
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.title) title = tab.title;
+    if (tab.url) url = tab.url;
+  } catch {
+    // Tab metadata is best-effort context; the capture is the content.
+  }
+  return {
+    success: true,
+    extractionMode: 'viewport-only',
+    metadata: {
+      title,
+      url,
+      author: null,
+      siteName: null,
+      publishedTime: null,
+      modifiedTime: null,
+      language: 'und',
+      direction: 'ltr',
+      extractedAt: new Date().toISOString(),
+    },
+    markdownContent: '',
+    truncated: false,
+    stats: { characterCount: 0, wordCount: 0, estimatedReadTime: 0 },
+    warnings: [warning],
+  };
+}
+
+/**
+ * Extraction and viewport capture run concurrently against the same immutable
+ * moment of the document; neither mutates page state. The capture is fail-soft:
+ * its absence downgrades to a warning, never a failed read.
+ */
+async function readHtmlWithViewport(
+  route: ExactDocumentRoute,
+  input: ReadPageInput,
+  abortSignal?: AbortSignal
+): Promise<HtmlReadResult | PdfFailure> {
+  const htmlInput = input.maxLength === undefined ? {} : { maxLength: input.maxLength };
+  const includeImage = input.includePageImages ?? true;
+
+  const [extraction, captureOutcome] = await Promise.allSettled([
+    readHtmlDocument(route.tabId, route.documentId, htmlInput, abortSignal),
+    includeImage ? captureViewport(route, abortSignal) : Promise.resolve(null),
+  ]);
+  if (abortSignal?.aborted) throw abortSignal.reason;
+
+  const outcome: ViewportCaptureOutcome | null =
+    captureOutcome.status === 'fulfilled' ? captureOutcome.value : null;
+  const captureWarning = !includeImage
+    ? null
+    : captureOutcome.status === 'rejected'
+      ? viewportUnavailable('capture-failed')
+      : (outcome?.warning ?? null);
+
+  if (!(await route.isCurrent(abortSignal))) {
+    return failure('NAVIGATED', 'The HTML document route was replaced before settlement.');
+  }
+
+  if (extraction.status === 'fulfilled') {
+    const result = extraction.value;
+    // Host-reported failures (Chrome PDF viewer shell) route to the PDF reader; a
+    // screenshot of the viewer shell is exactly what the PDF work banned.
+    if (!result.success) return result;
+    // The service worker owns `warnings` unconditionally: the private host is validated
+    // by shape, not sanitized, so anything it attached is dropped rather than forwarded.
+    if (captureWarning) result.warnings = [captureWarning];
+    else delete result.warnings;
+    return outcome?.capture ? publishHtmlResult(result, outcome.capture) : result;
+  }
+
+  const error = extraction.reason;
+  if (outcome?.capture) {
+    const warning =
+      error instanceof DOMException && error.name === 'TimeoutError'
+        ? 'HTML_EXTRACTION_TIMEOUT'
+        : 'HTML_EXTRACTION_FAILED';
+    return publishHtmlResult(await viewportOnlyResult(route.tabId, warning), outcome.capture);
+  }
+  if (error instanceof DOMException && error.name === 'TimeoutError') {
+    return failure('TIMEOUT', 'HTML extraction exceeded its time limit.');
+  }
+  throw error;
 }
 
 function normalizeOptions(input: ReadPageInput): PdfReadOptions {
@@ -69,27 +165,7 @@ export function createReadPageTool(tabId: number) {
       const { route, contentType } = resolved;
 
       if (contentType !== 'application/pdf') {
-        const htmlInput = input.maxLength === undefined ? {} : { maxLength: input.maxLength };
-        try {
-          const result = await readHtmlDocument(
-            route.tabId,
-            route.documentId,
-            htmlInput,
-            abortSignal
-          );
-          if (!(await route.isCurrent(abortSignal))) {
-            return failure('NAVIGATED', 'The HTML document route was replaced before settlement.');
-          }
-          return result;
-        } catch (error) {
-          if (!(await route.isCurrent(abortSignal))) {
-            return failure('NAVIGATED', 'The HTML document route was replaced before settlement.');
-          }
-          if (error instanceof DOMException && error.name === 'TimeoutError') {
-            return failure('TIMEOUT', 'HTML extraction exceeded its time limit.');
-          }
-          throw error;
-        }
+        return readHtmlWithViewport(route, input, abortSignal);
       }
 
       const result = await readPdfDocument(route, normalizeOptions(input), abortSignal);

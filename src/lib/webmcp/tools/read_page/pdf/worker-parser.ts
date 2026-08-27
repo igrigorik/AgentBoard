@@ -1,3 +1,4 @@
+import { PAGE_IMAGE_MAX_BYTES_PER_CALL, PAGE_IMAGE_MAX_PIXELS } from '../image-budget';
 import {
   getDocument,
   PasswordException,
@@ -21,8 +22,6 @@ import {
   PDF_HARD_MAX_PAGES,
   PDF_MAX_BYTES,
   PDF_MIN_MAX_LENGTH,
-  PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL,
-  PDF_PAGE_IMAGE_MAX_PIXELS,
   PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS,
   type PdfEncodedPageImage,
   type PdfFailure,
@@ -248,7 +247,7 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
       // explicitly retry text-only extraction when a hostile or unusually large image is present.
       stopAtErrors: request.options.includePageImages,
       maxImageSize: PDF_PAGE_IMAGE_MAX_SOURCE_PIXELS,
-      canvasMaxAreaInBytes: PDF_PAGE_IMAGE_MAX_PIXELS * 4,
+      canvasMaxAreaInBytes: PAGE_IMAGE_MAX_PIXELS * 4,
       useSystemFonts: false,
       useWasm: false,
       useWorkerFetch: false,
@@ -339,7 +338,7 @@ async function parsePdf(request: PdfParserRequest, active: ActiveParser): Promis
               page,
               pageNumber,
               pageImages.length + 1,
-              PDF_PAGE_IMAGE_MAX_BYTES_PER_CALL - totalImageBytes,
+              PAGE_IMAGE_MAX_BYTES_PER_CALL - totalImageBytes,
               active
             );
           } catch (error) {

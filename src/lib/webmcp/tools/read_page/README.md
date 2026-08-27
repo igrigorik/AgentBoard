@@ -1,4 +1,4 @@
-# `read_page` Tool v7.1.0
+# `read_page` Tool v7.2.0
 
 A single extension-owned AgentBoard capability that reads the current HTML page or PDF for LLM context. A tab-bound router inspects the browser-owned top document before invoking a private ISOLATED-world HTML host or AgentBoard's bounded local PDF.js worker. The model never chooses a MIME-specific tool, and the page never owns or observes AgentBoard's system reader.
 
@@ -42,7 +42,11 @@ AgentBoard exposes `agentboard_read_page` directly to the configured model as a 
 
 `maxLength` applies to the complete Markdown document, including its metadata header. It defaults to 32,000 characters and is constrained to 1,000–100,000 characters. Truncated output ends with `[Content truncated]`.
 
-`startPage` and `maxPages` apply only to PDFs. Pages are one-indexed. `maxPages` defaults to 25 and has a maximum of 50; successful PDF results return `nextPage` when more pages remain or another resource bound stops extraction. `includePageImages` also applies only to PDFs and defaults to `true`; models are instructed to set it to `false` only when the user explicitly requests text-only extraction or when retrying a prior page-image failure. HTML pages ignore all three PDF fields. Local `file://` PDFs require Chrome’s “Allow access to file URLs” toggle for AgentBoard and a reload after enabling it.
+`startPage` and `maxPages` apply only to PDFs and are ignored for HTML pages. Pages are one-indexed. `maxPages` defaults to 25 and has a maximum of 50; successful PDF results return `nextPage` when more pages remain or another resource bound stops extraction. Local `file://` PDFs require Chrome’s “Allow access to file URLs” toggle for AgentBoard and a reload after enabling it.
+
+`includePageImages` defaults to `true` and delivers mode-appropriate visuals under one shared image budget (1,024 px longest edge, one megapixel, JPEG): PDFs render full pages, and HTML pages capture the currently visible browser viewport. Models are instructed to set it to `false` only when the user explicitly requests text-only extraction or when retrying a prior image failure. Every image is fenced to the exact current document, and a failed image degrades the read rather than failing it: the affected page or capture is omitted, and the reason is reported in `warnings` — `PAGE_IMAGE_FAILED`/`PAGE_IMAGE_LIMIT_REACHED` with `nextPage` for PDFs, `VIEWPORT_UNAVAILABLE:<reason>` for HTML.
+
+HTML capture uses `chrome.tabs.captureVisibleTab`, which photographs a window's active tab, so the bound tab must be that active tab — verified before and after the capture, with any ambiguity discarding the image. Successful HTML results also report `viewport` context from the private host — `scrollPercent` plus the first and last visible text snippets — so the model can locate the viewport within `markdownContent`. When extraction fails on a still-current route but the capture succeeded, the tool returns a `viewport-only` success whose `warnings` carry `HTML_EXTRACTION_FAILED` or `HTML_EXTRACTION_TIMEOUT`, giving the model visual context exactly when text extraction is blind.
 
 ## Output
 
@@ -90,9 +94,18 @@ AgentBoard exposes `agentboard_read_page` directly to the configured model as a 
 }
 ```
 
-The public result has one canonical text representation plus bounded PDF image descriptors. PDF pages use geometry-backed reading order, conservative Markdown headings inferred from isolated font-size evidence or numbered-section syntax, normalized bullet markers, and a separate labeled block for sparse rotated or vertical text whose position cannot be reconstructed confidently. It does not contain HTML, duplicate plain text, raw PDF bytes, or encoded page images. A local PDF result does not duplicate the filesystem path in `metadata.url`; like every attached tab, its URL and title can still appear in the model’s ordinary page context. PDF acquisition, authentication, parser, permission, size, and navigation failures return `success: false` with a fixed typed error code; sensitive content and parser diagnostics are not included.
+The public result has one canonical text representation plus bounded byte-free image descriptors. PDF pages use geometry-backed reading order, conservative Markdown headings inferred from isolated font-size evidence or numbered-section syntax, normalized bullet markers, and a separate labeled block for sparse rotated or vertical text whose position cannot be reconstructed confidently. It does not contain HTML, duplicate plain text, raw PDF bytes, or encoded page images. A local PDF result does not duplicate the filesystem path in `metadata.url`; like every attached tab, its URL and title can still appear in the model’s ordinary page context. PDF acquisition, authentication, parser, permission, size, and navigation failures return `success: false` with a fixed typed error code; sensitive content and parser diagnostics are not included.
 
-For media-capable connection APIs, AI SDK model-output conversion privately attaches page JPEGs after one text part containing the canonical `Image K = PDF page N` manifest. The corresponding Markdown section is labeled `## PDF page N — Image K`. Encoded bytes are held only in an ephemeral identity side channel and never enter public tool JSON, sidebar history, logs, or storage. OpenAI Chat Completions receives a text-only downgrade because that adapter cannot represent media in tool results.
+For media-capable connection APIs, AI SDK model-output conversion privately attaches JPEGs after one text part containing the canonical manifest: `Image K = PDF page N` for PDF renders, or `Image 1 = the user's current browser viewport` with its scroll position for HTML captures. The corresponding PDF Markdown section is labeled `## PDF page N — Image K`. Encoded bytes are held only in an ephemeral identity side channel (`model-output.ts`) and never enter public tool JSON, sidebar history, logs, or storage. OpenAI Chat Completions receives a text-only downgrade because that adapter cannot represent media in tool results.
+
+## Changes in v7.2
+
+Version 7.2 extends default-on visuals from PDFs to HTML pages:
+
+- `includePageImages` now also controls one viewport screenshot for HTML reads, capturing the graphics, layout, and on-screen state that text extraction cannot represent.
+- Successful HTML results add `viewport` scroll context with first/last visible text snippets, and byte-free `images` descriptors when a capture was delivered.
+- Capture is identity-fenced: the bound tab must be its window's active tab before and after the capture, and the exact document route must remain current; otherwise the read degrades to `VIEWPORT_UNAVAILABLE:<reason>` in `warnings` without an image.
+- Extraction failures on a still-current route return `viewport-only` results when a capture exists, instead of a blind text failure.
 
 ## Changes in v7.1
 
