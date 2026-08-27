@@ -23,19 +23,16 @@ import { ConfigStorage } from '../../../storage/config';
 import { getTabManager } from '../../lifecycle';
 import { tool } from 'ai';
 import { z } from 'zod';
+import {
+  NAVIGATE_DESCRIPTION,
+  NAVIGATE_PARAMETER_DESCRIPTIONS,
+  NAVIGATE_TOOL_NAME,
+} from './metadata';
 
-export const NAVIGATE_TOOL_NAME = 'agentboard_navigate';
-const TOOL_VERSION = '1.0.0';
-const TOOL_DESCRIPTION =
-  'Navigate the current browser tab to a URL and wait for the page to load. ' +
-  'After navigation, available tools may change. Use the appropriate tool to acquire context from the new page.';
-
-const PARAM_DESCRIPTIONS = {
-  url: 'The URL to navigate to. Must be a full valid URL (e.g., https://example.com).',
-} as const;
+export { NAVIGATE_TOOL_NAME, NAVIGATE_TOOL_METADATA } from './metadata';
 
 const navigateSchema = z.object({
-  url: z.string().describe(PARAM_DESCRIPTIONS.url),
+  url: z.string().describe(NAVIGATE_PARAMETER_DESCRIPTIONS.url),
 });
 
 /**
@@ -44,7 +41,7 @@ const navigateSchema = z.object({
  */
 export function createNavigateTool(tabId: number) {
   return tool({
-    description: TOOL_DESCRIPTION,
+    description: NAVIGATE_DESCRIPTION,
     inputSchema: navigateSchema,
     execute: async (args, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       const { url } = args;
@@ -98,22 +95,3 @@ export function createNavigateTool(tabId: number) {
     },
   });
 }
-
-/**
- * Tool metadata for display in Options UI.
- * Matches the shape used by fetch_url's FETCH_URL_METADATA.
- */
-export const NAVIGATE_TOOL_METADATA = {
-  description: TOOL_DESCRIPTION,
-  version: TOOL_VERSION,
-  inputSchema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: PARAM_DESCRIPTIONS.url,
-      },
-    },
-    required: ['url'],
-  },
-};

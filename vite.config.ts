@@ -57,6 +57,12 @@ export default defineConfig({
       // The MCP SDK statically imports its eval-based Ajv fallback even though
       // MCPClientService supplies the CSP-safe CfWorker validator explicitly.
       { find: /^ajv$/, replacement: path.resolve(__dirname, 'src/lib/ajv-csp-safe.js') },
+      // ajv-formats reaches Ajv's compiler through `ajv/dist/...` subpaths that the
+      // bare-specifier alias above cannot catch; stub the whole package instead.
+      {
+        find: /^ajv-formats$/,
+        replacement: path.resolve(__dirname, 'src/lib/ajv-formats-csp-safe.js'),
+      },
     ],
   },
   build: {

@@ -13,28 +13,22 @@ import { ConfigStorage } from '../../../storage/config';
 import { convertToMarkdown } from './content-extractor';
 import { tool } from 'ai';
 import { z } from 'zod';
-
-export const FETCH_URL_TOOL_NAME = 'agentboard_fetch_url';
-const TOOL_VERSION = '1.0.0';
-const TOOL_DESCRIPTION =
-  'Fetch content from external URLs. For the current page, prefer site-specific tools instead. ' +
-  'Returns a structured result with HTTP status metadata plus raw content, or clean markdown when requested. ' +
-  'Non-2xx responses still return any available content.';
-
-const PARAM_DESCRIPTIONS = {
-  url: 'URL to fetch (supports HTTPS URLs, including private IPs, and HTTP localhost URLs)',
-  convertToMarkdown:
-    'Convert HTML content to markdown format with metadata (default: false). ' +
-    'Extracts article content, strips ads/navigation, formats as clean markdown.',
-} as const;
+import {
+  FETCH_URL_DESCRIPTION,
+  FETCH_URL_PARAMETER_DESCRIPTIONS,
+  FETCH_URL_TOOL_NAME,
+} from './metadata';
 
 /**
  * Zod schema for fetch URL arguments
- * Descriptions are imported from PARAM_DESCRIPTIONS to avoid duplication
+ * Descriptions are imported from the metadata leaf to avoid duplication
  */
 const fetchUrlSchema = z.object({
-  url: z.string().describe(PARAM_DESCRIPTIONS.url),
-  convertToMarkdown: z.boolean().optional().describe(PARAM_DESCRIPTIONS.convertToMarkdown),
+  url: z.string().describe(FETCH_URL_PARAMETER_DESCRIPTIONS.url),
+  convertToMarkdown: z
+    .boolean()
+    .optional()
+    .describe(FETCH_URL_PARAMETER_DESCRIPTIONS.convertToMarkdown),
 });
 
 export const fetchUrlOutputSchema = z.object({
@@ -121,34 +115,11 @@ async function executeFetchUrl(
  * Ready for direct registration in tool registry
  */
 export const fetchUrlTool = tool({
-  description: TOOL_DESCRIPTION,
+  description: FETCH_URL_DESCRIPTION,
   inputSchema: fetchUrlSchema,
   outputSchema: fetchUrlOutputSchema,
   execute: executeFetchUrl,
 });
-
-/**
- * Tool metadata for display purposes (Options UI)
- * References the same constants as the tool definition above
- */
-export const FETCH_URL_METADATA = {
-  description: TOOL_DESCRIPTION,
-  version: TOOL_VERSION,
-  inputSchema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: PARAM_DESCRIPTIONS.url,
-      },
-      convertToMarkdown: {
-        type: 'boolean',
-        description: PARAM_DESCRIPTIONS.convertToMarkdown,
-      },
-    },
-    required: ['url'],
-  },
-};
 
 /**
  * Export execute function for testing

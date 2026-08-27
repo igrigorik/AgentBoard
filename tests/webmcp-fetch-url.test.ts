@@ -8,9 +8,8 @@ import {
   fetchUrlTool,
   fetchUrlOutputSchema,
   executeFetchUrl,
-  FETCH_URL_METADATA,
-  FETCH_URL_TOOL_NAME,
 } from '../src/lib/webmcp/tools/fetch/fetch-url';
+import { FETCH_URL_METADATA, FETCH_URL_TOOL_NAME } from '../src/lib/webmcp/tools/fetch/metadata';
 
 function httpResponse(
   content: string,

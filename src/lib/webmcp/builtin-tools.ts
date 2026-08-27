@@ -9,8 +9,11 @@
  */
 
 import { COMPILED_TOOLS, type CompiledToolInfo } from './tools/registry';
-import { FETCH_URL_TOOL_NAME, FETCH_URL_METADATA } from './tools/fetch';
-import { NAVIGATE_TOOL_NAME, NAVIGATE_TOOL_METADATA } from './tools/navigate';
+// Metadata leaves only: this module is on the Options page's eager path, so it
+// must never reach tool implementations (`ai`, linkedom/Readability, lifecycle).
+// Guarded by tests/options-import-graph.test.ts.
+import { FETCH_URL_TOOL_NAME, FETCH_URL_METADATA } from './tools/fetch/metadata';
+import { NAVIGATE_TOOL_NAME, NAVIGATE_TOOL_METADATA } from './tools/navigate/metadata';
 import { READ_PAGE_METADATA, READ_PAGE_TOOL_NAME } from './tools/read_page/metadata';
 
 export type BuiltinToolType = 'system' | 'webmcp';
