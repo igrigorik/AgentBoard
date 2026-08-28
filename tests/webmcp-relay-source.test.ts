@@ -263,6 +263,33 @@ describe('real WebMCP relay source', () => {
     expect(addWindowListener).toHaveBeenCalledTimes(2);
   });
 
+  it('reports an extension reload as a lifecycle event, not a relay failure', () => {
+    // Chrome surfaces content-script console.error on the extensions page, so an
+    // orphaned script logging a red error turns every reload into user-visible noise.
+    const consoleError = vi.spyOn(harness.window.console, 'error').mockImplementation(() => {});
+    harness.chromeHarness.runtime.connect.mockImplementation(() => {
+      throw new Error('Extension context invalidated');
+    });
+
+    inject(harness.window);
+
+    expect(harness.window.__webmcpRelayBridge?.isShutdown).toBe(true);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('still reports a genuine connection failure as an error', () => {
+    const consoleError = vi.spyOn(harness.window.console, 'error').mockImplementation(() => {});
+    harness.chromeHarness.runtime.connect.mockImplementation(() => {
+      throw new Error('Receiving end does not exist');
+    });
+
+    inject(harness.window);
+
+    // Below debug level the relay emits a fixed message with no page context.
+    expect(consoleError).toHaveBeenCalledWith('[AgentBoard] Relay failure');
+    expect(harness.window.__webmcpRelayBridge?.isShutdown).toBe(false);
+  });
+
   it('cleans up listeners after synchronous context invalidation', () => {
     const removeWindowListener = vi.spyOn(harness.window, 'removeEventListener');
     harness.chromeHarness.runtime.connect.mockImplementation(() => {

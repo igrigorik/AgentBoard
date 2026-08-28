@@ -73,6 +73,14 @@ import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';
     };
   })();
 
+  /**
+   * A reloaded or updated extension orphans this content script: it can only stop.
+   * Chrome surfaces content-script console.error on the extensions page, so this
+   * routine lifecycle event must never be reported as a failure.
+   */
+  const isContextInvalidated = (error) =>
+    typeof error?.message === 'string' && error.message.includes('Extension context invalidated');
+
   const JSONRPC = '2.0';
 
   /**
@@ -161,7 +169,7 @@ import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';
           this.port = null;
 
           // Check for permanent errors
-          if (error?.message?.includes('Extension context invalidated')) {
+          if (isContextInvalidated(error)) {
             this.shutdown();
             return;
           }
@@ -175,13 +183,13 @@ import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';
         // Flush any pending messages
         this.flushPendingMessages();
       } catch (err) {
-        logger.error('[WebMCP Relay] Connection failed:', err);
-
-        // Don't reconnect if extension context is invalidated (extension was reloaded)
-        if (err?.message?.includes('Extension context invalidated')) {
+        if (isContextInvalidated(err)) {
+          logger.log('[WebMCP Relay] Extension context invalidated; shutting down');
           this.shutdown();
           return;
         }
+
+        logger.error('[WebMCP Relay] Connection failed:', err);
 
         // Otherwise, attempt reconnect
         if (!this.isShutdown) {
@@ -227,9 +235,14 @@ import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';
         try {
           this.port.postMessage(msg);
         } catch (err) {
-          logger.error('[WebMCP Relay] Failed to flush message:', err);
-          // Put it back if send failed
+          // Put it back regardless: an unsent message must not be dropped.
           this.pendingMessages.unshift(msg);
+          if (isContextInvalidated(err)) {
+            logger.log('[WebMCP Relay] Extension context invalidated; shutting down');
+            this.shutdown();
+            return;
+          }
+          logger.error('[WebMCP Relay] Failed to flush message:', err);
           break;
         }
       }
@@ -249,13 +262,13 @@ import { redactDiagnosticString } from '../lib/logger/redaction?relay-inline';
         try {
           this.port.postMessage(message);
         } catch (err) {
-          logger.error('[WebMCP Relay] Failed to send message:', err);
-
-          // Check if extension context was invalidated
-          if (err?.message?.includes('Extension context invalidated')) {
+          if (isContextInvalidated(err)) {
+            logger.log('[WebMCP Relay] Extension context invalidated; shutting down');
             this.shutdown();
             return;
           }
+
+          logger.error('[WebMCP Relay] Failed to send message:', err);
 
           // Queue for retry
           this.pendingMessages.push(message);
