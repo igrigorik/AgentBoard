@@ -9,6 +9,15 @@
 import log from '../logger';
 import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { MCPClientService } from './client';
+import {
+  CATALOG_FAILURE_COOLDOWN_MS,
+  CATALOG_REFRESH_THROTTLE_MS,
+  catalogAgeMs,
+  clearCatalog,
+  readCatalog,
+  writeCatalog,
+  type RemoteToolCatalog,
+} from './catalog';
 import type { MCPConfig, MCPServerConfig } from '../storage/config';
 
 export interface MCPServerStatus {
@@ -78,11 +87,50 @@ export class RemoteMCPSession {
   private statuses: MCPServerStatus[] = [];
   private connectStarted = false;
   private closePromise?: Promise<void>;
+  /** Live tool list per connected server, used to re-resolve cached capabilities. */
+  private readonly liveTools = new Map<string, Tool[]>();
+  private readonly connecting = new Map<string, Promise<MCPClientService>>();
 
   constructor(
     private readonly config: MCPConfig | undefined,
     private readonly createClient: ClientFactory = () => new MCPClientService()
   ) {}
+
+  /**
+   * Build a session from a persisted catalog without contacting any server.
+   *
+   * The result is a real session, not a bare data bag: it keeps `hasContext`
+   * true so a stream still attaches its revocation listener, and it remains the
+   * object-identity authority anchor. Servers are contacted on first executeTool.
+   */
+  static fromCatalog(
+    catalog: RemoteToolCatalog,
+    createClient: ClientFactory = () => new MCPClientService()
+  ): RemoteMCPSession {
+    const session = new RemoteMCPSession(catalog.mcpConfig, createClient);
+    // A catalog-backed session has already "discovered"; connect() must not run.
+    session.connectStarted = true;
+    for (const { serverName, tool } of catalog.capabilities) {
+      const capability = Object.freeze({ serverName, tool });
+      session.capabilities.push(capability);
+      session.capabilitySet.add(capability);
+    }
+    for (const [serverName, instructions] of Object.entries(catalog.instructions)) {
+      session.serverInstructions.set(serverName, instructions);
+    }
+    return session;
+  }
+
+  /** Serializable projection for the catalog cache. Never includes transports. */
+  toCatalog(): RemoteToolCatalog | null {
+    if (!this.config) return null;
+    return {
+      mcpConfig: this.config,
+      capabilities: this.capabilities.map(({ serverName, tool }) => ({ serverName, tool })),
+      instructions: Object.fromEntries(this.serverInstructions),
+      discoveredAt: Date.now(),
+    };
+  }
 
   get signal(): AbortSignal {
     return this.controller.signal;
@@ -129,6 +177,7 @@ export class RemoteMCPSession {
       if (connectionStatus.instructions) {
         this.serverInstructions.set(name, connectionStatus.instructions);
       }
+      this.liveTools.set(name, connectionStatus.tools);
 
       for (const tool of connectionStatus.tools) {
         // Preserve the existing first-server-wins behavior for duplicate public tool names.
@@ -170,6 +219,48 @@ export class RemoteMCPSession {
     return parts.length > 0 ? `# MCP Server Instructions\n\n${parts.join('\n\n')}` : undefined;
   }
 
+  /**
+   * Connect one server on demand, deduped so parallel tool calls cannot open
+   * parallel transports. Tracks the client before awaiting so revoke()/close()
+   * can reach an in-flight candidate.
+   */
+  private async connectServer(serverName: string): Promise<MCPClientService> {
+    const serverConfig = this.config?.mcpServers[serverName];
+    if (!serverConfig) throw new Error('MCP server is not configured');
+
+    const client = this.createClient();
+    this.clients.set(serverName, client);
+    const connectionStatus = await client.connect(serverConfig, serverName);
+
+    if (!connectionStatus.connected || !connectionStatus.tools) {
+      this.clients.delete(serverName);
+      await client.disconnect();
+      throw new Error('MCP server is not connected');
+    }
+
+    this.liveTools.set(serverName, connectionStatus.tools);
+    if (connectionStatus.instructions) {
+      this.serverInstructions.set(serverName, connectionStatus.instructions);
+    }
+    return client;
+  }
+
+  private async ensureServer(serverName: string): Promise<MCPClientService> {
+    const existing = this.clients.get(serverName);
+    if (existing?.isConnected()) return existing;
+
+    let inFlight = this.connecting.get(serverName);
+    if (!inFlight) {
+      inFlight = this.connectServer(serverName);
+      this.connecting.set(serverName, inFlight);
+    }
+    try {
+      return await inFlight;
+    } finally {
+      this.connecting.delete(serverName);
+    }
+  }
+
   async executeTool(
     capability: RemoteMCPToolCapability,
     input: Record<string, unknown>,
@@ -179,8 +270,30 @@ export class RemoteMCPSession {
       throw new DOMException('Aborted', 'AbortError');
     }
 
-    const client = this.clients.get(capability.serverName);
-    if (!client?.isConnected()) throw new Error('MCP server is not connected');
+    const client = await this.ensureServer(capability.serverName);
+
+    // The connect above is itself a revocation window, so re-check both owners
+    // before doing anything with the transport.
+    if (this.signal.aborted || executionSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    if (!client.isConnected()) throw new Error('MCP server is not connected');
+
+    // A cached capability is a hint. Authority is the server's live list: a tool that
+    // vanished, or whose input schema moved, would mean the model generated arguments
+    // against grounding the server no longer honors.
+    const advertised = this.liveTools.get(capability.serverName) ?? [];
+    const live = advertised.find((tool) => tool.name === capability.tool.name);
+    if (!live) {
+      throw new Error(
+        `Tool "${capability.tool.name}" is no longer available on MCP server "${capability.serverName}".`
+      );
+    }
+    if (JSON.stringify(live.inputSchema) !== JSON.stringify(capability.tool.inputSchema)) {
+      throw new Error(
+        `Tool "${capability.tool.name}" changed its input schema on MCP server "${capability.serverName}". Re-save MCP settings to refresh.`
+      );
+    }
 
     // The SDK accepts one signal. Link request cancellation with session revocation
     // so either owner can stop an in-flight remote call without leaking listeners.
@@ -228,11 +341,108 @@ export class RemoteMCPManager {
   private currentSession = EMPTY_REMOTE_MCP_SESSION;
   private pendingSession: PendingSession | null = null;
   private desiredConfig: MCPConfig | undefined;
+  private refreshing: Promise<void> | null = null;
 
   constructor(private readonly createClient: ClientFactory = () => new MCPClientService()) {}
 
   getCurrentSession(): RemoteMCPSession {
     return this.currentSession;
+  }
+
+  /**
+   * Make remote tools available for this config, blocking only when there is
+   * nothing usable to serve.
+   *
+   * Materialization happens at most once per config per worker lifetime: if a
+   * session already exists we return it untouched, so a background refresh can
+   * never swap the session out from under a live stream. A refreshed catalog is
+   * picked up by the next worker, which given the ~30s idle timeout is soon.
+   */
+  async ensure(config?: MCPConfig): Promise<void> {
+    const normalizedConfig = normalizedMCPConfig(config);
+
+    if (sameMCPConfig(this.desiredConfig, normalizedConfig)) {
+      if (this.pendingSession) {
+        await this.pendingSession.completion;
+        return;
+      }
+      if (!normalizedConfig || this.currentSession !== EMPTY_REMOTE_MCP_SESSION) return;
+    } else {
+      // Configuration changed: detach stale authority synchronously, before the cache
+      // read below. Awaiting first would leave a window where a snapshot could still
+      // capture a session built from replaced servers or a rotated token.
+      this.desiredConfig = undefined;
+      this.revokePublishedSession();
+      this.revokePendingSession();
+    }
+
+    if (!normalizedConfig) {
+      this.revoke();
+      return;
+    }
+
+    const cached = await readCatalog();
+    if (cached && sameMCPConfig(cached.mcpConfig, normalizedConfig)) {
+      const empty = cached.capabilities.length === 0;
+      const age = catalogAgeMs(cached);
+      // An empty catalog is the negative cache: retry sooner than a populated one,
+      // so a brief outage does not suppress tools for the whole browser session.
+      const exhausted = empty && age >= CATALOG_FAILURE_COOLDOWN_MS;
+      if (!exhausted) {
+        this.publishCatalogSession(cached, normalizedConfig);
+        if (!empty && age >= CATALOG_REFRESH_THROTTLE_MS) this.kickRefresh(normalizedConfig);
+        return;
+      }
+    }
+
+    await this.reconcile(normalizedConfig);
+  }
+
+  /** Discard the cache and rediscover, even when the config is unchanged. */
+  async forceRefresh(config?: MCPConfig): Promise<MCPServerStatus[]> {
+    await clearCatalog();
+    this.revoke();
+    return this.reconcile(config);
+  }
+
+  private publishCatalogSession(catalog: RemoteToolCatalog, config: MCPConfig): void {
+    // Mirror connectAndPublish's fence: a caller that lost the race must not clobber
+    // authority another caller already materialized for the same configuration.
+    if (
+      sameMCPConfig(this.desiredConfig, config) &&
+      this.currentSession !== EMPTY_REMOTE_MCP_SESSION
+    ) {
+      return;
+    }
+    this.desiredConfig = config;
+    this.revokePublishedSession();
+    this.revokePendingSession();
+    this.currentSession = RemoteMCPSession.fromCatalog(catalog, this.createClient);
+    log.info('[RemoteMCPManager] Remote MCP catalog materialized from cache');
+  }
+
+  /**
+   * Rediscover into the cache only. Deliberately does not publish: replacing the
+   * live session would fire its abort signal and kill an in-flight stream for a
+   * hint update. Deduped, and never awaited by callers.
+   */
+  private kickRefresh(config: MCPConfig): void {
+    if (this.refreshing) return;
+    const session = new RemoteMCPSession(config, this.createClient);
+    this.refreshing = session
+      .connect()
+      .then(async () => {
+        const catalog = session.toCatalog();
+        // Never let a momentary failure clobber a good catalog.
+        if (catalog && catalog.capabilities.length > 0) await writeCatalog(catalog);
+      })
+      .catch(() => {
+        // Best-effort: the worker may be torn down mid-refresh. Not a server failure.
+      })
+      .finally(() => {
+        this.refreshing = null;
+        void session.close();
+      });
   }
 
   /**
@@ -300,6 +510,10 @@ export class RemoteMCPManager {
     this.pendingSession = null;
     this.currentSession = pending.session;
     log.info('[RemoteMCPManager] Remote MCP session published');
+    // Cache the freshly connected session, including an empty result: that is the
+    // negative cache that stops an unreachable server re-blocking every message.
+    const catalog = pending.session.toCatalog();
+    if (catalog) void writeCatalog(catalog);
     return statuses;
   }
 

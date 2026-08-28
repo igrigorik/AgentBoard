@@ -10,6 +10,14 @@ import type { Tool, CallToolResult, Resource } from '@modelcontextprotocol/sdk/t
 import log from '../logger';
 import type { MCPServerConfig } from '../storage/config';
 
+/**
+ * Discovery must not stall a user's message. The SDK default is 60s and
+ * RemoteMCPSession connects servers sequentially, so a black-holed server would
+ * otherwise hold up first token by 60s per server. Tool *calls* are deliberately
+ * left on the default: a slow tool is doing work, not failing to answer.
+ */
+export const MCP_DISCOVERY_TIMEOUT_MS = 5_000;
+
 export interface MCPClientStatus {
   connected: boolean;
   serverName: string;
@@ -60,7 +68,7 @@ export class MCPClientService {
         }
       );
 
-      await this.client.connect(this.transport);
+      await this.client.connect(this.transport, { timeout: MCP_DISCOVERY_TIMEOUT_MS });
       this.connected = true;
 
       // Fetch available tools immediately after connection
@@ -96,7 +104,9 @@ export class MCPClientService {
     }
 
     try {
-      const response = await this.client.listTools();
+      const response = await this.client.listTools(undefined, {
+        timeout: MCP_DISCOVERY_TIMEOUT_MS,
+      });
       return response.tools;
     } catch (error) {
       log.error('MCP tool discovery failed');

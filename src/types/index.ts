@@ -105,6 +105,23 @@ export interface WebMCPGetToolsMessage {
   tabId?: number;
 }
 
+/**
+ * Sent once when the sidebar page loads. Remote MCP discovery is lazy, so this
+ * gives the one cold start per browser session a head start while the user types.
+ * It is not required for correctness: serving a cached catalog is what keeps
+ * stream start non-blocking.
+ */
+export interface WebMCPWarmToolsMessage {
+  type: 'WEBMCP_WARM_TOOLS';
+  /**
+   * Discard the cache and rediscover. Used by the Options "Test connections"
+   * action so a server whose tools changed can be picked up without editing
+   * config. The background always refreshes against *saved* configuration, so a
+   * draft under test can never become live authority.
+   */
+  force?: boolean;
+}
+
 export interface WebMCPToolsChangedMessage {
   type: 'WEBMCP_TOOLS_CHANGED';
   tabId: number;
@@ -163,6 +180,7 @@ export type ExtensionMessage =
   | ToolResultMessage
   | WebMCPCallToolMessage
   | WebMCPGetToolsMessage
+  | WebMCPWarmToolsMessage
   | WebMCPToolsChangedMessage
   | WebMCPScriptsUpdatedMessage
   | PdfWorkerHostClaimMessage

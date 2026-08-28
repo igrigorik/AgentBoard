@@ -303,6 +303,12 @@ function scrollToBottomIfNeeded(): void {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
+  // Remote MCP discovery is lazy; nudge it now so a cold browser session overlaps
+  // discovery with the user typing rather than with their first message.
+  chrome.runtime.sendMessage({ type: 'WEBMCP_WARM_TOOLS' }).catch(() => {
+    // Warming is best-effort: a cold cache simply resolves at stream start.
+  });
+
   await loadAgents();
 
   // Event handlers must not accept input before their command dependency exists.

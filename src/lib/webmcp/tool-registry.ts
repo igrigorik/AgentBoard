@@ -468,17 +468,47 @@ export class ToolRegistryManager {
    */
   async loadRemoteTools(configSnapshot?: StorageConfig): Promise<void> {
     try {
-      const config = configSnapshot ?? (await ConfigStorage.getInstance().get());
-      const completion = this.remoteMCPManager.reconcile(config.mcpConfig);
+      // ensure() serves a cached catalog when one exists and only contacts servers
+      // when there is nothing usable, so this is cheap on a warm browser session.
+      await this.applyRemoteSession(
+        (mcpConfig) => this.remoteMCPManager.ensure(mcpConfig),
+        configSnapshot,
+        'reconciliation'
+      );
+    } catch {
+      this.revokeRemoteTools();
+      log.error('[ToolRegistry] Remote MCP reconciliation failed');
+    }
+  }
 
-      // reconcile() synchronously detaches stale authority before its first await.
+  /**
+   * Publish whichever session the manager settles on, republishing around the await
+   * so stale authority is detached before the operation and the result after it.
+   */
+  private async applyRemoteSession(
+    operation: (mcpConfig: StorageConfig['mcpConfig']) => Promise<unknown>,
+    configSnapshot: StorageConfig | undefined,
+    label: string
+  ): Promise<void> {
+    try {
+      const config = configSnapshot ?? (await ConfigStorage.getInstance().get());
+      const completion = operation(config.mcpConfig);
       this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
       await completion;
       this.replaceRemoteSession(this.remoteMCPManager.getCurrentSession());
     } catch {
       this.revokeRemoteTools();
-      log.error('[ToolRegistry] Remote MCP reconciliation failed');
+      log.error(`[ToolRegistry] Remote MCP ${label} failed`);
     }
+  }
+
+  /** Discard the cached catalog and rediscover, even when configuration is unchanged. */
+  async refreshRemoteTools(configSnapshot?: StorageConfig): Promise<void> {
+    await this.applyRemoteSession(
+      (mcpConfig) => this.remoteMCPManager.forceRefresh(mcpConfig),
+      configSnapshot,
+      'refresh'
+    );
   }
 
   /** Immediately remove all remote capabilities and close transports in the background. */

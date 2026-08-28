@@ -501,6 +501,13 @@ async function testMCPConfig() {
     const remoteMCPManager = getRemoteMCPManager();
     const statuses = await remoteMCPManager.probe(mcpConfig);
 
+    // A successful probe means the live servers were just interrogated, so this is
+    // also the user's chance to pick up tools that changed without a config edit.
+    // The background refreshes against saved configuration, never this draft.
+    chrome.runtime.sendMessage({ type: 'WEBMCP_WARM_TOOLS', force: true }).catch(() => {
+      // Refresh is best-effort; the probe result below is unaffected.
+    });
+
     // Display the results
     displayMCPStatus(statuses);
     statusDiv.classList.remove('hidden');

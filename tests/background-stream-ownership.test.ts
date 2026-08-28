@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   toolRegistry: {
     replaceSystemTools: vi.fn(),
     loadRemoteTools: vi.fn(),
+    refreshRemoteTools: vi.fn(),
     revokeRemoteTools: vi.fn(),
     getToolForTab: vi.fn(),
     getAllTools: vi.fn(),
@@ -239,6 +240,28 @@ describe('background response privacy', () => {
     await vi.waitFor(() => expect(currentResponse).toHaveBeenCalledWith({ success: true }));
     expect(isCurrent).toHaveBeenCalledOnce();
     releasePdfWorkerCapability(capability);
+  });
+
+  it('warms remote tools without discarding the cache, and only forces on request', () => {
+    mocks.toolRegistry.loadRemoteTools.mockClear();
+    mocks.toolRegistry.refreshRemoteTools.mockClear();
+    const sender = { id: chrome.runtime.id } as chrome.runtime.MessageSender;
+
+    // Sidebar open is a head start, not a refresh. Forcing here would discard the
+    // cached catalog on every panel open and defeat the point of caching it.
+    const warmResponse = vi.fn();
+    expect(mocks.onMessage!({ type: 'WEBMCP_WARM_TOOLS' }, sender, warmResponse)).toBe(false);
+    expect(warmResponse).toHaveBeenCalledWith({ success: true });
+    expect(mocks.toolRegistry.refreshRemoteTools).not.toHaveBeenCalled();
+
+    const forceResponse = vi.fn();
+    expect(
+      mocks.onMessage!({ type: 'WEBMCP_WARM_TOOLS', force: true }, sender, forceResponse)
+    ).toBe(false);
+    expect(forceResponse).toHaveBeenCalledWith({ success: true });
+    expect(mocks.toolRegistry.refreshRemoteTools).toHaveBeenCalledOnce();
+    // Forced refresh reads saved configuration itself; a draft under test is never passed.
+    expect(mocks.toolRegistry.refreshRemoteTools).toHaveBeenCalledWith();
   });
 
   it('revokes runtime authority when changed configuration is invalid', () => {

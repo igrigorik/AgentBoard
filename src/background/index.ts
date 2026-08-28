@@ -23,6 +23,7 @@ import type {
   PortMessage,
   WebMCPCallToolMessage,
   WebMCPGetToolsMessage,
+  WebMCPWarmToolsMessage,
 } from '../types/index';
 
 interface StreamingConnection {
@@ -531,10 +532,24 @@ chrome.runtime.onMessage.addListener((request: ExtensionMessage, sender, sendRes
       return true; // Async response
     }
 
+    case 'WEBMCP_WARM_TOOLS': {
+      // Fire and forget: the sender must not wait, and a failure here costs only the
+      // head start, because stream start still ensures readiness itself.
+      const { force } = request as WebMCPWarmToolsMessage;
+      if (force) {
+        // Always against saved configuration, never a draft under test.
+        remoteToolsReady = getToolRegistry().refreshRemoteTools();
+      } else {
+        void ensureRemoteTools();
+      }
+      sendResponse({ success: true });
+      return false;
+    }
+
     case 'WEBMCP_GET_TOOLS': {
       // Get available tools from unified registry with original schemas
       (async () => {
-        await toolsReady;
+        await ensureRemoteTools();
         await waitForCurrentSystemTools();
         const { tabId: providedTabId } = request as WebMCPGetToolsMessage;
 
@@ -777,7 +792,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
         try {
           await raceWithAbort(
-            Promise.all([toolsReady, waitForCurrentSystemTools()]).then(() => undefined),
+            Promise.all([ensureRemoteTools(), waitForCurrentSystemTools()]).then(() => undefined),
             preparation.signal
           );
           if (!isCurrentStream()) return;
@@ -1031,11 +1046,16 @@ function queuePageToolRefresh(
   return pageToolRefreshes;
 }
 
-// Remote startup is independent so a later valid system configuration can recover from an
-// unavailable initial storage read without leaving catalogs and streams permanently poisoned.
-const toolsReady = getToolRegistry()
-  .loadRemoteTools()
-  .then(() => log.debug('[Background] Tool registry initialized'));
+// Remote tool loading is lazy: the worker wakes on every navigation in any tab, and
+// discovering here would reconnect to every MCP server on every page load. Callers that
+// actually need tools await this instead. Remote startup stays independent so a later
+// valid configuration can recover from an unavailable initial storage read without
+// leaving catalogs and streams permanently poisoned.
+let remoteToolsReady: Promise<void> | undefined;
+const ensureRemoteTools = (): Promise<void> =>
+  (remoteToolsReady ??= getToolRegistry()
+    .loadRemoteTools()
+    .then(() => log.debug('[Background] Tool registry initialized')));
 
 // Listen for config changes from Options page
 configStorage.onChange(
@@ -1053,7 +1073,9 @@ configStorage.onChange(
     void queuePageToolRefresh(newConfig).catch(() => {
       log.error('[Background] Page tool refresh failed');
     });
-    void toolRegistry.loadRemoteTools(newConfig);
+    // Saving MCP config is user intent, so rediscovery here is correct. Replacing the
+    // memo keeps later readiness waits bound to this newer load.
+    remoteToolsReady = toolRegistry.loadRemoteTools(newConfig);
     try {
       // ConfigStorage serializes async change callbacks, so stale reconciliations
       // cannot overtake a newer configuration.
