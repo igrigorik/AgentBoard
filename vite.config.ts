@@ -68,6 +68,11 @@ export default defineConfig({
   build: {
     // Never let a prior release stamp survive into a new build.
     emptyOutDir: true,
+    // Preload hints exist to hide network latency. Extension pages load from local disk over
+    // chrome-extension://, so there is none to hide: the hints only produce duplicate fetches and
+    // console warnings on the page console, which is the surface used to debug user script
+    // injection. Chunks load on demand at import instead.
+    modulePreload: false,
     // Chrome extensions need to output multiple entry points
     rollupOptions: {
       input: {
