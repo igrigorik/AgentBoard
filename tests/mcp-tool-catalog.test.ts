@@ -203,7 +203,7 @@ describe('remote MCP catalog', () => {
     expect(clients[0].callTool).not.toHaveBeenCalled();
   });
 
-  it('refuses a cached tool whose input schema moved', async () => {
+  it('calls a cached tool whose input schema moved and lets the server judge', async () => {
     installSessionStorage(catalog('alpha', [tool('search', { required: ['q'] })]));
     const { manager, clients } = harness(() =>
       connected('alpha', [tool('search', { required: ['query'] })])
@@ -211,12 +211,11 @@ describe('remote MCP catalog', () => {
     await manager.ensure(config('alpha'));
     const [capability] = manager.getCurrentSession().getToolCapabilities();
 
-    // The model generated arguments against the cached schema; sending them would be
-    // grounded in a contract the server no longer honors.
-    await expect(manager.getCurrentSession().executeTool(capability, {})).rejects.toThrow(
-      /changed its input schema/
-    );
-    expect(clients[0].callTool).not.toHaveBeenCalled();
+    // Byte-comparing schemas rejected harmless edits and could not see a schema that
+    // kept its shape and changed its meaning. The server owns the constraint and names
+    // the offending field; refusing locally only hid that message behind a stale cache.
+    await expect(manager.getCurrentSession().executeTool(capability, {})).resolves.toBeDefined();
+    expect(clients[0].callTool).toHaveBeenCalledTimes(1);
   });
 
   it('revokes before calling when authority is lost during the lazy connect', async () => {

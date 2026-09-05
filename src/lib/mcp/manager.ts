@@ -279,9 +279,9 @@ export class RemoteMCPSession {
     }
     if (!client.isConnected()) throw new Error('MCP server is not connected');
 
-    // A cached capability is a hint. Authority is the server's live list: a tool that
-    // vanished, or whose input schema moved, would mean the model generated arguments
-    // against grounding the server no longer honors.
+    // A cached capability is a hint; authority is the server's live list. Withdrawal is the
+    // only difference worth refusing on, because it is the one case with no server left to
+    // answer for the call.
     const advertised = this.liveTools.get(capability.serverName) ?? [];
     const live = advertised.find((tool) => tool.name === capability.tool.name);
     if (!live) {
@@ -289,11 +289,15 @@ export class RemoteMCPSession {
         `Tool "${capability.tool.name}" is no longer available on MCP server "${capability.serverName}".`
       );
     }
-    if (JSON.stringify(live.inputSchema) !== JSON.stringify(capability.tool.inputSchema)) {
-      throw new Error(
-        `Tool "${capability.tool.name}" changed its input schema on MCP server "${capability.serverName}". Re-save MCP settings to refresh.`
-      );
-    }
+
+    // Schema drift is deliberately not fatal. Byte-comparing the cached and live schemas
+    // rejected harmless edits -- a grown enum default, a reworded description -- while
+    // being blind to the case that actually matters, a schema that kept its shape and
+    // changed its meaning. Arguments are validated locally against the cached schema and
+    // again by the AI SDK, and the server rejects what neither caught with a message that
+    // names the offending field. Healing the drift is publishCatalogSession's job: the
+    // validator here closes over the schema at conversion time, so nothing this call site
+    // could mutate would reach it.
 
     // The SDK accepts one signal. Link request cancellation with session revocation
     // so either owner can stop an in-flight remote call without leaking listeners.
