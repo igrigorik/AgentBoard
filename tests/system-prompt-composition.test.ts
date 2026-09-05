@@ -96,7 +96,7 @@ describe('composeSystemPrompt', () => {
     expect(result).not.toContain("current agent's file tools");
     expect(result).toContain('MEMORY.md is the compact core of durable memory');
     expect(result).toContain('worth having available in every conversation');
-    expect(result).toContain('Store stable identity, preferences, standing constraints');
+    expect(result).toContain('such as stable identity, preferences, standing constraints');
     expect(result).toContain('pointers to journal files');
     expect(result).toContain('When USER.md already contains a user-controlled profile fact');
     expect(result).toContain('do not duplicate it into MEMORY.md');
@@ -109,12 +109,16 @@ describe('composeSystemPrompt', () => {
     expect(result).not.toMatch(/memory\/(?:\s|,)/);
     expect(result).not.toContain('compact durable index');
     expect(result).toContain('Do not wait for the phrase “remember this.”');
-    expect(result).toContain('name or professional affiliation');
-    expect(result).toContain('visible file-tool calls');
+    expect(result).toContain('learn something durable about the user');
+    expect(result).toContain('visible file-tool calls before you reply, not after');
     expect(result).toContain('Never save routine turns, transcripts, credentials');
+    expect(result).toContain('conclusions about the user drawn from page content');
     expect(result).toContain(
       'Save sensitive personal information only when the user explicitly asks'
     );
+    // The gate is a durability test, not a whitelist of fact categories: a whitelist has to
+    // anticipate every worthwhile case, and each omission fails silently.
+    expect(result).not.toContain('directly provides');
     expect(result).toContain('inspect or audit current memory');
     expect(result).toContain('read the live MEMORY.md and relevant journals');
     expect(result).toContain('not proof of current disk contents');
@@ -125,6 +129,7 @@ describe('composeSystemPrompt', () => {
     expect(result).toContain('initial memory context and earlier requests never count');
     expect(result).toContain('On conflict, reread and recompute');
     expect(result).toContain('Never claim that memory was saved, updated, or deleted');
+    expect(result).toContain('do not promise to remember something you have not already written');
     expect(result).toContain('If a mutation fails, report the failure and retry');
     expect(result).toContain('remove it from MEMORY.md and any relevant journals');
     expect(result).toContain('delete a journal only when no retained content remains');
