@@ -23,6 +23,8 @@ import { COMPILED_TOOLS } from '../webmcp/tools';
 import { createModelRuntime } from './model-runtime';
 import { isOpenAIProtocol, providerForApiProtocol, type ApiProtocol } from './protocol';
 import { decideStreamStop } from './stream-policy';
+import { recordToolSet, summarizeCacheUsage } from './prompt-cache-telemetry';
+import log from '../logger';
 
 const AGENTBOARD_WEBMCP_TOOL_NAMES = new Set(COMPILED_TOOLS.map(({ id }) => id));
 
@@ -384,6 +386,9 @@ export class AIClient {
         ? createMemoryTools(memory.filesystem, memory.authoritySignal)
         : {};
       const allTools = { ...toolSnapshot.tools, ...memoryTools };
+      // Tools lead the prompt for every provider, so this is the prefix most able to cost us
+      // a cache hit. Logged before the request so a miss reported at finish can be attributed.
+      log.debug('Prompt cache: tool set', recordToolSet(allTools));
       const toolCallSources = new Map<string, ToolCallSource>();
       for (const [name, executionSource] of toolSnapshot.toolSources) {
         const source = displayToolSource(name, executionSource, userToolNames);
@@ -695,6 +700,10 @@ export class AIClient {
               reasoningTokens = (usage as Record<string, unknown>)?.reasoningTokens as
                 | number
                 | undefined;
+              // cachedInputTokens is provider-agnostic in AI SDK v5. OpenAI and Gemini cache
+              // automatically, so a persistent zero here means our prefix is unstable rather
+              // than that caching is off.
+              log.debug('Prompt cache: usage', summarizeCacheUsage(usage));
 
               // If reasoning is still active at finish (no text phase), end it now
               if (isReasoning) {
