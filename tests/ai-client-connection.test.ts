@@ -1174,7 +1174,7 @@ export function execute() { return {}; }`;
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('does not expose tool-error payloads to sidebar callbacks', async () => {
+  it('reports the tool failure reason instead of a fixed string', async () => {
     vi.mocked(chrome.storage.local.get).mockResolvedValue({
       config: {
         schemaVersion: 2,
@@ -1192,7 +1192,10 @@ export function execute() { return {}; }`;
       },
     } as never);
     vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({ private_tool: {} }) as never);
-    const secret = 'secret tool backend failure';
+    // A tool-error carries the message our own tool threw, which the SDK forwards to the
+    // model regardless. Withholding it from the UI only blinded the user. Provider payloads
+    // travel on the `error` part instead and stay scrubbed; see the next test.
+    const reason = 'The page reader is out of date. Reload AgentBoard at chrome://extensions.';
     mocks.streamText.mockReturnValue({
       textStream: undefined,
       fullStream: {
@@ -1202,7 +1205,55 @@ export function execute() { return {}; }`;
             toolCallId: 'call-1',
             toolName: 'private_tool',
             input: {},
-            error: new Error(secret),
+            error: new Error(reason),
+          };
+        },
+      },
+    });
+    const onToolResult = vi.fn();
+
+    await AIClient.getInstance().streamChat('tool-agent', [], undefined, {
+      onFinish: vi.fn(),
+      onError: vi.fn(),
+      onToolResult,
+    });
+
+    expect(onToolResult).toHaveBeenCalledWith({
+      id: 'call-1',
+      output: null,
+      status: 'error',
+      error: reason,
+    });
+  });
+
+  it('falls back to a generic reason when a tool failure carries no message', async () => {
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      config: {
+        schemaVersion: 2,
+        agents: [
+          {
+            id: 'tool-agent',
+            name: 'Tool Agent',
+            provider: 'openai',
+            apiProtocol: 'openai-responses',
+            apiKey: 'secret-key',
+            model: 'test-model',
+            temperature: 0.7,
+          },
+        ],
+      },
+    } as never);
+    vi.mocked(getToolRegistry).mockReturnValue(toolRegistry({ private_tool: {} }) as never);
+    mocks.streamText.mockReturnValue({
+      textStream: undefined,
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'tool-error',
+            toolCallId: 'call-1',
+            toolName: 'private_tool',
+            input: {},
+            error: 'not an error object',
           };
         },
       },
@@ -1221,7 +1272,6 @@ export function execute() { return {}; }`;
       status: 'error',
       error: 'Tool execution failed',
     });
-    expect(JSON.stringify(onToolResult.mock.calls)).not.toContain(secret);
   });
 
   it('does not expose raw provider failures from normal streams', async () => {

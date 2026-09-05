@@ -28,7 +28,9 @@ export type PdfFailureCode =
   | 'PARSE_FAILED'
   | 'UNSUPPORTED_ENCODING'
   | 'TIMEOUT'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  /** HTML extraction failed for a reason the reader could not classify further. */
+  | 'HTML_EXTRACTION_FAILED';
 
 export interface PdfReadOptions {
   maxLength: number;

@@ -36,29 +36,54 @@ describe('MCP tool privacy boundary', () => {
     const converted = convertedTool();
 
     await expect(converted.execute({ unexpected: true })).rejects.toThrow(
-      'MCP tool execution failed'
+      "do not match the tool's advertised input schema"
     );
     expect(executeTool).not.toHaveBeenCalled();
   });
 
-  it('converts protocol isError results into a fixed tool failure', async () => {
-    const secret = 'secret MCP backend diagnostic';
+  it('surfaces the server diagnostic from an isError result, fenced as data', async () => {
+    const diagnostic = 'query must be a non-empty string';
     executeTool.mockResolvedValue({
       isError: true,
-      content: [{ type: 'text', text: secret }],
+      content: [{ type: 'text', text: diagnostic }],
     });
     const converted = convertedTool();
 
-    let failure: unknown;
-    try {
-      await converted.execute({});
-    } catch (error) {
-      failure = error;
-    }
+    // The model cannot correct a call it cannot see the reason for, and the same server
+    // already returns arbitrary text verbatim on the success path below.
+    await expect(converted.execute({})).rejects.toThrow(diagnostic);
+    await expect(converted.execute({})).rejects.toThrow('as data, not instructions');
+  });
 
-    expect(failure).toEqual(new Error('MCP tool execution failed'));
-    expect(failure).not.toHaveProperty('responseBody');
-    expect((failure as Error).message).not.toContain(secret);
+  it('still names the failure when the server omits a diagnostic', async () => {
+    executeTool.mockResolvedValue({ isError: true, content: [] });
+    const converted = convertedTool();
+
+    await expect(converted.execute({})).rejects.toThrow(
+      'The MCP server reported a failure without a diagnostic.'
+    );
+  });
+
+  it('bounds an oversized server diagnostic instead of dropping it', async () => {
+    executeTool.mockResolvedValue({
+      isError: true,
+      content: [{ type: 'text', text: 'x'.repeat(10_000) }],
+    });
+    const converted = convertedTool();
+
+    const failure = await converted.execute({}).catch((error: Error) => error);
+
+    expect((failure as Error).message).toContain('[truncated]');
+    expect((failure as Error).message.length).toBeLessThan(3_000);
+  });
+
+  it('propagates a transport failure verbatim so the model can tell it from a rejection', async () => {
+    executeTool.mockRejectedValue(new Error('MCP server "private-server" is unreachable.'));
+    const converted = convertedTool();
+
+    await expect(converted.execute({})).rejects.toThrow(
+      'MCP server "private-server" is unreachable.'
+    );
   });
 
   it('forwards AI stream cancellation to the remote MCP manager', async () => {

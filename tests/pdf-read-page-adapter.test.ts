@@ -72,6 +72,15 @@ function fakePdfPort(result?: PdfParserResult): FakePort {
   return port;
 }
 
+/**
+ * The injected host handshake reports its outcome as a value because a throw inside
+ * chrome.scripting.executeScript is erased into `result: undefined`. Mirroring the real
+ * envelope here keeps the fixtures honest about what crosses that boundary.
+ */
+function hostReady(result: unknown) {
+  return { host: 'ready', result };
+}
+
 const htmlResult = {
   success: true as const,
   extractionMode: 'article' as const,
@@ -189,7 +198,7 @@ describe('read-page document router', () => {
     const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
       if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
       if (details.args) {
-        return [{ documentId: 'doc-1', frameId: 0, result: htmlResult }];
+        return [{ documentId: 'doc-1', frameId: 0, result: hostReady(htmlResult) }];
       }
       return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
     });
@@ -220,7 +229,7 @@ describe('read-page document router', () => {
       expect.objectContaining({
         target: { tabId: 7, documentIds: ['doc-1'] },
         world: 'ISOLATED',
-        args: ['__agentboardReadPageHtmlV1', 2, { maxLength: 4_000 }],
+        args: ['__agentboardReadPageHtmlV1', 2, { maxLength: 4_000 }, 512],
       })
     );
   });
@@ -244,10 +253,11 @@ describe('read-page document router', () => {
     }
   );
 
-  it('rejects a malformed result from the private HTML host', async () => {
+  it('reports a malformed result from the private HTML host as a typed failure', async () => {
     const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
       if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
-      if (details.args) return [{ documentId: 'doc-1', frameId: 0, result: { success: true } }];
+      if (details.args)
+        return [{ documentId: 'doc-1', frameId: 0, result: hostReady({ success: true }) }];
       return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
     });
     vi.stubGlobal('chrome', {
@@ -255,9 +265,117 @@ describe('read-page document router', () => {
       tabs: { connect: vi.fn() },
     });
 
-    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).rejects.toThrow(
-      'HTML reader returned an invalid result'
-    );
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toEqual({
+      success: false,
+      error: {
+        code: 'HTML_EXTRACTION_FAILED',
+        message: 'The page reader returned a malformed result.',
+      },
+    });
+  });
+
+  it('names the build mismatch when the injected reader is from a different build', async () => {
+    const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args)
+        return [
+          { documentId: 'doc-1', frameId: 0, result: { host: 'version-mismatch', found: 99 } },
+        ];
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+    vi.stubGlobal('chrome', {
+      scripting: { executeScript },
+      tabs: { connect: vi.fn() },
+    });
+
+    const result = (await createReadPageTool(7).execute?.({}, toolCallOptions())) as {
+      success: boolean;
+      error: { code: string; message: string };
+    };
+
+    expect(result.success).toBe(false);
+    // No dedicated code: skew needs an unpacked build rebuilt under a stale worker, so the
+    // condition is a developer's and does not earn a branch in the product's failure taxonomy.
+    expect(result.error.code).toBe('HTML_EXTRACTION_FAILED');
+    expect(result.error.message).toContain('reader version 99');
+    expect(result.error.message).toContain('chrome://extensions');
+    // The remedy is stated because only the extension knows it; retryability is left for
+    // the agent to derive from the version mismatch rather than asserted here.
+    expect(result.error.message).not.toMatch(/retry/i);
+  });
+
+  it('carries the extractor thrown error back across the injection boundary', async () => {
+    // executeScript erases a throw into `result: undefined`, so the injected function
+    // catches and returns it; without that the real fault is unrecoverable.
+    const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args)
+        return [
+          {
+            documentId: 'doc-1',
+            frameId: 0,
+            result: { host: 'threw', name: 'TypeError', message: 'doc.body is null' },
+          },
+        ];
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+    vi.stubGlobal('chrome', {
+      scripting: { executeScript },
+      tabs: { connect: vi.fn() },
+    });
+
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toEqual({
+      success: false,
+      error: {
+        code: 'HTML_EXTRACTION_FAILED',
+        message: 'The page reader failed while extracting: TypeError: doc.body is null',
+      },
+    });
+  });
+
+  it('bounds an oversized extractor error inside the injected function', async () => {
+    const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args) {
+        // The bound is applied page-side; assert the worker passes it through as an argument
+        // so an enormous message is never serialized across the boundary.
+        expect(details.args[3]).toBe(512);
+        return [{ documentId: 'doc-1', frameId: 0, result: { host: 'missing' } }];
+      }
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+    vi.stubGlobal('chrome', {
+      scripting: { executeScript },
+      tabs: { connect: vi.fn() },
+    });
+
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toMatchObject({
+      success: false,
+      error: { code: 'HTML_EXTRACTION_FAILED' },
+    });
+  });
+
+  it('reports an erased injection failure as retryable rather than as an invalid result', async () => {
+    // Chrome resolves executeScript with `result: undefined` when the injected function
+    // throws, so an absent envelope is the only evidence that the host itself failed.
+    const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args) return [{ documentId: 'doc-1', frameId: 0, result: undefined }];
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+    vi.stubGlobal('chrome', {
+      scripting: { executeScript },
+      tabs: { connect: vi.fn() },
+    });
+
+    await expect(createReadPageTool(7).execute?.({}, toolCallOptions())).resolves.toEqual({
+      success: false,
+      error: {
+        code: 'HTML_EXTRACTION_FAILED',
+        message:
+          'The page reader did not return a result; the document was most likely replaced while it was reading.',
+      },
+    });
   });
 
   it('rejects an HTML result that crosses its settlement deadline', async () => {
@@ -266,7 +384,7 @@ describe('read-page document router', () => {
       if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
       if (details.args) {
         now.mockReturnValue(10_000);
-        return [{ documentId: 'doc-1', frameId: 0, result: htmlResult }];
+        return [{ documentId: 'doc-1', frameId: 0, result: hostReady(htmlResult) }];
       }
       return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
     });
@@ -675,7 +793,7 @@ describe('read-page document router', () => {
     const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
       if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
       if (details.args) {
-        return [{ documentId: 'doc-1', frameId: 0, result: htmlResult }];
+        return [{ documentId: 'doc-1', frameId: 0, result: hostReady(htmlResult) }];
       }
       return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
     });
@@ -905,7 +1023,7 @@ describe('read-page viewport capture', () => {
   function htmlExecuteScript(result: unknown) {
     return vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
       if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
-      if (details.args) return [{ documentId: 'doc-1', frameId: 0, result }];
+      if (details.args) return [{ documentId: 'doc-1', frameId: 0, result: hostReady(result) }];
       return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
     });
   }
@@ -990,6 +1108,40 @@ describe('read-page viewport capture', () => {
     expect(tool.toModelOutput(output)).toMatchObject({ type: 'json' });
   });
 
+  it('carries the extraction reason into the viewport-only warning', async () => {
+    // The degraded read is reported as a success, so the warning is the only channel the
+    // reason has. A bare code here made a build mismatch indistinguishable from a page that
+    // is genuinely image-only, which is what a dedicated STALE_EXTENSION code used to paper
+    // over: with the reason present, the special case is unnecessary.
+    stubViewportEnvironment();
+    const executeScript = vi.fn(async (details: { args?: unknown[]; files?: string[] }) => {
+      if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
+      if (details.args)
+        return [
+          { documentId: 'doc-1', frameId: 0, result: { host: 'version-mismatch', found: 99 } },
+        ];
+      return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
+    });
+    stubChromeWithCapture(executeScript, {
+      active: true,
+      windowId: 5,
+      title: 'Stale Tab',
+      url: 'https://example.test/spa',
+    });
+
+    const output = (await createReadPageTool(7).execute?.({}, toolCallOptions())) as {
+      success: boolean;
+      extractionMode: string;
+      warnings: string[];
+    };
+
+    expect(output.success).toBe(true);
+    expect(output.extractionMode).toBe('viewport-only');
+    expect(output.warnings[0]).toContain('HTML_EXTRACTION_FAILED:');
+    expect(output.warnings[0]).toContain('reader version 99');
+    expect(output.warnings[0]).toContain('chrome://extensions');
+  });
+
   it('returns viewport-only success when extraction fails but the capture succeeded', async () => {
     stubViewportEnvironment();
     stubChromeWithCapture(htmlExecuteScript({ success: true }), {
@@ -1010,7 +1162,7 @@ describe('read-page viewport capture', () => {
       extractionMode: 'viewport-only',
       metadata: { title: 'Fallback Tab', url: 'https://example.test/spa' },
       markdownContent: '',
-      warnings: ['HTML_EXTRACTION_FAILED'],
+      warnings: ['HTML_EXTRACTION_FAILED: The page reader returned a malformed result.'],
       images: [viewportDescriptor],
     });
     expect(tool.toModelOutput(output)).toEqual({
@@ -1032,7 +1184,9 @@ describe('read-page viewport capture', () => {
       if (details.files) return [{ documentId: 'doc-1', frameId: 0 }];
       if (details.args) {
         now.mockReturnValue(10_000);
-        return [{ documentId: 'doc-1', frameId: 0, result: structuredClone(htmlResult) }];
+        return [
+          { documentId: 'doc-1', frameId: 0, result: hostReady(structuredClone(htmlResult)) },
+        ];
       }
       return [{ documentId: 'doc-1', frameId: 0, result: 'text/html' }];
     });

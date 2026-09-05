@@ -6,6 +6,30 @@ import {
   type HtmlReadResult,
 } from './html-protocol';
 
+/**
+ * `chrome.scripting.executeScript` resolves when the injected function throws and reports
+ * only `result: undefined` -- no error field, no rejection, and `InjectionResult` has no
+ * error member to populate. Anything the injected code wants the worker to know it must
+ * therefore *return*, which is why both the handshake and the extractor's own failure
+ * travel as values.
+ */
+type HostEnvelope =
+  | { host: 'missing' }
+  | { host: 'version-mismatch'; found: unknown }
+  | { host: 'threw'; name: string; message: string }
+  | { host: 'ready'; result: unknown };
+
+/**
+ * Bounded inside the injected function so an oversized message is never serialized across
+ * the boundary. A page cannot reach AgentBoard's ISOLATED world, but it does supply the
+ * DOM the extractor reads, so it can influence what an error says.
+ */
+const MAX_HOST_ERROR_CHARS = 512;
+
+function isHostEnvelope(value: unknown): value is HostEnvelope {
+  return isRecord(value) && typeof value.host === 'string';
+}
+
 function exactTopDocumentResult<T>(
   results: chrome.scripting.InjectionResult<T>[],
   documentId: string
@@ -102,7 +126,12 @@ export async function readHtmlDocument(
     target: { tabId, documentIds: [documentId] },
     world: 'ISOLATED',
     injectImmediately: true,
-    func: async (hostKey: string, hostVersion: number, args: { maxLength?: number }) => {
+    func: async (
+      hostKey: string,
+      hostVersion: number,
+      args: { maxLength?: number },
+      maxErrorChars: number
+    ) => {
       const host = (
         globalThis as typeof globalThis & {
           [key: string]: unknown;
@@ -110,15 +139,57 @@ export async function readHtmlDocument(
       )[hostKey] as
         | { version?: unknown; execute?: (value: { maxLength?: number }) => Promise<unknown> }
         | undefined;
-      if (host?.version !== hostVersion || typeof host.execute !== 'function') {
-        throw new Error('HTML reader host is unavailable');
+      if (typeof host?.execute !== 'function') return { host: 'missing' };
+      if (host.version !== hostVersion) return { host: 'version-mismatch', found: host.version };
+      try {
+        return { host: 'ready', result: await host.execute(args) };
+      } catch (error) {
+        // The only way an extractor failure survives the boundary. Without this catch a
+        // Readability crash, a cross-origin DOM access, or any other real fault arrives as
+        // an indistinguishable `undefined` and gets reported as "no result".
+        const raw = error instanceof Error ? error.message : String(error);
+        return {
+          host: 'threw',
+          name: error instanceof Error ? error.name : 'Error',
+          message: raw.length > maxErrorChars ? `${raw.slice(0, maxErrorChars)}[truncated]` : raw,
+        };
       }
-      return host.execute(args);
     },
-    args: [HTML_READER_HOST_KEY, HTML_READER_HOST_VERSION, input],
+    args: [HTML_READER_HOST_KEY, HTML_READER_HOST_VERSION, input, MAX_HOST_ERROR_CHARS],
   });
-  const result = exactTopDocumentResult(executed, documentId).result;
+  const envelope = exactTopDocumentResult(executed, documentId).result;
   enforceSettlementBoundary(abortSignal, deadline);
-  if (!isHtmlReadResult(result)) throw new Error('HTML reader returned an invalid result');
-  return result;
+
+  // Reaching here means the injected function failed before its own catch could run, which
+  // in practice means the document was torn down mid-execution.
+  if (!isHostEnvelope(envelope)) {
+    throw new Error(
+      'The page reader did not return a result; the document was most likely replaced while it was reading.'
+    );
+  }
+  if (envelope.host === 'threw') {
+    throw new Error(
+      `The page reader failed while extracting: ${envelope.name}: ${envelope.message}`
+    );
+  }
+  if (envelope.host === 'missing') {
+    throw new Error(
+      'The page reader could not be installed in this document. Reading a different page may work; a restricted or unloaded document will not.'
+    );
+  }
+  if (envelope.host === 'version-mismatch') {
+    // Unreachable in a published build: the host file is reinjected before every call and
+    // replaces itself on any version difference, so the page always ends up running whatever
+    // is on disk, and a store update swaps disk and worker together. Skew needs the two to
+    // diverge, which in practice means an unpacked build rebuilt under a worker Chrome has
+    // not restarted. That is a developer's situation, and the message says so rather than
+    // handing a user an instruction they cannot act on.
+    throw new Error(
+      `The page reader is from a different build than the extension: this document has reader version ${String(envelope.found)} and the extension expects ${HTML_READER_HOST_VERSION}. Reload the unpacked extension at chrome://extensions.`
+    );
+  }
+  if (!isHtmlReadResult(envelope.result)) {
+    throw new Error('The page reader returned a malformed result.');
+  }
+  return envelope.result;
 }

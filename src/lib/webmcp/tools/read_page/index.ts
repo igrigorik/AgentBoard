@@ -119,16 +119,27 @@ async function readHtmlWithViewport(
 
   const error = extraction.reason;
   if (outcome?.capture) {
+    // A viewport-only result is a success as far as the model is concerned, so the reason
+    // extraction failed has nowhere else to go. Emitting the bare code discarded it and left
+    // a degraded read indistinguishable from a page that is genuinely image-only. The
+    // `CODE: detail` shape already exists here for page-image warnings.
+    //
+    // TIMEOUT keeps its bare code because the code already is the whole explanation.
     const warning =
       error instanceof DOMException && error.name === 'TimeoutError'
         ? 'HTML_EXTRACTION_TIMEOUT'
-        : 'HTML_EXTRACTION_FAILED';
+        : `HTML_EXTRACTION_FAILED: ${error instanceof Error ? error.message : 'unknown reason'}`;
     return publishHtmlResult(await viewportOnlyResult(route.tabId, warning), outcome.capture);
   }
   if (error instanceof DOMException && error.name === 'TimeoutError') {
     return failure('TIMEOUT', 'HTML extraction exceeded its time limit.');
   }
-  throw error;
+  // Every other read_page branch returns a typed failure; rethrowing here was the one hole
+  // that reached the model as an untyped exception with no code to reason about.
+  return failure(
+    'HTML_EXTRACTION_FAILED',
+    error instanceof Error ? error.message : 'HTML extraction failed for an unknown reason.'
+  );
 }
 
 function normalizeOptions(input: ReadPageInput): PdfReadOptions {

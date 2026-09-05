@@ -102,16 +102,30 @@ function errorMessage(value: unknown): string | undefined {
     : undefined;
 }
 
+/** Bound any diagnostic before it reaches the model or the UI; tool errors may quote inputs. */
+function boundedFeedback(feedback: string): string {
+  if (feedback.length <= MAX_TOOL_VALIDATION_FEEDBACK_CHARS) return feedback;
+  const suffix = '\n[feedback truncated]';
+  return `${feedback.slice(0, MAX_TOOL_VALIDATION_FEEDBACK_CHARS - suffix.length)}${suffix}`;
+}
+
 function invalidToolInputFeedback(error: InvalidToolInputError): string {
   const sdkCause = (error as { cause?: unknown }).cause;
   const validationCause =
     sdkCause && typeof sdkCause === 'object' ? (sdkCause as { cause?: unknown }).cause : undefined;
-  const feedback =
-    errorMessage(validationCause) ?? errorMessage(sdkCause) ?? 'Invalid tool arguments';
+  return boundedFeedback(
+    errorMessage(validationCause) ?? errorMessage(sdkCause) ?? 'Invalid tool arguments'
+  );
+}
 
-  if (feedback.length <= MAX_TOOL_VALIDATION_FEEDBACK_CHARS) return feedback;
-  const suffix = '\n[validation feedback truncated]';
-  return `${feedback.slice(0, MAX_TOOL_VALIDATION_FEEDBACK_CHARS - suffix.length)}${suffix}`;
+/**
+ * A tool failure is a result, not a log line. The model already receives the thrown
+ * message verbatim through the SDK's `error-text` output, so replacing it here with a
+ * constant only blinded the UI — and left the user unable to distinguish a transient
+ * failure from one that will never succeed without their intervention.
+ */
+function toolErrorFeedback(error: unknown): string {
+  return boundedFeedback(errorMessage(error) ?? 'Tool execution failed');
 }
 
 /** Provider errors may contain prompts, generated text, headers, or proxy internals. */
@@ -670,7 +684,7 @@ export class AIClient {
                 id: part.toolCallId,
                 output: null,
                 status: 'error',
-                error: validationFeedback ?? 'Tool execution failed',
+                error: validationFeedback ?? toolErrorFeedback(part.error),
               });
             } else if (part.type === 'error') {
               throw part.error;
