@@ -295,6 +295,9 @@ describe('sidebar stream lifecycle ownership', () => {
     expect(continuationTurn?.content).toContain('https://example.com/after-navigation');
     expect(continuationTurn?.content).toContain('<title>Page after navigation</title>');
     expect(continuationTurn?.content).toContain('not authored by the user');
+    // The continuation now replays the call record so the model knows what already ran and
+    // cannot fabricate a summary of it, while the page's own words stay out of history.
+    expect(JSON.stringify(continuationPayload.messages)).toContain('hostile_page_tool');
     expect(JSON.stringify(continuationPayload.messages)).not.toContain('SECRET_PAGE_OUTPUT');
 
     ports[2].emitDisconnect();

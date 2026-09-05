@@ -798,14 +798,14 @@ chrome.runtime.onConnect.addListener((port) => {
           if (!isCurrentStream()) return;
           const { agentId, tabId, messages, workspaceContext } = msg;
 
-          // Convert messages to CoreMessage format
-          const coreMessages: CoreMessage[] = messages.map(
-            (m) =>
-              ({
-                role: m.role,
-                content: m.content,
-              }) as CoreMessage
-          );
+          // Pass the port messages through: the previous re-map to { role, content }
+          // silently discarded tool calls and their results on the way to the model.
+          //
+          // The cast covers one pre-existing gap, not the tool parts. MessagePart is a
+          // loose { type: 'text' | 'image'; text?; image? } rather than a discriminated
+          // union, so it never satisfied the SDK's TextPart | ImagePart. Tightening that
+          // is a separate change with its own blast radius across the attachment path.
+          const coreMessages = messages as CoreMessage[];
 
           log.debug('[Background] Calling streamChat', {
             messageCount: coreMessages.length,

@@ -299,15 +299,55 @@ export interface ToolExecutionResult {
 
 // Port message types (for chrome.runtime.connect communication)
 // These are different from runtime messages and have different structures
+/**
+ * Model-facing history parts. Structurally a subset of the AI SDK's ModelMessage content,
+ * declared here so the sidebar and the port contract do not depend on the SDK; the
+ * background's assignment to CoreMessage[] is what keeps the two in step.
+ */
+export type JsonValue =
+  | null
+  | string
+  | number
+  | boolean
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export interface PortToolCallPart {
+  type: 'tool-call';
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+}
+
+export interface PortToolResultPart {
+  type: 'tool-result';
+  toolCallId: string;
+  toolName: string;
+  output:
+    | { type: 'text'; value: string }
+    | { type: 'error-text'; value: string }
+    | { type: 'json'; value: JsonValue };
+}
+
+/**
+ * A tool message must directly answer the tool calls on the assistant message before it.
+ * Providers reject an unanswered tool call outright, so the projection emits the two
+ * together or not at all.
+ */
+export type PortChatMessage =
+  | { role: 'user'; content: MessageContent }
+  | {
+      role: 'assistant';
+      content: MessageContent | Array<{ type: 'text'; text: string } | PortToolCallPart>;
+    }
+  | { role: 'tool'; content: PortToolResultPart[] };
+
 interface PortStreamChatMessage {
   type: 'STREAM_CHAT';
   agentId: string;
   tabId?: number; // The tab this sidebar is associated with (for tool scoping)
   workspaceContext?: ConversationWorkspaceContext;
-  messages: Array<{
-    role: 'user' | 'assistant';
-    content: MessageContent;
-  }>;
+  messages: PortChatMessage[];
 }
 
 // Union type for all port messages

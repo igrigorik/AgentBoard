@@ -28,6 +28,7 @@ import { TextBox } from './TextBox';
 import { createCopyMarkdownAction } from './CopyMarkdownAction';
 import { StreamingMarkdownRenderer } from './StreamingMarkdownRenderer';
 import { AgentSwitcher } from './AgentSwitcher';
+import { toModelMessages } from './model-history';
 import { CommandRegistry, CommandProcessor, createBuiltinCommands } from '../lib/commands';
 
 // Streaming session interface to encapsulate all streaming state
@@ -1137,45 +1138,10 @@ async function streamAIResponse(responseTurn: ResponseTurn) {
     });
 
     // Send messages to the model without rewriting historical turns onto the current page.
-    const outboundHistory = messageHistory.filter((message) => {
-      if (message.role !== 'user' && message.role !== 'assistant') return false;
-      if (typeof message.content === 'string') return message.content.trim() !== '';
-      return message.content.length > 0;
-    });
-    let latestUserIndex = -1;
-    for (let index = outboundHistory.length - 1; index >= 0; index--) {
-      if (outboundHistory[index].role === 'user') {
-        latestUserIndex = index;
-        break;
-      }
-    }
-
-    const messagesToSend = outboundHistory.map((message, index) => {
-      if (message.role !== 'user' || !message.metadata?.pageContext) {
-        return { role: message.role, content: message.content };
-      }
-
-      // Tool hints describe capabilities available now, not historical capability snapshots.
-      const currentHints =
-        index === latestUserIndex && message.metadata.pageContext.url === pageContext?.url
-          ? siteToolHints
-          : undefined;
-      const contextPrefix = buildPageContextXml(message.metadata.pageContext, currentHints);
-      if (typeof message.content === 'string') {
-        return { role: message.role, content: contextPrefix + message.content };
-      }
-
-      const parts = [...message.content];
-      const firstTextIndex = parts.findIndex((part) => part.type === 'text');
-      if (firstTextIndex >= 0 && parts[firstTextIndex].text) {
-        parts[firstTextIndex] = {
-          ...parts[firstTextIndex],
-          text: contextPrefix + parts[firstTextIndex].text,
-        };
-      } else {
-        parts.unshift({ type: 'text', text: contextPrefix });
-      }
-      return { role: message.role, content: parts };
+    const messagesToSend = toModelMessages(messageHistory, {
+      buildPageContextXml,
+      ...(siteToolHints && { siteToolHints }),
+      ...(pageContext?.url && { currentPageUrl: pageContext.url }),
     });
 
     log.debug('[Sidebar] Sending messages to stream:', {
