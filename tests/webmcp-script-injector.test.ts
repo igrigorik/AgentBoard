@@ -721,6 +721,83 @@ describe('WebMCP Script Injector', () => {
       expect(wrappedCode).toContain('window.__webmcpInjected[scriptId]');
       expect(wrappedCode).toContain('window.__webmcpInjected[scriptId] = true');
     });
+
+    /**
+     * Origins whose script-src omits blob: refuse the injected element outright. Adopting the
+     * document's own nonce is what keeps user scripts reaching parity with built-in tools, which
+     * bypass page CSP via files:[].
+     */
+    describe('page CSP', () => {
+      const stageInjection = async (html: string) => {
+        await injectUserScripts({ tabId: 123, url: 'https://example.com/page', frameId: 0 });
+        const injectionFunc = mockExecuteScript.mock.calls[0][0].func;
+        const dom = new JSDOM(html, {
+          url: 'https://example.com/page',
+          runScripts: 'dangerously',
+          virtualConsole: new VirtualConsole(),
+        });
+        const queued: HTMLScriptElement[] = [];
+        Object.defineProperty(dom.window.URL, 'createObjectURL', { value: () => 'blob:staged' });
+        Object.defineProperty(dom.window.URL, 'revokeObjectURL', { value: vi.fn() });
+        vi.spyOn(dom.window.document.head, 'appendChild').mockImplementation((node: Node) => {
+          queued.push(node as HTMLScriptElement);
+          return node;
+        });
+        const injectInPage = dom.window.eval(`(${injectionFunc.toString()})`) as (
+          code: string,
+          generation: string,
+          scriptId: string,
+          settlementTimeoutMs: number
+        ) => Promise<void>;
+        return { dom, queued, injectInPage };
+      };
+
+      it('adopts the document nonce so a nonce-based CSP admits the script', async () => {
+        const { dom, queued, injectInPage } = await stageInjection(
+          '<!doctype html><html><head><script nonce="n0nce-VALUE"></script></head><body></body></html>'
+        );
+        const load = injectInPage('window.__ok = 1;', 'generation', 'csp:nonce', 5_000);
+        expect(queued).toHaveLength(1);
+        expect(queued[0].getAttribute('nonce')).toBe('n0nce-VALUE');
+        queued[0].dispatchEvent(new dom.window.Event('load'));
+        await load;
+        dom.window.close();
+      });
+
+      it('sets no nonce when the document carries none', async () => {
+        const { dom, queued, injectInPage } = await stageInjection(
+          '<!doctype html><html><head></head><body></body></html>'
+        );
+        const load = injectInPage('window.__ok = 1;', 'generation', 'csp:none', 5_000);
+        expect(queued[0].hasAttribute('nonce')).toBe(false);
+        queued[0].dispatchEvent(new dom.window.Event('load'));
+        await load;
+        dom.window.close();
+      });
+
+      it('names CSP as the cause when the policy refused the blob', async () => {
+        const { dom, queued, injectInPage } = await stageInjection(
+          '<!doctype html><html><head></head><body></body></html>'
+        );
+        const load = injectInPage('window.__ok = 1;', 'generation', 'csp:refused', 5_000);
+        const violation = new dom.window.Event('securitypolicyviolation');
+        Object.defineProperty(violation, 'blockedURI', { value: 'blob' });
+        dom.window.document.dispatchEvent(violation);
+        queued[0].dispatchEvent(new dom.window.Event('error'));
+        await expect(load).rejects.toThrow('Content Security Policy');
+        dom.window.close();
+      });
+
+      it('keeps the generic message when the failure was not a policy refusal', async () => {
+        const { dom, queued, injectInPage } = await stageInjection(
+          '<!doctype html><html><head></head><body></body></html>'
+        );
+        const load = injectInPage('window.__ok = 1;', 'generation', 'csp:other', 5_000);
+        queued[0].dispatchEvent(new dom.window.Event('error'));
+        await expect(load).rejects.toThrow('Failed to load WebMCP user script from blob URL');
+        dom.window.close();
+      });
+    });
   });
 
   describe('error handling', () => {

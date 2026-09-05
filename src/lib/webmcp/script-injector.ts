@@ -271,7 +271,17 @@ async function injectSingleScript(
       new Promise<void>((resolve, reject) => {
         let blobUrl: string | undefined;
         let script: HTMLScriptElement | undefined;
+        // onerror alone cannot distinguish a CSP refusal from any other load failure, and the two
+        // need different remedies. Observing the violation gives the reason first-hand instead of
+        // guessing at it in the message.
+        let cspRefused = false;
+        const onViolation = (event: SecurityPolicyViolationEvent) => {
+          if (event.blockedURI === 'blob' || event.blockedURI.startsWith('blob:'))
+            cspRefused = true;
+        };
+        document.addEventListener('securitypolicyviolation', onViolation);
         const cleanup = () => {
+          document.removeEventListener('securitypolicyviolation', onViolation);
           const urlToRevoke = blobUrl;
           blobUrl = undefined;
           try {
@@ -303,6 +313,21 @@ async function injectSingleScript(
 
           // Load script from blob: URL (external source, not inline)
           script = document.createElement('script');
+
+          // Adopt the document's CSP nonce when it has one. Manifest content scripts and built-in
+          // tools (injected via files:[]) are already exempt from page CSP; user scripts are the
+          // only injection path still subject to it, purely because dynamic code cannot use
+          // files:[]. Without this, any origin whose script-src omits blob: silently drops every
+          // user script. A nonce short-circuits source matching entirely, so the same blob URL the
+          // policy refused is admitted. Chrome blanks the nonce content attribute after parsing to
+          // block CSS-selector exfiltration, so read the IDL property first; the attribute is
+          // blanked rather than removed, which is why the [nonce] selector still matches.
+          const nonceCarrier = document.querySelector<HTMLScriptElement>('script[nonce]');
+          const pageNonce = nonceCarrier
+            ? nonceCarrier.nonce || nonceCarrier.getAttribute('nonce')
+            : '';
+          // Must precede insertion: CSP evaluates the element when it enters the document.
+          if (pageNonce) script.setAttribute('nonce', pageNonce);
 
           // Try to set src - may need Trusted Types policy on strict sites
           try {
@@ -348,8 +373,15 @@ async function injectSingleScript(
             );
           };
           script.onerror = () => {
+            const blockedByPolicy = cspRefused;
             cleanup();
-            reject(new Error('Failed to load WebMCP user script from blob URL'));
+            reject(
+              new Error(
+                blockedByPolicy
+                  ? "This page's Content Security Policy blocked the script (script-src does not allow blob:, and the page has no nonce to adopt)."
+                  : 'Failed to load WebMCP user script from blob URL'
+              )
+            );
           };
 
           (document.head || document.documentElement).appendChild(script);
