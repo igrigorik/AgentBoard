@@ -732,7 +732,17 @@ async function main() {
         { expression, awaitPromise: true, returnByValue: true },
         fixtureSessionId
       );
-      if (result.exceptionDetails) throw new Error('WebMCP fixture evaluation failed');
+      if (result.exceptionDetails) {
+        // Report the page-side reason. Without it every fixture fault renders as
+        // one opaque string and has to be re-derived by hand-patching this
+        // harness. CDP line numbers are relative to the evaluated expression,
+        // so quote them as such rather than as file lines.
+        const { text, lineNumber, exception } = result.exceptionDetails;
+        const reason = exception?.description ?? exception?.value ?? text;
+        throw new Error(
+          `WebMCP fixture evaluation failed at expression line ${lineNumber}: ${reason}`
+        );
+      }
       return result.result?.value;
     };
 
