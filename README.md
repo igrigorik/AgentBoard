@@ -112,6 +112,8 @@ Bring custom external tools to give your agent superpowers. AgentBoard supports 
 
 The agent can call any remote MCP server, as long as it supports HTTP streaming. Bring your MCP config and agent will do the rest to discover and expose available tools. Run `/tools` in chat to audit available capabilities.
 
+The optional `parallel-search` entry below uses Parallel Search MCP for web search and fetching requested URLs. Its hosted endpoint requires no account or API key. Add it only if you explicitly opt in: when you invoke its tools, user-provided search objectives, search queries, and requested URLs are sent to Parallel.
+
 ```json
 {
   "mcpServers": {
@@ -123,6 +125,10 @@ The agent can call any remote MCP server, as long as it supports HTTP streaming.
       "url": "https://internal.example.com/mcp",
       "transport": "http",
       "authToken": "your-bearer-token"
+    },
+    "parallel-search": {
+      "url": "https://search.parallel.ai/mcp",
+      "transport": "http"
     }
   }
 }
