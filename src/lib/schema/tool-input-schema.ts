@@ -1,22 +1,7 @@
-import {
-  Validator,
-  type OutputUnit,
-  type Schema as CfWorkerSchema,
-  type SchemaDraft,
-} from '@cfworker/json-schema';
 import { jsonSchema, type Schema } from 'ai';
 import type { JSONSchema7 } from 'json-schema';
 
 export type ToolArguments = Record<string, unknown>;
-
-type ToolInputValidation =
-  | { success: true; value: ToolArguments }
-  | { success: false; error: Error };
-
-export interface PreparedToolInputSchema {
-  inputSchema: Schema<ToolArguments>;
-  validateInput: (value: unknown) => ToolInputValidation;
-}
 
 const JSON_SCHEMA_TYPES = new Set([
   'array',
@@ -51,10 +36,13 @@ const STRING_KEYWORDS = [
   '$anchor',
   '$comment',
   '$id',
+  '$ref',
   '$schema',
   'contentEncoding',
   'contentMediaType',
   'description',
+  'format',
+  'pattern',
   'title',
 ] as const;
 const BOOLEAN_KEYWORDS = ['deprecated', 'readOnly', 'uniqueItems', 'writeOnly'] as const;
@@ -63,45 +51,7 @@ const MAX_SCHEMA_BYTES = 256 * 1024;
 const MAX_SCHEMA_DEPTH = 48;
 const MAX_SCHEMA_NODES = 4_096;
 const MAX_SCHEMA_STRING_CHARS = 256 * 1024;
-const MAX_INPUT_DEPTH = 64;
-const MAX_INPUT_NODES = 10_000;
-const MAX_INPUT_STRING_CHARS = 256 * 1024;
 const MAX_SCHEMA_KEY_CHARS = 256;
-const MAX_INPUT_KEY_CHARS = 1_024;
-const MAX_ERROR_VALUE_BYTES = 512;
-const MAX_COMPOSITION_BRANCHES = 16;
-const MAX_VALIDATION_WORK = 4_096;
-/** One adjustable bound controls additional failure context sent to both the model and sidebar. */
-export const MAX_TOOL_VALIDATION_FEEDBACK_CHARS = 4 * 1_024;
-
-const TOOL_ARGUMENTS_SCHEMA_MISMATCH = 'Tool arguments do not match the declared schema';
-const VALIDATION_FEEDBACK_TRUNCATED = '[validation feedback truncated]';
-
-function toolValidationError(errors: readonly OutputUnit[]): Error {
-  if (errors.length === 0) return new Error(TOOL_ARGUMENTS_SCHEMA_MISMATCH);
-
-  const prefix = `${TOOL_ARGUMENTS_SCHEMA_MISMATCH}:`;
-  const lines = errors.map(
-    (error) => `\n- ${error.instanceLocation} [${error.keyword}]: ${error.error}`
-  );
-  const completeMessage = `${prefix}${lines.join('')}`;
-  if (completeMessage.length <= MAX_TOOL_VALIDATION_FEEDBACK_CHARS) {
-    return new Error(completeMessage);
-  }
-
-  const truncatedSuffix = `\n${VALIDATION_FEEDBACK_TRUNCATED}`;
-  let truncatedMessage = prefix;
-  for (const line of lines) {
-    if (
-      truncatedMessage.length + line.length + truncatedSuffix.length >
-      MAX_TOOL_VALIDATION_FEEDBACK_CHARS
-    ) {
-      break;
-    }
-    truncatedMessage += line;
-  }
-  return new Error(`${truncatedMessage}${truncatedSuffix}`);
-}
 
 export class InvalidToolInputSchemaError extends Error {
   constructor() {
@@ -114,27 +64,20 @@ function invalidSchema(): never {
   throw new InvalidToolInputSchemaError();
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
-interface JSONComplexityLimits {
-  maxDepth: number;
-  maxNodes: number;
-  maxStringChars: number;
-  maxKeyChars: number;
-}
-
-function assertBoundedJSON(value: unknown, limits: JSONComplexityLimits): number {
+function assertBoundedJSON(value: unknown): void {
   const active = new Set<object>();
   let nodes = 0;
   let stringChars = 0;
 
   const visit = (current: unknown, depth: number): void => {
     nodes += 1;
-    if (nodes > limits.maxNodes || depth > limits.maxDepth) invalidSchema();
+    if (nodes > MAX_SCHEMA_NODES || depth > MAX_SCHEMA_DEPTH) invalidSchema();
 
     if (current === null || typeof current === 'boolean') return;
     if (typeof current === 'number') {
@@ -143,7 +86,7 @@ function assertBoundedJSON(value: unknown, limits: JSONComplexityLimits): number
     }
     if (typeof current === 'string') {
       stringChars += current.length;
-      if (stringChars > limits.maxStringChars) invalidSchema();
+      if (stringChars > MAX_SCHEMA_STRING_CHARS) invalidSchema();
       return;
     }
     if (typeof current !== 'object') invalidSchema();
@@ -156,9 +99,9 @@ function assertBoundedJSON(value: unknown, limits: JSONComplexityLimits): number
     } else {
       if (!isPlainRecord(current)) invalidSchema();
       for (const [key, nested] of Object.entries(current)) {
-        if (key.length > limits.maxKeyChars) invalidSchema();
+        if (key.length > MAX_SCHEMA_KEY_CHARS) invalidSchema();
         stringChars += key.length;
-        if (stringChars > limits.maxStringChars) invalidSchema();
+        if (stringChars > MAX_SCHEMA_STRING_CHARS) invalidSchema();
         visit(nested, depth + 1);
       }
     }
@@ -167,7 +110,6 @@ function assertBoundedJSON(value: unknown, limits: JSONComplexityLimits): number
   };
 
   visit(value, 0);
-  return nodes;
 }
 
 function assertStringArray(value: unknown): asserts value is string[] {
@@ -180,86 +122,15 @@ function assertStringArray(value: unknown): asserts value is string[] {
   if (new Set(value).size !== value.length) invalidSchema();
 }
 
-function hasAnyKeyword(schema: Record<string, unknown>, keywords: readonly string[]): boolean {
-  return keywords.some((keyword) => keyword in schema);
-}
-
-function assertErrorValueBounded(value: unknown): void {
-  try {
-    const serialized = JSON.stringify(value);
-    if (new TextEncoder().encode(serialized).byteLength > MAX_ERROR_VALUE_BYTES) invalidSchema();
-  } catch (error) {
-    if (error instanceof InvalidToolInputSchemaError) throw error;
-    return invalidSchema();
-  }
-}
-
-function assertSchemaNode(value: unknown, depth: number, draft: SchemaDraft): void {
+/**
+ * Structural sanity only: every keyword whose value has the wrong JSON type is rejected because
+ * OpenAI and Anthropic refuse the whole request over one malformed `input_schema`, taking every
+ * sibling tool down with it. Which constraints a keyword expresses is not judged here.
+ */
+function assertSchemaNode(value: unknown): void {
   // Boolean subschemas are valid JSON Schema but current function-call adapters serialize them
   // inconsistently. additionalProperties-style booleans are handled separately below.
   if (!isPlainRecord(value)) invalidSchema();
-
-  // These otherwise-valid features execute untrusted regexes, recurse, or invoke quadratic work in
-  // the CSP-safe interpreter. Keep the accepted function-tool profile deliberately smaller.
-  if (
-    hasAnyKeyword(value, [
-      'pattern',
-      'patternProperties',
-      'format',
-      'propertyNames',
-      '$ref',
-      '$recursiveAnchor',
-      '$recursiveRef',
-      '$dynamicAnchor',
-      '$dynamicRef',
-      '$vocabulary',
-    ]) ||
-    value.uniqueItems === true ||
-    (depth > 0 && '$schema' in value)
-  ) {
-    invalidSchema();
-  }
-
-  if (
-    (draft === '4' &&
-      hasAnyKeyword(value, [
-        '$anchor',
-        '$defs',
-        'const',
-        'contains',
-        'contentEncoding',
-        'contentMediaType',
-        'dependentRequired',
-        'dependentSchemas',
-        'if',
-        'then',
-        'else',
-        'maxContains',
-        'minContains',
-        'prefixItems',
-        'propertyNames',
-        'unevaluatedItems',
-        'unevaluatedProperties',
-      ])) ||
-    (draft === '7' &&
-      hasAnyKeyword(value, [
-        '$anchor',
-        '$defs',
-        'dependentRequired',
-        'dependentSchemas',
-        'maxContains',
-        'minContains',
-        'prefixItems',
-        'unevaluatedItems',
-        'unevaluatedProperties',
-      ])) ||
-    (draft === '2019-09' && 'prefixItems' in value) ||
-    (draft === '2020-12' && hasAnyKeyword(value, ['additionalItems', 'dependencies']))
-  ) {
-    invalidSchema();
-  }
-
-  if ('const' in value) assertErrorValueBounded(value.const);
 
   if ('type' in value) {
     const types = Array.isArray(value.type) ? value.type : [value.type];
@@ -276,37 +147,29 @@ function assertSchemaNode(value: unknown, depth: number, draft: SchemaDraft): vo
     const schemas = value[keyword];
     if (schemas === undefined) continue;
     if (!isPlainRecord(schemas)) invalidSchema();
-    for (const schema of Object.values(schemas)) assertSchemaNode(schema, depth + 1, draft);
+    for (const schema of Object.values(schemas)) assertSchemaNode(schema);
   }
 
   for (const keyword of SCHEMA_ARRAY_KEYWORDS) {
     const schemas = value[keyword];
     if (schemas === undefined) continue;
-    if (
-      !Array.isArray(schemas) ||
-      schemas.length === 0 ||
-      schemas.length > MAX_COMPOSITION_BRANCHES
-    ) {
-      invalidSchema();
-    }
-    for (const schema of schemas) assertSchemaNode(schema, depth + 1, draft);
+    if (!Array.isArray(schemas) || schemas.length === 0) invalidSchema();
+    for (const schema of schemas) assertSchemaNode(schema);
   }
 
   for (const keyword of SCHEMA_VALUE_KEYWORDS) {
     const schema = value[keyword];
-    if (schema !== undefined) assertSchemaNode(schema, depth + 1, draft);
+    if (schema !== undefined) assertSchemaNode(schema);
   }
 
   for (const keyword of BOOLEAN_OR_SCHEMA_KEYWORDS) {
     const schema = value[keyword];
-    if (schema !== undefined && typeof schema !== 'boolean') {
-      assertSchemaNode(schema, depth + 1, draft);
-    }
+    if (schema !== undefined && typeof schema !== 'boolean') assertSchemaNode(schema);
   }
 
   if (value.items !== undefined) {
     if (Array.isArray(value.items)) invalidSchema();
-    assertSchemaNode(value.items, depth + 1, draft);
+    assertSchemaNode(value.items);
   }
 
   if (value.required !== undefined) assertStringArray(value.required);
@@ -320,13 +183,12 @@ function assertSchemaNode(value: unknown, depth: number, draft: SchemaDraft): vo
     if (!isPlainRecord(value.dependencies)) invalidSchema();
     for (const dependency of Object.values(value.dependencies)) {
       if (Array.isArray(dependency)) assertStringArray(dependency);
-      else assertSchemaNode(dependency, depth + 1, draft);
+      else assertSchemaNode(dependency);
     }
   }
 
-  if (value.enum !== undefined) {
-    if (!Array.isArray(value.enum) || value.enum.length === 0) invalidSchema();
-    assertErrorValueBounded(value.enum);
+  if (value.enum !== undefined && (!Array.isArray(value.enum) || value.enum.length === 0)) {
+    invalidSchema();
   }
 
   for (const keyword of NONNEGATIVE_INTEGER_KEYWORDS) {
@@ -351,14 +213,11 @@ function assertSchemaNode(value: unknown, depth: number, draft: SchemaDraft): vo
     if (value[keyword] !== undefined && typeof value[keyword] !== 'boolean') invalidSchema();
   }
 
+  // Draft 4 spells these as booleans qualifying minimum/maximum; later drafts use numbers.
   for (const keyword of ['exclusiveMaximum', 'exclusiveMinimum'] as const) {
     const limit = value[keyword];
-    if (limit === undefined) continue;
-    if (draft === '4') {
-      if (typeof limit !== 'boolean') invalidSchema();
-    } else if (typeof limit !== 'number' || !Number.isFinite(limit)) {
-      invalidSchema();
-    }
+    if (limit === undefined || typeof limit === 'boolean') continue;
+    if (typeof limit !== 'number' || !Number.isFinite(limit)) invalidSchema();
   }
 
   if (
@@ -371,114 +230,43 @@ function assertSchemaNode(value: unknown, depth: number, draft: SchemaDraft): vo
   }
 }
 
-function schemaDraft(schema: Record<string, unknown>): SchemaDraft {
-  if (schema.$schema === undefined) return '2020-12';
-  if (typeof schema.$schema !== 'string') invalidSchema();
-
-  const uri = schema.$schema.endsWith('#') ? schema.$schema.slice(0, -1) : schema.$schema;
-  switch (uri) {
-    case 'http://json-schema.org/draft-04/schema':
-    case 'https://json-schema.org/draft-04/schema':
-      return '4';
-    case 'http://json-schema.org/draft-07/schema':
-    case 'https://json-schema.org/draft-07/schema':
-      return '7';
-    case 'http://json-schema.org/draft/2019-09/schema':
-    case 'https://json-schema.org/draft/2019-09/schema':
-      return '2019-09';
-    case 'http://json-schema.org/draft/2020-12/schema':
-    case 'https://json-schema.org/draft/2020-12/schema':
-      return '2020-12';
-    default:
-      return invalidSchema();
-  }
-}
-
 function deepFreezeJSON(value: unknown): void {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
   for (const nested of Object.values(value)) deepFreezeJSON(nested);
   Object.freeze(value);
 }
 
-function cloneWithoutPrototypes(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(cloneWithoutPrototypes);
-  if (!isPlainRecord(value)) return value;
-
-  const clone = Object.create(null) as Record<string, unknown>;
-  for (const [key, nested] of Object.entries(value)) clone[key] = cloneWithoutPrototypes(nested);
-  return clone;
-}
-
 /**
- * Preserve a site's or MCP server's JSON Schema for provider serialization while compiling an
- * independent CSP-safe snapshot for runtime validation. The accepted profile deliberately excludes
- * schema features that can execute untrusted regular expressions or recurse without a work bound.
+ * Publish a site's or MCP server's JSON Schema to providers verbatim.
+ *
+ * AgentBoard does not validate model arguments against third-party schemas. The tool owns its
+ * constraints and is the only party that can judge them: it rejects what the model gets wrong with
+ * a message written by whoever wrote the constraint, and MCP-idiomatic tools return that rejection
+ * as an `isError` result the model reads directly. Interpreting untrusted schemas here instead
+ * would make the extension hostage to their vocabulary (a `pattern` on one property once hid an
+ * entire tool) and to their regexes. The only checks that remain protect the shared provider
+ * request: an object root, bounded size, and keyword values of the JSON type providers accept.
  */
-export function prepareToolInputSchema(source: unknown): PreparedToolInputSchema {
+export function prepareToolInputSchema(source: unknown): Schema<ToolArguments> {
   const sourceSchema =
     source === undefined ? { type: 'object', properties: {}, additionalProperties: false } : source;
   if (!isPlainRecord(sourceSchema) || sourceSchema.type !== 'object') invalidSchema();
 
-  const schemaNodes = assertBoundedJSON(sourceSchema, {
-    maxDepth: MAX_SCHEMA_DEPTH,
-    maxNodes: MAX_SCHEMA_NODES,
-    maxStringChars: MAX_SCHEMA_STRING_CHARS,
-    maxKeyChars: MAX_SCHEMA_KEY_CHARS,
-  });
-  const draft = schemaDraft(sourceSchema);
-  assertSchemaNode(sourceSchema, 0, draft);
+  assertBoundedJSON(sourceSchema);
+  assertSchemaNode(sourceSchema);
 
-  let serialized: string;
   let providerSchema: Record<string, unknown>;
-  let validationSchema: Record<string, unknown>;
   try {
-    serialized = JSON.stringify(sourceSchema);
+    const serialized = JSON.stringify(sourceSchema);
     if (new TextEncoder().encode(serialized).byteLength > MAX_SCHEMA_BYTES) invalidSchema();
-    // The validator mutates schemas with private lookup metadata. Two snapshots keep that state away
-    // from the immutable provider contract and prevent later source-object edits from changing it.
+    // A private snapshot keeps later edits to the source object from changing the published
+    // contract, and freezing it lets the cache fingerprint trust the reference it hashes.
     providerSchema = JSON.parse(serialized) as Record<string, unknown>;
-    validationSchema = JSON.parse(serialized) as Record<string, unknown>;
     deepFreezeJSON(providerSchema);
   } catch (error) {
     if (error instanceof InvalidToolInputSchemaError) throw error;
     return invalidSchema();
   }
 
-  let validator: Validator;
-  try {
-    validator = new Validator(validationSchema as CfWorkerSchema, draft, true);
-    // Construction does not validate schema structure. This catches unconditional runtime faults;
-    // recursive and reference-bearing schemas are excluded by the profile above.
-    validator.validate(Object.create(null));
-  } catch {
-    return invalidSchema();
-  }
-
-  const validateInput = (value: unknown): ToolInputValidation => {
-    try {
-      if (!isPlainRecord(value)) throw new Error();
-      const inputNodes = assertBoundedJSON(value, {
-        maxDepth: MAX_INPUT_DEPTH,
-        maxNodes: MAX_INPUT_NODES,
-        maxStringChars: MAX_INPUT_STRING_CHARS,
-        maxKeyChars: MAX_INPUT_KEY_CHARS,
-      });
-      if (schemaNodes * inputNodes > MAX_VALIDATION_WORK) throw new Error();
-      const validation = validator.validate(cloneWithoutPrototypes(value));
-      if (!validation.valid) {
-        return { success: false, error: toolValidationError(validation.errors) };
-      }
-      return { success: true, value };
-    } catch {
-      // Structural and work-limit failures have no useful validator location to report.
-      return { success: false, error: new Error(TOOL_ARGUMENTS_SCHEMA_MISMATCH) };
-    }
-  };
-
-  return {
-    inputSchema: jsonSchema<ToolArguments>(providerSchema as JSONSchema7, {
-      validate: validateInput,
-    }),
-    validateInput,
-  };
+  return jsonSchema<ToolArguments>(providerSchema as JSONSchema7);
 }

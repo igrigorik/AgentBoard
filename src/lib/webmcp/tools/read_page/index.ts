@@ -1,5 +1,6 @@
-import { tool } from 'ai';
-import { prepareToolInputSchema } from '../../../schema/tool-input-schema';
+import { jsonSchema, tool } from 'ai';
+import type { JSONSchema7 } from 'json-schema';
+import { isPlainRecord } from '../../../schema/tool-input-schema';
 import { ConfigStorage } from '../../../storage/config';
 import { withAbortReason } from './abort';
 import type { HtmlReadResult, HtmlReadSuccess } from './html-protocol';
@@ -9,6 +10,9 @@ import { publishHtmlResult, publishPdfResult, readPageModelOutput } from './mode
 import {
   PDF_DEFAULT_MAX_LENGTH,
   PDF_DEFAULT_MAX_PAGES,
+  PDF_HARD_MAX_LENGTH,
+  PDF_HARD_MAX_PAGES,
+  PDF_MIN_MAX_LENGTH,
   type PdfFailure,
   type PdfReadOptions,
 } from './pdf/protocol';
@@ -30,17 +34,66 @@ export interface ReadPageInput extends Record<string, unknown> {
   includePageImages?: boolean;
 }
 
-const preparedInput = prepareToolInputSchema(READ_PAGE_METADATA.inputSchema);
-
 function failure(code: PdfFailure['error']['code'], message: string): PdfFailure {
   return { success: false, error: { code, message } };
 }
 
-function validateInput(value: unknown): ReadPageInput {
-  const validation = preparedInput.validateInput(value === undefined ? {} : value);
-  if (!validation.success) throw new Error('WebMCP tool arguments are invalid');
-  return validation.value as ReadPageInput;
+const INVALID_INPUT = 'WebMCP tool arguments are invalid';
+
+/**
+ * The tool owns its argument contract: this checks the four optional fields against the same
+ * bounds READ_PAGE_METADATA advertises, so the model's repair step names the field it got wrong.
+ */
+function checkInput(
+  value: unknown
+): { success: true; value: ReadPageInput } | { success: false; error: Error } {
+  const fail = (detail: string) => ({
+    success: false as const,
+    error: new Error(`${INVALID_INPUT}: ${detail}`),
+  });
+  if (!isPlainRecord(value)) return fail('arguments must be an object');
+
+  const unknownKeys = Object.keys(value).filter(
+    (key) => !Object.hasOwn(READ_PAGE_METADATA.inputSchema.properties, key)
+  );
+  if (unknownKeys.length > 0) return fail(`unknown properties ${unknownKeys.join(', ')}`);
+
+  const { maxLength, startPage, maxPages, includePageImages } = value;
+  const withinNumber = (n: unknown, min: number, max: number) =>
+    typeof n === 'number' && Number.isFinite(n) && n >= min && n <= max;
+  const withinInteger = (n: unknown, min: number, max: number) =>
+    Number.isInteger(n) && (n as number) >= min && (n as number) <= max;
+
+  if (
+    maxLength !== undefined &&
+    !withinNumber(maxLength, PDF_MIN_MAX_LENGTH, PDF_HARD_MAX_LENGTH)
+  ) {
+    return fail(
+      `maxLength must be a number between ${PDF_MIN_MAX_LENGTH} and ${PDF_HARD_MAX_LENGTH}`
+    );
+  }
+  if (startPage !== undefined && !withinInteger(startPage, 1, Number.MAX_SAFE_INTEGER)) {
+    return fail('startPage must be an integer of at least 1');
+  }
+  if (maxPages !== undefined && !withinInteger(maxPages, 1, PDF_HARD_MAX_PAGES)) {
+    return fail(`maxPages must be an integer between 1 and ${PDF_HARD_MAX_PAGES}`);
+  }
+  if (includePageImages !== undefined && typeof includePageImages !== 'boolean') {
+    return fail('includePageImages must be a boolean');
+  }
+  return { success: true, value: value as ReadPageInput };
 }
+
+function validateInput(value: unknown): ReadPageInput {
+  const checked = checkInput(value === undefined ? {} : value);
+  if (!checked.success) throw checked.error;
+  return checked.value;
+}
+
+const readPageInputSchema = jsonSchema<ReadPageInput>(
+  READ_PAGE_METADATA.inputSchema as unknown as JSONSchema7,
+  { validate: checkInput }
+);
 
 /** Assembled when extraction failed but the viewport capture succeeded on the current route. */
 async function viewportOnlyResult(tabId: number, warning: string): Promise<HtmlReadSuccess> {
@@ -160,7 +213,7 @@ function normalizeOptions(input: ReadPageInput): PdfReadOptions {
 export function createReadPageTool(tabId: number) {
   return tool({
     description: READ_PAGE_DESCRIPTION,
-    inputSchema: preparedInput.inputSchema,
+    inputSchema: readPageInputSchema,
     execute: async (untrustedInput, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       const input = validateInput(untrustedInput);
       if (abortSignal?.aborted) throw abortSignal.reason;

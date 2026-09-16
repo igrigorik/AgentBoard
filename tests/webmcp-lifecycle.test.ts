@@ -537,6 +537,49 @@ describe('TabManager', () => {
       await vi.waitFor(() => expect(reinject).toHaveBeenCalledWith(123, 'document-a'));
     });
 
+    it('should ignore history updates that leave the injected URL unchanged', async () => {
+      // neohack.dev rewrites an identical #run=…&vault=… URL after every game turn.
+      mockChrome.scripting.executeScript.mockImplementation((injection) =>
+        injection.world === 'ISOLATED' && injection.func
+          ? Promise.resolve([
+              { documentId: 'document-a', frameId: 0, result: 'https://example.com/#run=1' },
+            ])
+          : Promise.resolve(undefined)
+      );
+      await lifecycle.injectScripts(123, 'document-a');
+      const port = {
+        name: 'webmcp-content-script',
+        sender: { tab: { id: 123 }, documentId: 'document-a', frameId: 0 },
+        onMessage: { addListener: vi.fn() },
+        onDisconnect: { addListener: vi.fn() },
+        postMessage: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      portHandlers.onConnect(port);
+      const reinject = vi
+        .spyOn(lifecycle as any, 'reinjectDocumentScripts')
+        .mockResolvedValue(undefined);
+
+      for (const url of ['https://example.com/#run=1', 'https://example.com/#run=2']) {
+        navHandlers.onHistoryStateUpdated({
+          tabId: 123,
+          frameId: 0,
+          documentId: 'document-a',
+          url,
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(reinject).not.toHaveBeenCalled();
+
+      navHandlers.onHistoryStateUpdated({
+        tabId: 123,
+        frameId: 0,
+        documentId: 'document-a',
+        url: 'https://example.com/other',
+      });
+      await vi.waitFor(() => expect(reinject).toHaveBeenCalledWith(123, 'document-a'));
+    });
+
     it('should propagate a compiled tool registration settlement failure', async () => {
       mockChrome.scripting.executeScript
         .mockResolvedValueOnce(undefined)

@@ -8,12 +8,16 @@
 
 import { tool } from 'ai';
 import log from '../logger';
-import { prepareToolInputSchema, type ToolArguments } from '../schema/tool-input-schema';
+import {
+  isPlainRecord,
+  prepareToolInputSchema,
+  type ToolArguments,
+} from '../schema/tool-input-schema';
 import { getTabManager } from './lifecycle';
 
 /**
- * Convert a WebMCP tool to AI SDK tool format while retaining the site's schema for providers and
- * independently validating model output before the page capability can execute.
+ * Convert a WebMCP tool to AI SDK tool format, retaining the site's schema verbatim for providers.
+ * Argument validation belongs to the page tool; see prepareToolInputSchema.
  */
 export function convertWebMCPToAISDKTool(
   webmcpTool: {
@@ -24,18 +28,14 @@ export function convertWebMCPToAISDKTool(
   },
   tabId: number // The tab where this tool was registered
 ) {
-  const preparedSchema = prepareToolInputSchema(webmcpTool.inputSchema);
-
   const toolDefinition = {
     description: webmcpTool.description || `Tool: ${webmcpTool.name}`,
-    inputSchema: preparedSchema.inputSchema,
+    inputSchema: prepareToolInputSchema(webmcpTool.inputSchema),
     execute: async (args: ToolArguments, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       try {
-        // AI SDK validation protects the model loop; this second check keeps the actual capability
-        // fail-closed if a future caller or SDK regression invokes execute() directly.
-        if (!preparedSchema.validateInput(args).success) {
-          throw new Error('WebMCP tool arguments are invalid');
-        }
+        // Without a validate callback the SDK forwards any parsed JSON, and direct callers may pass
+        // anything. executeTool() carries exactly one JSON object; refuse what it cannot carry.
+        if (!isPlainRecord(args)) throw new Error('WebMCP tool arguments must be an object');
 
         log.debug(`[WebMCP Tool Bridge] Executing tool ${webmcpTool.name} from tab ${tabId}`);
 
@@ -54,9 +54,14 @@ export function convertWebMCPToAISDKTool(
         const result = await tabManager.callTool(tabId, webmcpTool.name, args, abortSignal);
         log.debug(`[WebMCP Tool Bridge] Tool executed successfully:`, result);
         return result;
-      } catch {
+      } catch (error) {
+        // Rethrow verbatim. The lifecycle already replaces forgeable page diagnostics with fixed
+        // text at ingestion, so every message on this path is extension-authored; collapsing them
+        // further only hid which of our own checks refused the call.
         log.error('[WebMCP Tool Bridge] Tool execution failed');
-        throw new Error('WebMCP tool execution failed');
+        throw error instanceof Error
+          ? error
+          : new Error(`WebMCP tool "${webmcpTool.name}" failed without a diagnostic.`);
       }
     },
   };

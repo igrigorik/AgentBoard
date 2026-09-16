@@ -12,7 +12,6 @@ import type { AgentConfig, UserScript } from '../storage/config';
 import type { ConversationWorkspaceContext, ToolCall, ToolCallSource } from '../../types';
 import { ConfigStorage, ConfigValidationError, configValidationMessage } from '../storage/config';
 import { MAX_AUTOLOADED_MEMORY_BYTES } from '../memory/filesystem';
-import { MAX_TOOL_VALIDATION_FEEDBACK_CHARS } from '../schema/tool-input-schema';
 import { MAX_WORKSPACE_BOOTSTRAP_BYTES } from '../workspace/context';
 import { getMemoryManager, MemoryMountError, type ResolvedMemory } from '../memory/manager';
 import { createMemoryTools } from '../memory/tools';
@@ -104,11 +103,14 @@ function errorMessage(value: unknown): string | undefined {
     : undefined;
 }
 
+/** One adjustable bound controls failure context sent to both the model and the sidebar. */
+const MAX_TOOL_FEEDBACK_CHARS = 4 * 1_024;
+
 /** Bound any diagnostic before it reaches the model or the UI; tool errors may quote inputs. */
 function boundedFeedback(feedback: string): string {
-  if (feedback.length <= MAX_TOOL_VALIDATION_FEEDBACK_CHARS) return feedback;
+  if (feedback.length <= MAX_TOOL_FEEDBACK_CHARS) return feedback;
   const suffix = '\n[feedback truncated]';
-  return `${feedback.slice(0, MAX_TOOL_VALIDATION_FEEDBACK_CHARS - suffix.length)}${suffix}`;
+  return `${feedback.slice(0, MAX_TOOL_FEEDBACK_CHARS - suffix.length)}${suffix}`;
 }
 
 function invalidToolInputFeedback(error: InvalidToolInputError): string {

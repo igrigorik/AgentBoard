@@ -64,6 +64,7 @@ export class TabManager {
   private scriptOperations = new Map<number, Promise<void>>();
   private pendingHistoryDocuments = new Map<number, string>();
   private historyReconciliations = new Set<number>();
+  private documentUrls = new Map<number, string>();
   // Track pending tools/list requests that need responses
   private pendingToolsRequests = new Map<
     number,
@@ -447,6 +448,7 @@ export class TabManager {
       // tab registry before its replacement relay connects. While navigation is pending, the
       // current document ID identifies and rejects reconnects from that retiring document.
       this.navigatingTabs.add(details.tabId);
+      this.documentUrls.delete(details.tabId);
       // Clear stale tool registry so requestToolsAndWait doesn't return old data
       this.toolRegistries.delete(details.tabId);
       this.pendingInjections.add(details.tabId);
@@ -479,6 +481,11 @@ export class TabManager {
       const documentId = details.documentId;
       const ownedDocument = this.getOwnedDocument(details.tabId);
       if (!ownedDocument || ownedDocument.documentId !== documentId) return;
+
+      // Chrome reports pushState/replaceState even when the URL did not change, and some pages
+      // rewrite an identical URL after every interaction. Injection is URL-matched, so nothing can
+      // differ; reconciling anyway would rebuild the catalog and invalidate in-flight streams.
+      if (details.url && !this.documentUrlChanged(details.tabId, details.url)) return;
 
       this.pendingHistoryDocuments.set(details.tabId, documentId);
       if (this.historyReconciliations.has(details.tabId)) return;
@@ -528,6 +535,7 @@ export class TabManager {
       this.scriptOperations.delete(tabId);
       this.pendingHistoryDocuments.delete(tabId);
       this.historyReconciliations.delete(tabId);
+      this.documentUrls.delete(tabId);
       this.contentPorts.delete(tabId);
       this.currentDocumentIds.delete(tabId);
       this.navigatingTabs.delete(tabId);
@@ -716,6 +724,7 @@ export class TabManager {
         return;
       }
 
+      this.documentUrls.set(tabId, currentUrl);
       log.debug(`[WebMCP Lifecycle] Injecting scripts into tab ${tabId} (${currentUrl})`);
       const target = documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [0] };
 
@@ -893,6 +902,18 @@ export class TabManager {
    */
   getAllRegistries(): Map<number, ToolRegistry> {
     return new Map(this.toolRegistries);
+  }
+
+  /**
+   * Record the document's URL and report whether it differs from the last one seen. Fragments are
+   * ignored because match patterns never see them. An unknown previous URL counts as changed.
+   */
+  private documentUrlChanged(tabId: number, url: string): boolean {
+    const previous = this.documentUrls.get(tabId);
+    this.documentUrls.set(tabId, url);
+    if (previous === undefined) return true;
+    const withoutFragment = (value: string) => value.split('#', 1)[0];
+    return withoutFragment(previous) !== withoutFragment(url);
   }
 
   private async reinjectDocumentScripts(tabId: number, documentId: string): Promise<void> {

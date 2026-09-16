@@ -280,14 +280,19 @@ describe('remote MCP registry snapshots', () => {
     const status = connectedStatus('alpha');
     status.tools = [
       { name: 'first', inputSchema: { type: 'object' } },
+      // Structurally broken: providers would reject the whole request over this one schema.
       {
         name: 'malformed',
+        inputSchema: { type: 'object', required: 'value' as unknown as string[] },
+      },
+      // Constraint vocabulary is the server's business and must publish untouched.
+      {
+        name: 'second',
         inputSchema: {
           type: 'object',
-          properties: { value: { type: 'string', pattern: '^(a+)+$' } },
+          properties: { value: { type: 'string', pattern: '^(a+)+$', format: 'uri' } },
         },
       },
-      { name: 'second', inputSchema: { type: 'object' } },
     ];
     responses.set(alpha.mcpServers.alpha.url, status);
     const registry = new ToolRegistryManager(manager);

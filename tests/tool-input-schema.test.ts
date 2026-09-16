@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  MAX_TOOL_VALIDATION_FEEDBACK_CHARS,
-  prepareToolInputSchema,
-} from '../src/lib/schema/tool-input-schema';
+import { prepareToolInputSchema } from '../src/lib/schema/tool-input-schema';
 
 function deepFreeze(value: unknown): void {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
@@ -10,20 +7,8 @@ function deepFreeze(value: unknown): void {
   Object.freeze(value);
 }
 
-type ValidationResult = ReturnType<ReturnType<typeof prepareToolInputSchema>['validateInput']>;
-
-function invalidError(result: ValidationResult): Error {
-  expect(result.success).toBe(false);
-  if (result.success) throw new Error('Expected tool input validation to fail');
-  return result.error;
-}
-
-function expectInvalid(result: ValidationResult): void {
-  expect(invalidError(result).message).toContain('Tool arguments do not match the declared schema');
-}
-
 describe('tool input JSON Schema', () => {
-  it('preserves a frozen provider schema while validating an independent snapshot', () => {
+  it('publishes a frozen verbatim provider snapshot without a validate callback', () => {
     const schema = {
       $schema: 'https://json-schema.org/draft/2020-12/schema',
       type: 'object',
@@ -47,18 +32,14 @@ describe('tool input JSON Schema', () => {
     deepFreeze(schema);
 
     const prepared = prepareToolInputSchema(schema);
-    const input = { catalog: { variant_id: 123 } };
-    const result = prepared.validateInput(input);
 
-    expect(prepared.inputSchema.jsonSchema).not.toBe(schema);
-    expect(prepared.inputSchema.jsonSchema).toEqual(expectedSchema);
-    expect(Object.isFrozen(prepared.inputSchema.jsonSchema)).toBe(true);
-    expect(result.success).toBe(true);
-    if (result.success) expect(result.value).toBe(input);
-    expect(Object.isFrozen(schema.properties.catalog.properties.variant_id)).toBe(true);
+    expect(prepared.jsonSchema).not.toBe(schema);
+    expect(prepared.jsonSchema).toEqual(expectedSchema);
+    expect(Object.isFrozen(prepared.jsonSchema)).toBe(true);
+    expect(prepared.validate).toBeUndefined();
   });
 
-  it('keeps provider and validation snapshots stable after the source object changes', () => {
+  it('keeps the published snapshot stable after the source object changes', () => {
     const source = {
       type: 'object',
       required: ['value'],
@@ -69,128 +50,39 @@ describe('tool input JSON Schema', () => {
 
     source.properties.value.type = 'number';
 
-    expect(prepared.inputSchema.jsonSchema).toMatchObject({
-      properties: { value: { type: 'string' } },
-    });
-    expect(prepared.validateInput({ value: 'stable' }).success).toBe(true);
-    expectInvalid(prepared.validateInput({ value: 42 }));
+    expect(prepared.jsonSchema).toMatchObject({ properties: { value: { type: 'string' } } });
   });
 
-  it('enforces nested requirements, ranges, unions, and additional properties', () => {
-    const prepared = prepareToolInputSchema({
+  it('publishes constraint vocabulary it does not interpret, exactly as the tool declared it', () => {
+    // A NetHack session tool: the regexes, uniqueness, formats, and references belong to the tool.
+    const schema = {
       type: 'object',
-      required: ['items'],
+      required: ['sessionId'],
       properties: {
-        items: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 2,
-          items: {
-            type: 'object',
-            required: ['id', 'quantity'],
-            properties: {
-              id: { type: ['string', 'number'] },
-              quantity: { type: 'integer', minimum: 1, maximum: 5 },
-            },
-            additionalProperties: false,
-          },
-        },
+        sessionId: { type: 'string', pattern: '^[A-Za-z0-9_-]+$' },
+        name: { type: 'string', pattern: '^[^\\u0000-\\u001f\\u007f]*$', 'x-maxBytes': 31 },
+        startedAt: { type: 'string', format: 'date-time' },
+        itemTypes: { type: 'array', uniqueItems: true, items: { $ref: '#/$defs/itemType' } },
+        symbol: { type: 'string', pattern: '^(a+)+$' },
       },
+      propertyNames: { pattern: '^[a-z]' },
+      patternProperties: { '^x-': { type: 'string' } },
+      $defs: { itemType: { type: 'string', enum: ['weapon', 'armor'] } },
       additionalProperties: false,
-    });
+    };
 
-    expect(prepared.validateInput({ items: [{ id: 'one', quantity: 2 }] }).success).toBe(true);
-    expectInvalid(prepared.validateInput({ items: [{ id: true, quantity: 2 }] }));
-    expectInvalid(prepared.validateInput({ items: [{ id: 1, quantity: 0 }] }));
-    expectInvalid(prepared.validateInput({ items: [{ id: 1, quantity: 2, secret: true }] }));
-    expectInvalid(prepared.validateInput({ items: [] }));
-  });
+    const prepared = prepareToolInputSchema(schema);
 
-  it('returns every collected validator error in its original order', () => {
-    const prepared = prepareToolInputSchema({
-      type: 'object',
-      required: ['cart'],
-      properties: {
-        cart: {
-          type: 'object',
-          required: ['line_items'],
-          properties: {
-            line_items: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: { quantity: { type: 'integer' } },
-              },
-            },
-          },
-        },
-      },
-    });
-
-    expect(
-      invalidError(
-        prepared.validateInput({
-          cart: { lineitems: { handle: 'verticalboard-first', quantity: 1 } },
-        })
-      ).message
-    ).toBe(
-      'Tool arguments do not match the declared schema:\n' +
-        '- # [properties]: Property "cart" does not match schema.\n' +
-        '- #/cart [required]: Instance does not have required property "line_items".'
-    );
-
-    expect(
-      invalidError(prepared.validateInput({ cart: { line_items: [{ quantity: '1' }] } })).message
-    ).toBe(
-      'Tool arguments do not match the declared schema:\n' +
-        '- # [properties]: Property "cart" does not match schema.\n' +
-        '- #/cart [properties]: Property "line_items" does not match schema.\n' +
-        '- #/cart/line_items [items]: Items did not match schema.\n' +
-        '- #/cart/line_items/0 [properties]: Property "quantity" does not match schema.\n' +
-        '- #/cart/line_items/0/quantity [type]: Instance type "string" is invalid. Expected "integer".'
-    );
-  });
-
-  it('preserves every error when the complete feedback fits just below the limit', () => {
-    const required = Array.from(
-      { length: 13 },
-      (_, index) => `required_${String(index).padStart(3, '0')}_${'x'.repeat(237)}`
-    );
-    const prepared = prepareToolInputSchema({ type: 'object', required });
-    const message = invalidError(prepared.validateInput({})).message;
-
-    expect(message.length).toBe(MAX_TOOL_VALIDATION_FEEDBACK_CHARS - 5);
-    expect(message).toContain(`required property "${required.at(-1)}"`);
-    expect(message).not.toContain('[validation feedback truncated]');
-  });
-
-  it('caps pathological validation feedback at the adjustable character limit', () => {
-    const required = Array.from(
-      { length: 100 },
-      (_, index) => `required_${String(index).padStart(3, '0')}_${'x'.repeat(40)}`
-    );
-    const prepared = prepareToolInputSchema({ type: 'object', required });
-    const message = invalidError(prepared.validateInput({})).message;
-
-    expect(message.length).toBeLessThanOrEqual(MAX_TOOL_VALIDATION_FEEDBACK_CHARS);
-    expect(message).toContain(`required property "${required[0]}"`);
-    expect(message).not.toContain(`required property "${required.at(-1)}"`);
-    expect(message.endsWith('[validation feedback truncated]')).toBe(true);
+    expect(prepared.jsonSchema).toEqual(schema);
+    expect(prepared.validate).toBeUndefined();
   });
 
   it('treats only an omitted schema as a strict no-parameter contract', () => {
-    const prepared = prepareToolInputSchema(undefined);
-    const empty = {};
-    const result = prepared.validateInput(empty);
-
-    expect(prepared.inputSchema.jsonSchema).toEqual({
+    expect(prepareToolInputSchema(undefined).jsonSchema).toEqual({
       type: 'object',
       properties: {},
       additionalProperties: false,
     });
-    expect(result.success).toBe(true);
-    if (result.success) expect(result.value).toBe(empty);
-    expectInvalid(prepared.validateInput({ unexpected: true }));
   });
 
   it.each([
@@ -207,16 +99,17 @@ describe('tool input JSON Schema', () => {
     expect(() => prepareToolInputSchema(schema)).toThrow('Tool input schema is invalid');
   });
 
+  // Providers refuse the whole request over one malformed input_schema, so keyword values must at
+  // least have the JSON type the vocabulary defines. Which constraint they express is not judged.
   it.each([
     ['properties container', { type: 'object', properties: 'invalid' }],
     ['required container', { type: 'object', required: 'invalid' }],
+    ['duplicate required names', { type: 'object', required: ['a', 'a'] }],
     ['nested property', { type: 'object', properties: { value: null } }],
     ['boolean property schema', { type: 'object', properties: { value: false } }],
+    ['unknown type name', { type: 'object', properties: { value: { type: 'BOOLEAN' } } }],
     ['composition container', { type: 'object', allOf: {} }],
-    [
-      'excessive composition branches',
-      { type: 'object', allOf: Array.from({ length: 17 }, () => ({ type: 'object' })) },
-    ],
+    ['empty composition', { type: 'object', anyOf: [] }],
     [
       'tuple-form items',
       { type: 'object', properties: { values: { type: 'array', items: [{ type: 'string' }] } } },
@@ -226,64 +119,37 @@ describe('tool input JSON Schema', () => {
       { type: 'object', properties: { value: { type: 'string', minLength: 'invalid' } } },
     ],
     [
-      'regular expression',
-      { type: 'object', properties: { value: { type: 'string', pattern: '^(a+)+$' } } },
+      'negative count keyword',
+      { type: 'object', properties: { value: { type: 'array', maxItems: -1 } } },
     ],
+    ['non-string pattern', { type: 'object', properties: { value: { pattern: /a/ } } }],
+    ['non-string reference', { type: 'object', properties: { value: { $ref: 1 } } }],
+    ['non-boolean uniqueItems', { type: 'object', properties: { value: { uniqueItems: 'yes' } } }],
+    ['empty enum', { type: 'object', properties: { value: { enum: [] } } }],
+    ['non-positive multipleOf', { type: 'object', properties: { value: { multipleOf: 0 } } }],
     [
-      'format validator',
-      { type: 'object', properties: { value: { type: 'string', format: 'url' } } },
+      'non-finite bound',
+      { type: 'object', properties: { value: { type: 'number', maximum: Infinity } } },
     ],
-    ['schema reference', { type: 'object', properties: { value: { $ref: '#/$defs/value' } } }],
-    ['property-name validator', { type: 'object', propertyNames: { type: 'string' } }],
-    [
-      'large const diagnostic',
-      { type: 'object', properties: { value: { const: 'x'.repeat(513) } } },
-    ],
-    [
-      'large enum diagnostic',
-      { type: 'object', properties: { value: { enum: ['x'.repeat(513)] } } },
-    ],
-    [
-      'quadratic uniqueness check',
-      { type: 'object', properties: { values: { type: 'array', uniqueItems: true } } },
-    ],
-  ])('rejects an unsafe or malformed %s', (_name, schema) => {
+    ['dependentRequired container', { type: 'object', dependentRequired: ['value'] }],
+  ])('rejects a malformed %s', (_name, schema) => {
     expect(() => prepareToolInputSchema(schema)).toThrow('Tool input schema is invalid');
   });
 
-  it('applies declared draft semantics and rejects unsupported metaschemas', () => {
+  it('accepts both draft spellings of exclusive bounds', () => {
     expect(() =>
       prepareToolInputSchema({
-        $schema: 'http://json-schema.org/draft-04/schema#',
         type: 'object',
-        properties: { value: { type: 'number', exclusiveMinimum: true } },
+        properties: {
+          legacy: { type: 'number', minimum: 0, exclusiveMinimum: true },
+          modern: { type: 'number', exclusiveMinimum: 0 },
+        },
       })
     ).not.toThrow();
     expect(() =>
       prepareToolInputSchema({
-        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
-        properties: { value: { type: 'number', exclusiveMinimum: true } },
-      })
-    ).toThrow('Tool input schema is invalid');
-    expect(() =>
-      prepareToolInputSchema({
-        $schema: 'http://json-schema.org/draft-07/schema#',
-        type: 'object',
-        dependentRequired: { value: ['other'] },
-      })
-    ).toThrow('Tool input schema is invalid');
-    expect(() =>
-      prepareToolInputSchema({
-        $schema: 'http://json-schema.org/draft-04/schema#',
-        type: 'object',
-        const: {},
-      })
-    ).toThrow('Tool input schema is invalid');
-    expect(() =>
-      prepareToolInputSchema({
-        $schema: 'https://example.com/draft-07/schema',
-        type: 'object',
+        properties: { value: { type: 'number', exclusiveMinimum: 'zero' } },
       })
     ).toThrow('Tool input schema is invalid');
   });
@@ -307,88 +173,50 @@ describe('tool input JSON Schema', () => {
     );
   });
 
-  it('rejects overlarge model argument trees', () => {
-    const prepared = prepareToolInputSchema({
-      type: 'object',
-      properties: {
-        values: { type: 'array', items: { type: 'number' } },
-      },
-      additionalProperties: false,
-    });
-    expectInvalid(prepared.validateInput({ values: Array.from({ length: 10_001 }, (_, i) => i) }));
-  });
-
-  it('allows array contracts when total validation work is bounded', () => {
-    const prepared = prepareToolInputSchema({
-      type: 'object',
-      required: ['values'],
-      properties: {
-        values: {
-          type: 'array',
-          minItems: 101,
-          maxItems: 101,
-          items: { type: 'number' },
-        },
-      },
-      additionalProperties: false,
-    });
-
-    expect(
-      prepared.validateInput({ values: Array.from({ length: 101 }, (_, index) => index) }).success
-    ).toBe(true);
-  });
-
-  it('bounds multiplicative validator work before interpreting the schema', () => {
-    const prepared = prepareToolInputSchema({
-      type: 'object',
-      allOf: Array.from({ length: 16 }, () => ({ additionalProperties: true })),
-    });
-
-    expect(prepared.validateInput({ value: 1 }).success).toBe(true);
-    expectInvalid(
-      prepared.validateInput(
-        Object.fromEntries(Array.from({ length: 120 }, (_, index) => [`p${index}`, index]))
-      )
-    );
-  });
-
-  it('bounds schema and model property names that validators may repeat in errors', () => {
+  it('bounds schema property names', () => {
     expect(() =>
       prepareToolInputSchema({
         type: 'object',
         properties: { ['s'.repeat(257)]: { type: 'string' } },
       })
     ).toThrow('Tool input schema is invalid');
-
-    const prepared = prepareToolInputSchema({ type: 'object', additionalProperties: true });
-    expectInvalid(prepared.validateInput({ ['i'.repeat(1_025)]: true }));
   });
 
-  it('does not satisfy required properties through Object.prototype', () => {
+  it('accepts a large real-world schema that the previous validation budget could not execute', () => {
+    // ~600 schema nodes: the size at which the removed schemaNodes × inputNodes ≤ 4096 budget
+    // failed every realistic call with a spurious "arguments do not match" error.
+    const variants = Array.from({ length: 12 }, (_, index) => ({
+      type: 'object',
+      required: ['action'],
+      properties: {
+        action: { const: `action_${index}` },
+        target: {
+          oneOf: [
+            { type: 'object', properties: { x: { type: 'integer' }, y: { type: 'integer' } } },
+            { type: 'object', properties: { direction: { enum: ['n', 's', 'e', 'w'] } } },
+            { type: 'object', properties: { symbol: { type: 'string', pattern: '^[!-~]$' } } },
+          ],
+        },
+        options: {
+          type: 'object',
+          properties: Object.fromEntries(
+            Array.from({ length: 6 }, (_, option) => [
+              `option_${option}`,
+              { type: 'boolean', description: `Option ${option}` },
+            ])
+          ),
+        },
+      },
+    }));
+
     const prepared = prepareToolInputSchema({
       type: 'object',
-      required: ['toString'],
-      properties: { toString: { type: 'string' } },
-      additionalProperties: false,
+      required: ['sessionId'],
+      properties: { sessionId: { type: 'string', pattern: '^[A-Za-z0-9_-]+$' } },
+      oneOf: variants,
     });
 
-    expectInvalid(prepared.validateInput({}));
-    expect(prepared.validateInput({ toString: 'owned' }).success).toBe(true);
-  });
-
-  it('does not apply schema defaults or otherwise rewrite valid arguments', () => {
-    const prepared = prepareToolInputSchema({
-      type: 'object',
-      properties: { maxLength: { type: 'number', default: 32_000 } },
-      additionalProperties: false,
-    });
-    const input = {};
-    const result = prepared.validateInput(input);
-
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.value).toBe(input);
-      expect(result.value).not.toHaveProperty('maxLength');
-    }
+    expect(prepared.jsonSchema).toMatchObject({ oneOf: expect.any(Array) });
+    expect(prepared.validate).toBeUndefined();
   });
 });

@@ -50,10 +50,9 @@ vi.mock('../src/lib/webmcp/tool-registry', () => ({
   getToolRegistry: vi.fn(),
 }));
 
-import { simulateReadableStream } from 'ai';
+import { jsonSchema, simulateReadableStream } from 'ai';
 import { AIClient } from '../src/lib/ai/client';
 import { MemoryMountError } from '../src/lib/memory/manager';
-import { prepareToolInputSchema } from '../src/lib/schema/tool-input-schema';
 import { getToolRegistry } from '../src/lib/webmcp/tool-registry';
 
 function textStream(read: () => Promise<ReadableStreamReadResult<string>>) {
@@ -1074,17 +1073,33 @@ export function execute() { return {}; }`;
       maxLength: 100000,
       properties: { convertToMarkdown: { type: 'BOOLEAN' } },
     };
-    const prepared = prepareToolInputSchema({
-      type: 'object',
-      properties: { maxLength: { type: 'number' } },
-      additionalProperties: false,
-    });
+    // A first-party tool validating its own contract, the way read_page does.
+    const inputSchema = jsonSchema<{ maxLength?: number }>(
+      {
+        type: 'object',
+        properties: { maxLength: { type: 'number' } },
+        additionalProperties: false,
+      },
+      {
+        validate: (value) => {
+          const unknown = Object.keys(value as object).filter((key) => key !== 'maxLength');
+          return unknown.length === 0
+            ? { success: true, value: value as { maxLength?: number } }
+            : {
+                success: false,
+                error: new Error(
+                  `Tool arguments do not match the declared schema: unknown properties ${unknown.join(', ')}`
+                ),
+              };
+        },
+      }
+    );
     const execute = vi.fn();
     vi.mocked(getToolRegistry).mockReturnValue(
       toolRegistry({
         private_tool: {
           description: 'Private tool',
-          inputSchema: prepared.inputSchema,
+          inputSchema,
           execute,
         },
       }) as never
@@ -1164,10 +1179,8 @@ export function execute() { return {}; }`;
       output: null,
       status: 'error',
     });
-    expect(feedback.error).toContain('Tool arguments do not match the declared schema');
-    expect(feedback.error).toContain('# [additionalProperties]');
-    expect(feedback.error).toContain(
-      'Property "properties" does not match additional properties schema.'
+    expect(feedback.error).toBe(
+      'Tool arguments do not match the declared schema: unknown properties properties'
     );
     expect(feedback.error).not.toContain('Invalid input for tool');
     expect(feedback.error).not.toContain('Type validation failed');

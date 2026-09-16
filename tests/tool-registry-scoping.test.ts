@@ -538,6 +538,34 @@ describe('ToolRegistryManager Tab Scoping', () => {
       expect(Object.keys(listener.mock.calls[0][0])).toEqual(['first_tool', 'second_tool']);
     });
 
+    it('publishes page tools whose schemas carry constraints the extension does not interpret', () => {
+      // neohack.dev registers eleven tools; ten constrain sessionId with a regex. All must appear.
+      registry.updateWebMCPTools(100, [
+        {
+          name: 'session',
+          description: 'Create, resume, suspend or explicitly quit a run.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', pattern: '^[^\\u0000-\\u001f\\u007f]*$', 'x-maxBytes': 31 },
+              itemTypes: { type: 'array', uniqueItems: true, items: { type: 'string' } },
+            },
+          },
+        },
+        {
+          name: 'observe',
+          description: 'Observe the current scene.',
+          inputSchema: {
+            type: 'object',
+            required: ['sessionId'],
+            properties: { sessionId: { type: 'string', pattern: '^[A-Za-z0-9_-]+$' } },
+          },
+        },
+      ]);
+
+      expect(Object.keys(registry.getToolsForTab(100))).toEqual(['session', 'observe']);
+    });
+
     it('keeps page-tool ingestion generic while the system reader owns the public name', () => {
       registry.replaceSystemTools(getEnabledSystemToolRegistrations({}));
       registry.updateWebMCPTools(100, [

@@ -6,7 +6,11 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { tool } from 'ai';
 import log from '../logger';
-import { prepareToolInputSchema, type ToolArguments } from '../schema/tool-input-schema';
+import {
+  isPlainRecord,
+  prepareToolInputSchema,
+  type ToolArguments,
+} from '../schema/tool-input-schema';
 import type { RemoteMCPSession, RemoteMCPToolCapability } from './manager';
 
 /** Server diagnostics can be long; the model needs the reason, not the transcript. */
@@ -42,19 +46,15 @@ export function convertMCPToAISDKTool(
 ) {
   const { tool: mcpTool } = capability;
 
-  const preparedSchema = prepareToolInputSchema(mcpTool.inputSchema);
-
   const toolDefinition = {
     description: mcpTool.description || `Tool: ${mcpTool.name}`,
-    inputSchema: preparedSchema.inputSchema,
+    inputSchema: prepareToolInputSchema(mcpTool.inputSchema),
     execute: async (args: ToolArguments, { abortSignal }: { abortSignal?: AbortSignal } = {}) => {
       try {
-        // Keep the remote side-effect boundary independently fail-closed even if validation in the
-        // AI SDK call path is accidentally bypassed in a future refactor.
-        if (!preparedSchema.validateInput(args).success) {
-          throw new Error(
-            `Arguments for "${mcpTool.name}" do not match the tool's advertised input schema.`
-          );
+        // The server validates its own arguments (see prepareToolInputSchema); the protocol only
+        // requires that `arguments` be a JSON object, so that is the one shape refused here.
+        if (!isPlainRecord(args)) {
+          throw new Error(`Arguments for "${mcpTool.name}" must be a JSON object.`);
         }
 
         const result = await session.executeTool(capability, args, abortSignal);

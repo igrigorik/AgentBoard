@@ -1,5 +1,5 @@
 import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider';
-import { InvalidToolInputError, simulateReadableStream, stepCountIs, streamText } from 'ai';
+import { simulateReadableStream, stepCountIs, streamText } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { convertWebMCPToAISDKTool } from '../src/lib/webmcp/tool-bridge';
 import { getTabManager } from '../src/lib/webmcp/lifecycle';
@@ -77,13 +77,19 @@ describe('WebMCP Tool Bridge tab ownership', () => {
     ) as any;
 
     await expect(sdkTool.execute({ destructive: true })).rejects.toThrow(
-      'WebMCP tool execution failed'
+      'The tool catalog entry for "page_action" is no longer active in tab 100.'
     );
     expect(callTool).not.toHaveBeenCalled();
   });
 
-  it('reports malformed model arguments without executing the page capability', async () => {
-    const callTool = vi.fn().mockResolvedValue({ success: true });
+  it('hands model arguments to the page tool, whose own rejection reaches the model as data', async () => {
+    // The tool owns its schema. It answers a malformed call the MCP way, as an isError result,
+    // and that text is the feedback the model repairs from; AgentBoard neither judges nor masks it.
+    const pageRejection = {
+      isError: true,
+      content: [{ type: 'text', text: 'Unknown argument "properties"; expected only maxLength.' }],
+    };
+    const callTool = vi.fn().mockResolvedValue(pageRejection);
     vi.mocked(getTabManager).mockReturnValue({
       getToolRegistry: () => ({ tools: [readPageDescriptor] }),
       callTool,
@@ -148,28 +154,44 @@ describe('WebMCP Tool Bridge tab ownership', () => {
     const parts = [];
     for await (const part of result.fullStream) parts.push(part);
 
-    const invalidCall = parts.find((part) => part.type === 'tool-call');
-    expect(invalidCall).toMatchObject({
-      type: 'tool-call',
-      toolCallId: 'malformed-call',
-      invalid: true,
-    });
-    expect(
-      invalidCall?.type === 'tool-call' && InvalidToolInputError.isInstance(invalidCall.error)
-    ).toBe(true);
-    expect(parts.some((part) => part.type === 'tool-error')).toBe(true);
+    const call = parts.find((part) => part.type === 'tool-call');
+    expect(call).toMatchObject({ type: 'tool-call', toolCallId: 'malformed-call' });
+    expect(call).not.toHaveProperty('invalid', true);
+    expect(parts.some((part) => part.type === 'tool-error')).toBe(false);
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(callTool.mock.calls[0].slice(0, 3)).toEqual([
+      100,
+      readPageDescriptor.name,
+      malformedReadPageInput,
+    ]);
     expect(prompts).toHaveLength(2);
     const continuationPrompt = JSON.stringify(prompts[1]);
-    expect(continuationPrompt).toContain('Tool arguments do not match the declared schema');
-    expect(continuationPrompt).toContain('# [additionalProperties]');
-    expect(continuationPrompt).toContain(
-      'Property \\"properties\\" does not match additional properties schema.'
-    );
-    expect(getTabManager).not.toHaveBeenCalled();
-    expect(callTool).not.toHaveBeenCalled();
+    expect(continuationPrompt).toContain('Unknown argument');
+    expect(continuationPrompt).toContain('expected only maxLength');
+    expect(continuationPrompt).not.toContain('Tool arguments do not match');
   });
 
-  it('revalidates direct execute calls before touching the page capability', async () => {
+  it('publishes the schema verbatim, including constraints it does not interpret', () => {
+    const inputSchema = {
+      type: 'object',
+      required: ['sessionId'],
+      properties: {
+        sessionId: { type: 'string', pattern: '^[A-Za-z0-9_-]+$' },
+        itemTypes: { type: 'array', uniqueItems: true, items: { type: 'string' } },
+      },
+      additionalProperties: false,
+    };
+
+    const sdkTool = convertWebMCPToAISDKTool(
+      { name: 'session', description: 'Create a run', inputSchema },
+      100
+    ) as any;
+
+    expect(sdkTool.inputSchema.jsonSchema).toEqual(inputSchema);
+    expect(sdkTool.inputSchema.validate).toBeUndefined();
+  });
+
+  it('refuses only argument shapes executeTool() cannot carry', async () => {
     const callTool = vi.fn().mockResolvedValue({ success: true });
     vi.mocked(getTabManager).mockReturnValue({
       getToolRegistry: () => ({ tools: [readPageDescriptor] }),
@@ -177,11 +199,20 @@ describe('WebMCP Tool Bridge tab ownership', () => {
     } as unknown as ReturnType<typeof getTabManager>);
     const sdkTool = convertWebMCPToAISDKTool(readPageDescriptor, 100) as any;
 
-    await expect(sdkTool.execute(malformedReadPageInput)).rejects.toThrow(
-      'WebMCP tool execution failed'
-    );
-    expect(getTabManager).not.toHaveBeenCalled();
+    for (const nonObject of [null, 'maxLength=5', 5, [5]]) {
+      await expect(sdkTool.execute(nonObject)).rejects.toThrow(
+        'WebMCP tool arguments must be an object'
+      );
+    }
     expect(callTool).not.toHaveBeenCalled();
+
+    await expect(sdkTool.execute(malformedReadPageInput)).resolves.toEqual({ success: true });
+    expect(callTool).toHaveBeenCalledWith(
+      100,
+      readPageDescriptor.name,
+      malformedReadPageInput,
+      undefined
+    );
   });
 
   it('invalidates stale closures when the same tab gets a replacement catalog', async () => {
@@ -199,7 +230,7 @@ describe('WebMCP Tool Bridge tab ownership', () => {
 
     const staleTool = convertWebMCPToAISDKTool(staleDescriptor, 100) as any;
     await expect(staleTool.execute({ destructive: true })).rejects.toThrow(
-      'WebMCP tool execution failed'
+      'The tool catalog entry for "page_action" is no longer active in tab 100.'
     );
     expect(callTool).not.toHaveBeenCalled();
   });

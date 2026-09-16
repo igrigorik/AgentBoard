@@ -20,10 +20,7 @@ const session = { executeTool } as unknown as RemoteMCPSession;
 
 function convertedTool() {
   return convertMCPToAISDKTool(session, capability) as unknown as {
-    execute: (
-      input: Record<string, unknown>,
-      context?: { abortSignal?: AbortSignal }
-    ) => Promise<unknown>;
+    execute: (input: unknown, context?: { abortSignal?: AbortSignal }) => Promise<unknown>;
   };
 }
 
@@ -32,13 +29,21 @@ describe('MCP tool privacy boundary', () => {
     vi.clearAllMocks();
   });
 
-  it('revalidates direct execute calls before contacting the MCP server', async () => {
+  it('refuses only non-object arguments before contacting the MCP server', async () => {
     const converted = convertedTool();
 
-    await expect(converted.execute({ unexpected: true })).rejects.toThrow(
-      "do not match the tool's advertised input schema"
-    );
+    for (const nonObject of [null, 'query', 7, ['query']]) {
+      await expect(converted.execute(nonObject)).rejects.toThrow('must be a JSON object');
+    }
     expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it('forwards arguments the server may reject; the server owns its schema', async () => {
+    executeTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const converted = convertedTool();
+
+    await expect(converted.execute({ unexpected: true })).resolves.toBe('ok');
+    expect(executeTool).toHaveBeenCalledWith(capability, { unexpected: true }, undefined);
   });
 
   it('surfaces the server diagnostic from an isError result, fenced as data', async () => {
