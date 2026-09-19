@@ -22,6 +22,14 @@ export interface CompiledToolInfo {
  */
 export const COMPILED_TOOLS: CompiledToolInfo[] = [
   {
+    id: 'agentboard_github_pull_request',
+    file: 'tools/agentboard_github_pull_request.js',
+    match: ['https://github.com/*/*/pull/*'],
+    version: '1.0.0',
+    description:
+      'Read structured context for the pull request in this tab: changed files, review threads with line anchors, and code changes paged by file. Use agentboard_read_page for the PR description and general conversation.',
+  },
+  {
     id: 'agentboard_youtube_transcript',
     file: 'tools/agentboard_youtube_transcript.js',
     match: ['*://www.youtube.com/watch*', '*://youtube.com/watch*'],
