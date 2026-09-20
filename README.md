@@ -128,6 +128,33 @@ The agent can call any remote MCP server, as long as it supports HTTP streaming.
 }
 ```
 
+**Real-world example — You.com web search (no auth token required):**
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "url": "https://api.you.com/mcp?profile=free",
+      "transport": "http"
+    }
+  }
+}
+```
+
+The keyless `profile=free` endpoint exposes a basic `you-search` tool for current web results, so your agent can look things up beyond the current tab. For the full toolset (web search, URL content extraction, multi-step research), use the authenticated endpoint with a You.com API key from [you.com/platform/api-keys](https://you.com/platform/api-keys):
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "url": "https://api.you.com/mcp",
+      "transport": "http",
+      "authToken": "your-ydc-api-key"
+    }
+  }
+}
+```
+
 ### WebMCP Scripts
 
 [WebMCP](https://github.com/webmachinelearning/webmcp) is a mechanism for sites to expose tools, which are JavaScript functions with structured schema, that browser AI agents can call to interact with the site. AgentBoard polyfills and extends WebMCP, allowing you to author custom scripts that can be executed in context of the page. For those that remember: like Greasemonkey, but AI-controlled! Example script...
