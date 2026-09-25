@@ -3,6 +3,8 @@ import { execute } from '../src/lib/webmcp/tools/youtube_transcript/script.js';
 
 const ASR_EN_TRACK_PARAMS = 'CgNhc3ISAmVuGgA%3D';
 const MANUAL_EN_TRACK_PARAMS = 'CgASAmVuGgA%3D';
+// Byte-identical to the params YouTube's own transcript panel used for video U_XD5NxO8KY.
+const ASR_HI_TRACK_PARAMS = 'CgNhc3ISAmhpGgA%3D';
 
 type DataElement<T> = HTMLElement & { data: T };
 
@@ -184,7 +186,7 @@ describe('YouTube transcript execution context', () => {
 
     const result = await execute({ format: 'text' });
 
-    expect(result.metadata.videoId).toBe('current-video');
+    expect(result.metadata?.videoId).toBe('current-video');
     expect(result.transcript?.text).toBe('Current transcript');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -203,7 +205,7 @@ describe('YouTube transcript execution context', () => {
 
     const result = await execute({ format: 'text' });
 
-    expect(result.metadata.videoId).toBe('current-video');
+    expect(result.metadata?.videoId).toBe('current-video');
     expect(result.transcript?.text).toBe('Initial transcript');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -228,9 +230,9 @@ describe('YouTube transcript execution context', () => {
     const second = await execute({ format: 'text' });
 
     expect(requestedVideoIds).toEqual(['video-a', 'video-b']);
-    expect(first.metadata.videoId).toBe('video-a');
+    expect(first.metadata?.videoId).toBe('video-a');
     expect(first.transcript?.text).toBe('video-a');
-    expect(second.metadata.videoId).toBe('video-b');
+    expect(second.metadata?.videoId).toBe('video-b');
     expect(second.transcript?.text).toBe('video-b');
   });
 
@@ -344,7 +346,12 @@ describe('YouTube transcript execution context', () => {
       vi.fn(async () => new Response('', { status: 200 }))
     );
 
-    await expect(execute()).rejects.toThrow('Failed to retrieve transcript from YouTube');
+    await expect(execute()).resolves.toMatchObject({
+      metadata: { videoId },
+      transcript: null,
+      error:
+        "Did not open YouTube's transcript panel because a different panel is open in this tab",
+    });
 
     expect(trigger.click).not.toHaveBeenCalled();
     expect(existingPanel.getAttribute('visibility')).toBe('ENGAGEMENT_PANEL_VISIBILITY_EXPANDED');
@@ -400,11 +407,12 @@ describe('YouTube transcript execution context', () => {
       vi.fn(async () => new Response('', { status: 200 }))
     );
 
-    const assertion = expect(execute()).rejects.toThrow(
-      'Failed to retrieve transcript from YouTube'
-    );
+    const execution = execute();
     await vi.advanceTimersByTimeAsync(5_000);
-    await assertion;
+    await expect(execution).resolves.toMatchObject({
+      transcript: null,
+      error: "YouTube's transcript panel did not load a transcript within 5 seconds",
+    });
 
     expect(panel?.close).toHaveBeenCalledTimes(1);
     expect(panel?.panel.getAttribute('visibility')).toBe('ENGAGEMENT_PANEL_VISIBILITY_HIDDEN');
@@ -467,11 +475,14 @@ describe('YouTube transcript execution context', () => {
       vi.fn(async () => new Response('', { status: 200 }))
     );
 
-    await expect(execute()).rejects.toThrow('Failed to retrieve transcript from YouTube');
+    await expect(execute()).resolves.toMatchObject({
+      transcript: null,
+      error: "Could not find YouTube's transcript button on this page",
+    });
     expect(document.querySelector('ytd-engagement-panel-section-list-renderer')).toBeNull();
   });
 
-  it('rejects panel data for a different caption track', async () => {
+  it('reports panel data that matches none of the video caption tracks', async () => {
     const videoId = 'CjLhd1WZwTE';
     window.history.replaceState({}, '', `/watch?v=${videoId}`);
     installPlayer(() =>
@@ -482,17 +493,152 @@ describe('YouTube transcript execution context', () => {
         }),
       ])
     );
+    let panel: ReturnType<typeof appendTranscriptPanel> | undefined;
+    installTranscriptTrigger(() => {
+      panel = appendTranscriptPanel(videoId, { trackParams: MANUAL_EN_TRACK_PARAMS });
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 200 }))
+    );
+
+    await expect(execute()).resolves.toMatchObject({
+      transcript: null,
+      error:
+        "YouTube's transcript panel loaded a caption track that matches none of this video's caption tracks (en)",
+    });
+    expect(panel?.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the caption track the panel loaded and reports the substitution', async () => {
+    // Mirrors U_XD5NxO8KY: an auto-dubbed upload whose panel always opens the original-language
+    // track (hi) while English selection lands on the en-US dub.
+    const videoId = 'U_XD5NxO8KY';
+    window.history.replaceState({}, '', `/watch?v=${videoId}`);
+    const multiAudioTracks = [
+      captionTrack({
+        languageCode: 'bn',
+        kind: 'asr',
+        name: { simpleText: 'Bangla (auto-generated)' },
+      }),
+      captionTrack({
+        languageCode: 'en-US',
+        kind: 'asr',
+        name: { simpleText: 'English (United States) (auto-generated)' },
+      }),
+      captionTrack({
+        languageCode: 'hi',
+        kind: 'asr',
+        name: { simpleText: 'Hindi (auto-generated)' },
+      }),
+    ];
+    installPlayer(() => playerResponse(videoId, multiAudioTracks));
+    let panel: ReturnType<typeof appendTranscriptPanel> | undefined;
+    installTranscriptTrigger(() => {
+      panel = appendTranscriptPanel(videoId, { trackParams: ASR_HI_TRACK_PARAMS });
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 200 }))
+    );
+
+    const result = await execute({ format: 'text' });
+
+    expect(result.error).toBeUndefined();
+    expect(result.transcript).toMatchObject({
+      language: 'hi',
+      languageName: 'Hindi (auto-generated)',
+      isAutoGenerated: true,
+      segmentCount: 2,
+      text: 'Thanks for doing this. Second segment',
+    });
+    expect(result.warnings).toEqual([
+      "YouTube's transcript panel loaded caption track hi (Hindi (auto-generated)) instead of the " +
+        'selected track en-US (English (United States) (auto-generated)). Caption tracks on this ' +
+        'video: bn, en-US, hi.',
+    ]);
+    expect(panel?.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits warnings when the panel loads the selected track', async () => {
+    const videoId = 'U_XD5NxO8KY';
+    window.history.replaceState({}, '', `/watch?v=${videoId}`);
+    installPlayer(() =>
+      playerResponse(videoId, [
+        captionTrack({ languageCode: 'en-US', kind: 'asr' }),
+        captionTrack({ languageCode: 'hi', kind: 'asr', name: { simpleText: 'Hindi' } }),
+      ])
+    );
     installTranscriptTrigger(() =>
-      appendTranscriptPanel(videoId, { trackParams: MANUAL_EN_TRACK_PARAMS })
+      appendTranscriptPanel(videoId, { trackParams: ASR_HI_TRACK_PARAMS })
     );
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('', { status: 200 }))
     );
 
-    await expect(execute()).rejects.toThrow(
-      "YouTube's transcript panel opened a different caption track than requested"
+    const result = await execute({ language: 'hi' });
+
+    expect(result.transcript).toMatchObject({ language: 'hi', languageName: 'Hindi' });
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('shares one panel load across concurrent calls for different languages', async () => {
+    const videoId = 'U_XD5NxO8KY';
+    window.history.replaceState({}, '', `/watch?v=${videoId}`);
+    installPlayer(() =>
+      playerResponse(videoId, [
+        captionTrack({ languageCode: 'en-US', kind: 'asr' }),
+        captionTrack({ languageCode: 'hi', kind: 'asr' }),
+      ])
     );
+    let panel: ReturnType<typeof appendTranscriptPanel> | undefined;
+    const trigger = installTranscriptTrigger(() => {
+      queueMicrotask(() => {
+        panel = appendTranscriptPanel(videoId, { trackParams: ASR_HI_TRACK_PARAMS });
+      });
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 200 }))
+    );
+
+    const [english, hindi] = await Promise.all([
+      execute({ language: 'en' }),
+      execute({ language: 'hi' }),
+    ]);
+
+    expect(trigger.click).toHaveBeenCalledTimes(1);
+    expect(panel?.close).toHaveBeenCalledTimes(1);
+    expect(english.transcript?.language).toBe('hi');
+    expect(english.warnings).toHaveLength(1);
+    expect(hindi.transcript?.language).toBe('hi');
+    expect(hindi).not.toHaveProperty('warnings');
+  });
+
+  it('reports a missing video ID without touching the page', async () => {
+    window.history.replaceState({}, '', '/feed/subscriptions');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(execute()).resolves.toEqual({
+      metadata: null,
+      transcript: null,
+      error: 'Not on a YouTube video page (no video ID found)',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports missing player data for the current video', async () => {
+    window.history.replaceState({}, '', '/watch?v=current-video');
+    installPlayer(() => playerResponse('stale-video'));
+    installInitialPlayerResponse(playerResponse('another-stale-video'));
+
+    await expect(execute()).resolves.toEqual({
+      metadata: null,
+      transcript: null,
+      error: 'Could not retrieve current video data from YouTube',
+    });
   });
 
   it('keeps a shared panel load alive when only one consumer is cancelled', async () => {
@@ -590,6 +736,10 @@ describe('YouTube transcript execution context', () => {
       vi.fn(async () => new Response('', { status: 200 }))
     );
 
-    await expect(execute()).rejects.toThrow('Failed to retrieve transcript from YouTube');
+    await expect(execute()).resolves.toMatchObject({
+      metadata: { videoId },
+      transcript: null,
+      error: 'YouTube video changed while retrieving transcript',
+    });
   });
 });

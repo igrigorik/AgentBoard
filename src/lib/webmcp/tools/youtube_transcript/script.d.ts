@@ -4,8 +4,13 @@ export interface YouTubeTranscriptArguments {
   format?: 'segments' | 'text';
 }
 
+/**
+ * Expected failures are reported in `error`, never as a rejection: WebMCP collapses every
+ * callback rejection to a bare UnknownError. Only abort rejects.
+ */
 export interface YouTubeTranscriptResult {
-  metadata: {
+  /** Null only when the page offered no video data; see `error`. */
+  metadata: null | {
     videoId: string;
     title: string;
     author: string;
@@ -24,6 +29,11 @@ export interface YouTubeTranscriptResult {
     text?: string;
     segments?: Array<{ start: number; duration: number; text: string }>;
   };
+  /**
+   * Degradations on a successful read, e.g. YouTube's transcript panel loaded a different
+   * caption track than the one selected; `transcript.language` reflects the loaded track.
+   */
+  warnings?: string[];
   error?: string;
 }
 
