@@ -75,7 +75,7 @@ function nativeTool(window: Window, name: string, overrides: Partial<NativeTool>
     name,
     title: '',
     description: `${name} description`,
-    inputSchema: JSON.stringify({ type: 'object', properties: {} }),
+    inputSchema: { type: 'object', properties: {} },
     window,
     origin: window.location.origin,
     ...overrides,
@@ -149,10 +149,10 @@ describe('WebMCP page bridge catalog and execution', () => {
           {
             name: 'local_tool',
             description: 'Local tool',
-            inputSchema: JSON.stringify({
+            inputSchema: {
               type: 'object',
               properties: { value: { type: 'number' } },
-            }),
+            },
           },
         ],
       },
@@ -173,7 +173,7 @@ describe('WebMCP page bridge catalog and execution', () => {
     expect(response(harness, 'local-call').result).toBe(JSON.stringify({ echoed: { value: 7 } }));
   });
 
-  it('keeps native Window descriptors in-page and invokes the exact descriptor with JSON', async () => {
+  it('keeps native Window descriptors in-page and invokes the exact descriptor with an object', async () => {
     const harness = createHarness({ loadPolyfill: false });
     const descriptor = nativeTool(harness.window, 'native_tool', {
       annotations: { readOnlyHint: true },
@@ -201,11 +201,22 @@ describe('WebMCP page bridge catalog and execution', () => {
     await flush(harness.window);
 
     expect(native.api.executeTool.mock.calls[0][0]).toBe(descriptor);
-    expect(native.api.executeTool.mock.calls[0][1]).toBe(JSON.stringify({ answer: 42 }));
+    // Chromium M155+ takes the input object itself; a JSON string is rejected as a non-object.
+    expect(native.api.executeTool.mock.calls[0][1]).toEqual({ answer: 42 });
     expect(native.api.executeTool.mock.calls[0][2].signal).toBeInstanceOf(
       harness.window.AbortSignal
     );
     expect(response(harness, 'native-call').result).toBe('native-result');
+
+    harness.send({
+      id: 'native-call-without-arguments',
+      method: 'tools/call',
+      params: { name: 'native_tool' },
+    });
+    await flush(harness.window);
+
+    expect(native.api.executeTool.mock.calls[1][1]).toEqual({});
+    expect(response(harness, 'native-call-without-arguments').result).toBe('native-result');
   });
 
   it('forwards cancellation to an in-flight ModelContext execution', async () => {

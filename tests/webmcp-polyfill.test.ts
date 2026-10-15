@@ -260,7 +260,7 @@ describe('WebMCP local backend contract', () => {
     const dom = createDom();
     loadPolyfill(dom);
     const modelContext = (dom.window.document as any).modelContext;
-    await registerTool(modelContext, {
+    const { tool: zTool } = await registerTool(modelContext, {
       name: 'z_tool',
       title: 'Zed',
       annotations: { readOnlyHint: true, untrustedContentHint: true },
@@ -269,6 +269,8 @@ describe('WebMCP local backend contract', () => {
       name: 'a_tool',
       inputSchema: undefined,
     });
+    // Registration serializes the schema; later mutation of the page's object is not observed.
+    (zTool.inputSchema as Record<string, unknown>).type = 'mutated after registration';
 
     const first = await modelContext.getTools();
     const second = await modelContext.getTools();
@@ -284,10 +286,17 @@ describe('WebMCP local backend contract', () => {
     expect(first[0]).not.toHaveProperty('inputSchema');
     expect(first[1]).toMatchObject({
       title: 'Zed',
-      inputSchema: JSON.stringify({ type: 'object', properties: {} }),
+      inputSchema: { type: 'object', properties: {} },
       annotations: { readOnlyHint: true, untrustedContentHint: true },
     });
     expect(first[0]).not.toBe(second[0]);
+    // Each descriptor carries its own object parsed from the serialized registration schema.
+    expect(first[1].inputSchema).not.toBe(second[1].inputSchema);
+    first[1].inputSchema.type = 'mutated by caller';
+    expect((await modelContext.getTools())[1].inputSchema).toEqual({
+      type: 'object',
+      properties: {},
+    });
   });
 
   it('converts tool titles as USVString values', async () => {
@@ -414,13 +423,16 @@ describe('WebMCP local backend contract', () => {
       execute,
     });
     const [descriptor] = await modelContext.getTools();
+    const input = { value: 7 };
 
-    const result = await modelContext.executeTool(descriptor, JSON.stringify({ value: 7 }));
+    const result = await modelContext.executeTool(descriptor, input);
 
     expect(execute).toHaveBeenCalledWith(
       { value: 7 },
       { signal: expect.any(dom.window.AbortSignal) }
     );
+    // The tool receives a JSON round trip of the caller's object, never the object itself.
+    expect(execute.mock.calls[0][0]).not.toBe(input);
     expect(execute.mock.calls[0][1].signal.aborted).toBe(false);
     expect(receiver).toBeUndefined();
     expect(result).toBe(JSON.stringify({ echoed: { value: 7 } }));
@@ -441,7 +453,7 @@ describe('WebMCP local backend contract', () => {
     });
     const [descriptor] = await modelContext.getTools();
 
-    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toMatchObject({
+    await expect(modelContext.executeTool(descriptor, {})).rejects.toMatchObject({
       name: 'UnknownError',
       message: 'WebMCP tool execution failed',
     });
@@ -463,7 +475,7 @@ describe('WebMCP local backend contract', () => {
     });
     const [descriptor] = await modelContext.getTools();
 
-    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toMatchObject({
+    await expect(modelContext.executeTool(descriptor, {})).rejects.toMatchObject({
       name: 'UnknownError',
       message: 'WebMCP tool execution failed',
     });
@@ -480,25 +492,78 @@ describe('WebMCP local backend contract', () => {
     for (const member of ['name', 'description', 'window', 'origin']) {
       const missingDescriptor = { ...descriptor };
       delete missingDescriptor[member];
-      await expect(modelContext.executeTool(missingDescriptor, '{}')).rejects.toBeInstanceOf(
+      await expect(modelContext.executeTool(missingDescriptor, {})).rejects.toBeInstanceOf(
         dom.window.TypeError
       );
       await expect(
-        modelContext.executeTool({ ...descriptor, [member]: undefined }, '{}')
+        modelContext.executeTool({ ...descriptor, [member]: undefined }, {})
       ).rejects.toBeInstanceOf(dom.window.TypeError);
     }
     await expect(
-      modelContext.executeTool({ ...descriptor, window: {} }, '{}')
+      modelContext.executeTool({ ...descriptor, window: {} }, {})
     ).rejects.toBeInstanceOf(dom.window.TypeError);
 
-    for (const input of ['not-json', '"primitive"', '123', 'true', 'null']) {
-      await expect(modelContext.executeTool(descriptor, input)).rejects.toMatchObject({
-        name: 'UnknownError',
-      });
-    }
     await expect(
-      modelContext.executeTool({ ...descriptor, name: 'missing_tool' }, '{}')
+      modelContext.executeTool({ ...descriptor, name: 'missing_tool' }, {})
     ).rejects.toMatchObject({ name: 'UnknownError' });
+  });
+
+  it('takes an input object and rejects what object conversion or JSON serialization rejects', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const { execute } = await registerTool(modelContext);
+    const [descriptor] = await modelContext.getTools();
+
+    // Arrays are objects; an omitted or undefined input is an empty object.
+    await modelContext.executeTool(descriptor, [1, 2, 3]);
+    await modelContext.executeTool(descriptor);
+    await modelContext.executeTool(descriptor, undefined);
+    await modelContext.executeTool(descriptor, undefined, {});
+    expect(execute.mock.calls.map(([input]) => input)).toEqual([[1, 2, 3], {}, {}, {}]);
+    execute.mockClear();
+
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    for (const input of [
+      '{}',
+      'hello',
+      123,
+      true,
+      null,
+      10n,
+      Symbol('input'),
+      () => ({}),
+      { toJSON: () => undefined },
+      { count: 10n },
+      circular,
+    ]) {
+      await expect(modelContext.executeTool(descriptor, input)).rejects.toBeInstanceOf(
+        dom.window.TypeError
+      );
+    }
+
+    const serializationError = new Error('toJSON failure');
+    await expect(
+      modelContext.executeTool(descriptor, {
+        toJSON() {
+          throw serializationError;
+        },
+      })
+    ).rejects.toBe(serializationError);
+
+    // Serialization precedes the abort check, so invalid input wins over an aborted signal.
+    const aborted = new dom.window.AbortController();
+    aborted.abort();
+    await expect(
+      modelContext.executeTool(descriptor, circular, { signal: aborted.signal })
+    ).rejects.toBeInstanceOf(dom.window.TypeError);
+
+    // toJSON() can serialize an object to a primitive, which never reaches the tool.
+    await expect(
+      modelContext.executeTool(descriptor, { toJSON: () => 'primitive' })
+    ).rejects.toMatchObject({ name: 'UnknownError' });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('propagates per-execution cancellation with Chromium event ordering', async () => {
@@ -527,7 +592,7 @@ describe('WebMCP local backend contract', () => {
     const preAbortedReason = { reason: 'already cancelled' };
     preAborted.abort(preAbortedReason);
     await expect(
-      modelContext.executeTool(descriptor, '{}', { signal: preAborted.signal })
+      modelContext.executeTool(descriptor, {}, { signal: preAborted.signal })
     ).rejects.toBe(preAbortedReason);
     expect(execute).not.toHaveBeenCalled();
 
@@ -553,7 +618,7 @@ describe('WebMCP local backend contract', () => {
 
     const controller = new dom.window.AbortController();
     const reason = { reason: 'cancelled' };
-    const execution = modelContext.executeTool(descriptor, '{}', { signal: controller.signal });
+    const execution = modelContext.executeTool(descriptor, {}, { signal: controller.signal });
     expect(execute).toHaveBeenCalledOnce();
     expect(events).toEqual(['tool started', 'toolactivated']);
 

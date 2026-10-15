@@ -397,7 +397,8 @@ export class TabManager {
       return;
     }
 
-    // Parse inputSchema if it's a JSON string (Chrome's native API returns it as string)
+    // Current Chromium and the local polyfill expose inputSchema as an object; Chromium before M155
+    // exposed a JSON string, which is still parsed here.
     const normalizedTools = (params.tools || []).map((tool) => {
       let inputSchema = tool.inputSchema;
       if (typeof inputSchema === 'string') {

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { chromeSandboxArgs, findChrome } from './chrome-harness.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
-const defaultWptRevision = 'c7c7a1b2641777d1f5f3934705ddde645eb82116';
+const defaultWptRevision = '0c7a6c61ffc3e1d4eab65b7a8a6b1281aaa7c703';
 const wptRevision = process.env.AGENTBOARD_WPT_REVISION || defaultWptRevision;
 const wptRoot = path.resolve(
   process.env.AGENTBOARD_WPT_ROOT || path.join(repositoryRoot, 'local/wpt')

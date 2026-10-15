@@ -83,6 +83,20 @@
     return new DOMException('WebMCP tool execution failed', 'UnknownError');
   }
 
+  /** Web IDL `object` conversion accepts functions and rejects null and every other primitive. */
+  function isWebIdlObject(value) {
+    return (typeof value === 'object' && value !== null) || typeof value === 'function';
+  }
+
+  /** Infra's "serialize a JavaScript value to a JSON string". */
+  function serializeJsonString(value) {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) {
+      throw new TypeError('Value cannot be serialized to a JSON string');
+    }
+    return serialized;
+  }
+
   function serializeExecutionResult(value) {
     const serialized =
       value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -218,7 +232,10 @@
             window,
             origin: window.location.origin
           };
-          if (entry.inputSchema !== undefined) descriptor.inputSchema = entry.inputSchema;
+          // Like Chromium, expose a fresh object parsed from the schema serialized at registration.
+          if (entry.inputSchema !== undefined) {
+            descriptor.inputSchema = JSON.parse(entry.inputSchema);
+          }
           if (entry.annotations !== undefined) descriptor.annotations = { ...entry.annotations };
           return descriptor;
         });
@@ -226,7 +243,7 @@
       return Promise.resolve(tools);
     }
 
-    executeTool(tool, inputArguments, rawOptions = {}) {
+    executeTool(tool, inputObject, rawOptions = {}) {
       if (this === null || !(this instanceof LocalModelContext)) {
         throw new TypeError('Illegal invocation');
       }
@@ -250,10 +267,24 @@
       }
       const origin = String(descriptor.origin).toWellFormed();
 
+      // `optional object inputObject`: undefined means omitted; any other non-object is a TypeError.
+      if (inputObject !== undefined && !isWebIdlObject(inputObject)) {
+        return Promise.reject(new TypeError("The 'inputObject' argument must be an object"));
+      }
+
       const options = rawOptions ?? {};
       const signal = options.signal;
       if (signal !== undefined && !(signal instanceof AbortSignal)) {
         throw new TypeError("The 'signal' member must be an AbortSignal");
+      }
+
+      // The tool receives only the JSON serialization of the caller's object, never the object
+      // itself. Serialization failures reject before the abort check, matching the spec's order.
+      let inputArguments;
+      try {
+        inputArguments = serializeJsonString(inputObject === undefined ? {} : inputObject);
+      } catch (error) {
+        return Promise.reject(error);
       }
       if (signal?.aborted) return Promise.reject(signal.reason);
 
@@ -263,9 +294,10 @@
           : null;
       if (!entry) return Promise.reject(unknownError());
 
+      // A toJSON() method can serialize an object to a primitive; tools only ever receive objects.
       let input;
       try {
-        input = JSON.parse(String(inputArguments));
+        input = JSON.parse(inputArguments);
       } catch {
         return Promise.reject(unknownError());
       }
