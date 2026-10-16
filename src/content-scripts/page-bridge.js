@@ -241,11 +241,34 @@
 
     const methods = getApiMethods();
     if (!methods) throw new PublicBridgeError('Tool catalog is unavailable');
+
+    // Spec input is an object. Older Chromium wanted a string: retry only if the tool never ran.
+    const input = args ?? {};
+    let activated = false;
+    const onActivated = (event) => {
+      if (event.toolName === name) activated = true;
+    };
+    window.addEventListener('toolactivated', onActivated);
+    try {
+      return await Reflect.apply(methods.executeTool, api, [registeredTool, input, { signal }]);
+    } catch (error) {
+      if (activated || signal.aborted || !isLegacyStringInputRejection(error)) throw error;
+    } finally {
+      window.removeEventListener('toolactivated', onActivated);
+    }
     return Reflect.apply(methods.executeTool, api, [
       registeredTool,
-      JSON.stringify(args ?? {}),
+      JSON.stringify(input),
       { signal }
     ]);
+  }
+
+  function isLegacyStringInputRejection(error) {
+    try {
+      return error instanceof DOMException && error.name === 'UnknownError';
+    } catch {
+      return false;
+    }
   }
 
   async function onMessage(event) {

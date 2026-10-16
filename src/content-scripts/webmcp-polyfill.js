@@ -263,9 +263,14 @@
           : null;
       if (!entry) return Promise.reject(unknownError());
 
+      // Spec input is an object; a JSON string is still accepted from older callers.
       let input;
       try {
-        input = JSON.parse(String(inputArguments));
+        input = JSON.parse(
+          typeof inputArguments === 'string'
+            ? inputArguments
+            : JSON.stringify(inputArguments === undefined ? {} : inputArguments)
+        );
       } catch {
         return Promise.reject(unknownError());
       }

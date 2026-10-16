@@ -201,7 +201,7 @@ describe('WebMCP page bridge catalog and execution', () => {
     await flush(harness.window);
 
     expect(native.api.executeTool.mock.calls[0][0]).toBe(descriptor);
-    expect(native.api.executeTool.mock.calls[0][1]).toBe(JSON.stringify({ answer: 42 }));
+    expect(native.api.executeTool.mock.calls[0][1]).toEqual({ answer: 42 });
     expect(native.api.executeTool.mock.calls[0][2].signal).toBeInstanceOf(
       harness.window.AbortSignal
     );
@@ -389,6 +389,56 @@ describe('WebMCP page bridge catalog and execution', () => {
       'Tool catalog is unavailable'
     );
     expect(native.api.executeTool).not.toHaveBeenCalled();
+  });
+
+  it('retries with a JSON string only when legacy ModelContext rejected the object before running', async () => {
+    const harness = createHarness({ loadPolyfill: false });
+    const native = createNativeHarness(harness.window, [nativeTool(harness.window, 'legacy_tool')]);
+    native.api.executeTool.mockImplementationOnce(async () => {
+      throw new harness.window.DOMException('WebMCP tool execution failed', 'UnknownError');
+    });
+    installNative(harness, native);
+    harness.loadBridge();
+    await flush(harness.window);
+
+    harness.send({
+      id: 'legacy-call',
+      method: 'tools/call',
+      params: { name: 'legacy_tool', arguments: { answer: 42 } },
+    });
+    await flush(harness.window);
+
+    expect(native.api.executeTool).toHaveBeenCalledTimes(2);
+    expect(native.api.executeTool.mock.calls[0][1]).toEqual({ answer: 42 });
+    expect(native.api.executeTool.mock.calls[1][1]).toBe(JSON.stringify({ answer: 42 }));
+    expect(response(harness, 'legacy-call').result).toBe('native-result');
+  });
+
+  it('never retries a tool whose callback already ran', async () => {
+    const harness = createHarness({ loadPolyfill: false });
+    const native = createNativeHarness(harness.window, [nativeTool(harness.window, 'ran_tool')]);
+    native.api.executeTool.mockImplementationOnce(async () => {
+      const event = new harness.window.Event('toolactivated');
+      Object.defineProperty(event, 'toolName', { value: 'ran_tool' });
+      harness.window.dispatchEvent(event);
+      throw new harness.window.DOMException('WebMCP tool execution failed', 'UnknownError');
+    });
+    installNative(harness, native);
+    harness.loadBridge();
+    await flush(harness.window);
+
+    harness.send({
+      id: 'ran-call',
+      method: 'tools/call',
+      params: { name: 'ran_tool', arguments: {} },
+    });
+    await flush(harness.window);
+
+    expect(native.api.executeTool).toHaveBeenCalledTimes(1);
+    expect(response(harness, 'ran-call').error).toEqual({
+      code: -32000,
+      message: 'Tool execution failed',
+    });
   });
 
   it('does not relay arbitrary tool errors or stacks across the page boundary', async () => {

@@ -424,6 +424,15 @@ describe('WebMCP local backend contract', () => {
     expect(execute.mock.calls[0][1].signal.aborted).toBe(false);
     expect(receiver).toBeUndefined();
     expect(result).toBe(JSON.stringify({ echoed: { value: 7 } }));
+
+    const input = { value: 8 };
+    const objectResult = await modelContext.executeTool(descriptor, input);
+    expect(execute.mock.calls[1][0]).toEqual({ value: 8 });
+    expect(execute.mock.calls[1][0]).not.toBe(input);
+    expect(objectResult).toBe(JSON.stringify({ echoed: { value: 8 } }));
+
+    await modelContext.executeTool(descriptor);
+    expect(execute.mock.calls[2][0]).toEqual({});
   });
 
   it('maps callback rejection to UnknownError without exposing its details', async () => {
