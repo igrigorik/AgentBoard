@@ -111,20 +111,111 @@ describe('WebMCP bootstrap backend selection', () => {
     expect(native.registerTool).toHaveBeenCalledWith(tool);
   });
 
-  it('forwards native toolchange events through the stable facade', async () => {
+  it('forwards native ModelContext events through the stable facade', async () => {
     const dom = createDom();
     loadPolyfill(dom);
     const facade = (dom.window.document as any).modelContext;
     const native = createNativeModelContext(dom);
     exposeNativeOnPrototype(dom, native);
     const listener = vi.fn();
-    facade.addEventListener('toolchange', listener);
+    for (const type of ['toolchange', 'toolactivated', 'toolcancel']) {
+      facade.addEventListener(type, listener);
+    }
 
     await facade.getTools();
     native.dispatchEvent(new dom.window.Event('toolchange'));
+    const nativeActivated = new dom.window.Event('toolactivated');
+    Object.defineProperty(nativeActivated, 'toolName', { value: 'native_tool' });
+    native.dispatchEvent(nativeActivated);
+    const nativeCancelled = new dom.window.Event('toolcancel');
+    Object.defineProperty(nativeCancelled, 'toolName', { value: 'native_tool' });
+    native.dispatchEvent(nativeCancelled);
 
-    expect(listener).toHaveBeenCalledOnce();
-    expect(listener.mock.calls[0][0].target).toBe(facade);
+    const forwarded = listener.mock.calls.map(([event]) => event);
+    expect(forwarded.map((event) => event.type)).toEqual([
+      'toolchange',
+      'toolactivated',
+      'toolcancel',
+    ]);
+    expect(forwarded.every((event) => event.target === facade)).toBe(true);
+    // Forwarded tool events are re-created as the page-visible interfaces, carrying the tool name.
+    expect(forwarded[1]).toBeInstanceOf((dom.window as any).ToolActivatedEvent);
+    expect(forwarded[2]).toBeInstanceOf((dom.window as any).ToolCancelEvent);
+    expect(forwarded.slice(1).map((event) => event.toolName)).toEqual([
+      'native_tool',
+      'native_tool',
+    ]);
+  });
+
+  it('exposes the ToolActivatedEvent and ToolCancelEvent interfaces', () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const { ToolActivatedEvent, ToolCancelEvent } = dom.window as any;
+
+    for (const [ToolEvent, name] of [
+      [ToolActivatedEvent, 'ToolActivatedEvent'],
+      [ToolCancelEvent, 'ToolCancelEvent'],
+    ]) {
+      expect(Object.getOwnPropertyDescriptor(dom.window, name)).toMatchObject({
+        value: ToolEvent,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+      expect(ToolEvent.name).toBe(name);
+      expect(Object.getPrototypeOf(ToolEvent.prototype)).toBe(dom.window.Event.prototype);
+
+      const event = new ToolEvent('custom', { toolName: 'named', bubbles: true });
+      expect(Object.prototype.toString.call(event)).toBe(`[object ${name}]`);
+      expect(event.type).toBe('custom');
+      expect(event.bubbles).toBe(true);
+      expect(event.toolName).toBe('named');
+      // `DOMString toolName = ""`: omitted defaults to the empty string, anything else stringifies.
+      expect(new ToolEvent('custom').toolName).toBe('');
+      expect(new ToolEvent('custom', {}).toolName).toBe('');
+      expect(new ToolEvent('custom', { toolName: 7 }).toolName).toBe('7');
+    }
+  });
+
+  it('implements ontoolchange, ontoolactivated and ontoolcancel handler attributes', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const seen: string[] = [];
+
+    for (const type of ['toolchange', 'toolactivated', 'toolcancel']) {
+      const attribute = `on${type}`;
+      expect(modelContext[attribute]).toBeNull();
+      expect(() => (modelContext[attribute] = 'nope')).toThrow(dom.window.TypeError);
+
+      const replaced = vi.fn();
+      modelContext[attribute] = replaced;
+      const handler = (event: any) => seen.push(`${type}:${event.toolName ?? ''}`);
+      modelContext[attribute] = handler;
+      expect(modelContext[attribute]).toBe(handler);
+      modelContext.dispatchEvent(new dom.window.Event(type));
+      // Assigning a new handler detaches the previous one instead of stacking listeners.
+      expect(replaced).not.toHaveBeenCalled();
+    }
+    expect(seen).toEqual(['toolchange:', 'toolactivated:', 'toolcancel:']);
+    seen.length = 0;
+
+    const execute = vi.fn(
+      () => new Promise<never>(() => {}) // never settles so cancellation is observable
+    );
+    await registerTool(modelContext, { name: 'handled_tool', execute });
+    const [descriptor] = await modelContext.getTools();
+    const controller = new dom.window.AbortController();
+    const execution = modelContext.executeTool(descriptor, {}, { signal: controller.signal });
+    controller.abort();
+    await expect(execution).rejects.toMatchObject({ name: 'AbortError' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['toolchange:', 'toolactivated:handled_tool', 'toolcancel:handled_tool']);
+
+    modelContext.ontoolcancel = null;
+    expect(modelContext.ontoolcancel).toBeNull();
+    modelContext.dispatchEvent(new dom.window.Event('toolcancel'));
+    expect(seen).toHaveLength(3);
   });
 
   it('latches the local backend when first use occurs before native exposure', async () => {
@@ -619,19 +710,27 @@ describe('WebMCP local backend contract', () => {
     ).rejects.toBe(preAbortedReason);
     expect(execute).not.toHaveBeenCalled();
 
-    dom.window.addEventListener(
+    // Chromium dispatches ToolActivatedEvent/ToolCancelEvent at the ModelContext, never at window.
+    const windowListener = vi.fn();
+    dom.window.addEventListener('toolactivated', windowListener);
+    dom.window.addEventListener('toolcancel', windowListener);
+    modelContext.addEventListener(
       'toolactivated',
-      (event) => {
-        expect((event as Event & { toolName: string }).toolName).toBe('slow_tool');
+      (event: any) => {
+        expect(event).toBeInstanceOf((dom.window as any).ToolActivatedEvent);
+        expect(event.target).toBe(modelContext);
+        expect(event.toolName).toBe('slow_tool');
         events.push('toolactivated');
       },
       { once: true }
     );
     const cancelled = new Promise<void>((resolve) => {
-      dom.window.addEventListener(
+      modelContext.addEventListener(
         'toolcancel',
-        (event) => {
-          expect((event as Event & { toolName: string }).toolName).toBe('slow_tool');
+        (event: any) => {
+          expect(event).toBeInstanceOf((dom.window as any).ToolCancelEvent);
+          expect(event.target).toBe(modelContext);
+          expect(event.toolName).toBe('slow_tool');
           events.push('toolcancel');
           resolve();
         },
@@ -661,6 +760,7 @@ describe('WebMCP local backend contract', () => {
       'signal aborted',
       'toolcancel',
     ]);
+    expect(windowListener).not.toHaveBeenCalled();
 
     let serializationAttempted = false;
     finishExecution({

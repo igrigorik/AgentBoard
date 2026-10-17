@@ -486,6 +486,7 @@ if (document.modelContext) {
 - `getTools(options)` - Discover visible tool descriptors
 - `executeTool(tool, inputObject, options)` - Execute a discovered descriptor with an input object (omitted means `{}`)
 - `addEventListener('toolchange', handler)` - Observe registration changes
+- `addEventListener('toolactivated' | 'toolcancel', handler)` - Observe execution start and cancellation; `event.toolName` names the tool
 
 ## Testing Your Tool
 

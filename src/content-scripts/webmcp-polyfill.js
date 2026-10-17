@@ -103,19 +103,77 @@
     return serialized || 'Operation succeeded';
   }
 
-  function dispatchToolEvent(type, toolName) {
-    const event = new Event(type);
-    Object.defineProperty(event, 'toolName', {
-      value: toolName,
-      configurable: true,
-      enumerable: true
-    });
-    window.dispatchEvent(event);
+  /**
+   * `interface ToolActivatedEvent : Event { constructor(DOMString type, optional init = {});
+   * readonly attribute DOMString toolName; }` and the identically shaped ToolCancelEvent. Both
+   * are dispatched at the ModelContext, matching Chromium since M156; nothing fires at window.
+   */
+  function defineToolEventInterface(interfaceName) {
+    const ToolEvent = class extends Event {
+      #toolName;
+
+      constructor(type, eventInitDict = {}) {
+        super(type, eventInitDict);
+        const toolName = eventInitDict?.toolName;
+        this.#toolName = toolName === undefined ? '' : String(toolName);
+      }
+
+      get toolName() {
+        return this.#toolName;
+      }
+    };
+    Object.defineProperty(ToolEvent, 'name', { value: interfaceName });
+    Object.defineProperty(ToolEvent.prototype, Symbol.toStringTag, { value: interfaceName });
+    return ToolEvent;
+  }
+
+  const ToolActivatedEvent = defineToolEventInterface('ToolActivatedEvent');
+  const ToolCancelEvent = defineToolEventInterface('ToolCancelEvent');
+  const TOOL_EVENT_INTERFACES = { toolactivated: ToolActivatedEvent, toolcancel: ToolCancelEvent };
+  const MODEL_CONTEXT_EVENT_TYPES = ['toolchange', 'toolactivated', 'toolcancel'];
+
+  /** Re-create an event so a forwarding target dispatches its own instance, never a used one. */
+  function cloneModelContextEvent(event) {
+    const ToolEvent = TOOL_EVENT_INTERFACES[event.type];
+    if (!ToolEvent) return new Event(event.type);
+    return new ToolEvent(event.type, { toolName: event.toolName });
+  }
+
+  /**
+   * Web IDL event handler attributes (`ontoolchange` etc.) layered over EventTarget. One shared
+   * definition serves both the local backend and the public facade; the handler map lives outside
+   * the classes because private fields cannot be installed on a prototype from a helper.
+   */
+  const eventHandlerAttributes = new WeakMap();
+  function defineEventHandlerAttributes(prototype, types) {
+    for (const type of types) {
+      Object.defineProperty(prototype, `on${type}`, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          return eventHandlerAttributes.get(this)?.get(type) ?? null;
+        },
+        set(callback) {
+          if (callback !== null && typeof callback !== 'function') {
+            throw new TypeError(`on${type} must be a function or null`);
+          }
+          let handlers = eventHandlerAttributes.get(this);
+          if (!handlers) eventHandlerAttributes.set(this, (handlers = new Map()));
+          const previous = handlers.get(type);
+          if (previous) this.removeEventListener(type, previous);
+          if (callback) {
+            handlers.set(type, callback);
+            this.addEventListener(type, callback);
+          } else {
+            handlers.delete(type);
+          }
+        }
+      });
+    }
   }
 
   class LocalModelContext extends EventTarget {
     #tools = new Map();
-    #ontoolchange = null;
 
     registerTool(rawTool, rawOptions = {}) {
       if (this === null || !(this instanceof LocalModelContext)) {
@@ -175,7 +233,7 @@
       }
       if (signal?.aborted) return Promise.reject(signal.reason);
 
-      // ToolAnnotations dictionary conversion: every member defaults to false once annotations exist.
+      // ToolAnnotations is a dictionary: once present, every omitted member reads back as false.
       const annotations = rawTool.annotations
         ? {
             readOnlyHint: Boolean(rawTool.annotations.readOnlyHint),
@@ -323,7 +381,7 @@
           // Caller rejection runs first; target cancellation crosses a browser boundary in Chromium.
           setTimeout(() => {
             callbackController.abort(abortError());
-            dispatchToolEvent('toolcancel', name);
+            this.dispatchEvent(new ToolCancelEvent('toolcancel', { toolName: name }));
           }, 0);
         };
         signal?.addEventListener('abort', onAbort, { once: true });
@@ -338,7 +396,7 @@
         } catch {
           callbackFailed = true;
         }
-        dispatchToolEvent('toolactivated', name);
+        this.dispatchEvent(new ToolActivatedEvent('toolactivated', { toolName: name }));
 
         if (callbackFailed) {
           if (!settled) {
@@ -367,19 +425,6 @@
       });
     }
 
-    set ontoolchange(callback) {
-      if (callback !== null && typeof callback !== 'function') {
-        throw new TypeError('ontoolchange must be a function or null');
-      }
-      if (this.#ontoolchange) this.removeEventListener('toolchange', this.#ontoolchange);
-      this.#ontoolchange = callback;
-      if (callback) this.addEventListener('toolchange', callback);
-    }
-
-    get ontoolchange() {
-      return this.#ontoolchange;
-    }
-
     #queueToolChange(afterDispatch) {
       setTimeout(() => {
         this.dispatchEvent(new Event('toolchange'));
@@ -391,6 +436,7 @@
   Object.defineProperty(LocalModelContext.prototype, Symbol.toStringTag, {
     value: 'ModelContext'
   });
+  defineEventHandlerAttributes(LocalModelContext.prototype, MODEL_CONTEXT_EVENT_TYPES);
 
   ensureTrustedTypesPolicy();
 
@@ -419,8 +465,10 @@
 
     const native = readNativeModelContext();
     const api = native || new LocalModelContext();
-    const forwardToolChange = () => facade.dispatchEvent(new Event('toolchange'));
-    api.addEventListener('toolchange', forwardToolChange);
+    // Page code only ever holds the facade, so events the backend fires at itself must be
+    // re-dispatched there with the facade as target.
+    const forwardEvent = (event) => facade.dispatchEvent(cloneModelContextEvent(event));
+    for (const type of MODEL_CONTEXT_EVENT_TYPES) api.addEventListener(type, forwardEvent);
 
     selectedBackend = {
       api,
@@ -433,8 +481,6 @@
   }
 
   class ModelContext extends EventTarget {
-    #ontoolchange = null;
-
     constructor(...constructionArgs) {
       if (constructionArgs[0] !== modelContextConstructionKey) {
         throw new TypeError('Illegal constructor');
@@ -459,29 +505,19 @@
       const backend = selectBackend();
       return Reflect.apply(backend.executeTool, backend.api, args);
     }
-
-    set ontoolchange(callback) {
-      if (callback !== null && typeof callback !== 'function') {
-        throw new TypeError('ontoolchange must be a function or null');
-      }
-      if (this.#ontoolchange) this.removeEventListener('toolchange', this.#ontoolchange);
-      this.#ontoolchange = callback;
-      if (callback) this.addEventListener('toolchange', callback);
-    }
-
-    get ontoolchange() {
-      return this.#ontoolchange;
-    }
   }
 
   Object.defineProperty(ModelContext.prototype, Symbol.toStringTag, {
     value: 'ModelContext'
   });
-  Object.defineProperty(window, 'ModelContext', {
-    value: ModelContext,
-    writable: true,
-    configurable: true
-  });
+  defineEventHandlerAttributes(ModelContext.prototype, MODEL_CONTEXT_EVENT_TYPES);
+  for (const [interfaceName, value] of Object.entries({
+    ModelContext,
+    ToolActivatedEvent,
+    ToolCancelEvent
+  })) {
+    Object.defineProperty(window, interfaceName, { value, writable: true, configurable: true });
+  }
 
   facade = new ModelContext(modelContextConstructionKey);
   Object.defineProperty(document, 'modelContext', {
