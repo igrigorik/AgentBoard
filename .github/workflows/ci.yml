@@ -73,6 +73,15 @@ jobs:
           CHROME_FOR_TESTING_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
           AGENTBOARD_CHROME_NO_SANDBOX: '1'
 
+      # Runs the built polyfill against the WPT revision pinned in tests/browser/webmcp-wpt.mjs
+      # with native WebMCP disabled, so a pin bump cannot land while the polyfill lags Chromium.
+      - name: Run WebMCP polyfill conformance tests (WPT)
+        if: matrix.node-version == '24.x'
+        run: pnpm run test:browser:webmcp-wpt:built
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          AGENTBOARD_CHROME_NO_SANDBOX: '1'
+
       # Optional: Upload build artifacts for debugging
       - name: Upload build artifacts
         if: always()
