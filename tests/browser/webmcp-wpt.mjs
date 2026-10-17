@@ -200,9 +200,11 @@ function main() {
   const binaryArgs = ['--disable-blink-features=WebMCP', ...chromeSandboxArgs()].map(
     (argument) => `--binary-arg=${argument}`
   );
+  // Options precede the positionals so `product` and the test list stay contiguous: argparse before
+  // Python 3.12.7 consumes a trailing nargs='*' positional as empty when options separate it from
+  // the one before, leaving every test path "unrecognized" (stock python3 on Ubuntu 24.04 is 3.12.3).
   const args = [
     'run',
-    'chrome',
     '--yes',
     `--channel=${inferChromeChannel(chrome)}`,
     `--binary=${chrome}`,
@@ -215,6 +217,7 @@ function main() {
     `--inject-script=${injectedPolyfillPath}`,
     `--log-wptreport=${reportPath}`,
     ...binaryArgs,
+    'chrome',
     ...selectedTests,
   ];
 
