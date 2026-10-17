@@ -111,20 +111,111 @@ describe('WebMCP bootstrap backend selection', () => {
     expect(native.registerTool).toHaveBeenCalledWith(tool);
   });
 
-  it('forwards native toolchange events through the stable facade', async () => {
+  it('forwards native ModelContext events through the stable facade', async () => {
     const dom = createDom();
     loadPolyfill(dom);
     const facade = (dom.window.document as any).modelContext;
     const native = createNativeModelContext(dom);
     exposeNativeOnPrototype(dom, native);
     const listener = vi.fn();
-    facade.addEventListener('toolchange', listener);
+    for (const type of ['toolchange', 'toolactivated', 'toolcancel']) {
+      facade.addEventListener(type, listener);
+    }
 
     await facade.getTools();
     native.dispatchEvent(new dom.window.Event('toolchange'));
+    const nativeActivated = new dom.window.Event('toolactivated');
+    Object.defineProperty(nativeActivated, 'toolName', { value: 'native_tool' });
+    native.dispatchEvent(nativeActivated);
+    const nativeCancelled = new dom.window.Event('toolcancel');
+    Object.defineProperty(nativeCancelled, 'toolName', { value: 'native_tool' });
+    native.dispatchEvent(nativeCancelled);
 
-    expect(listener).toHaveBeenCalledOnce();
-    expect(listener.mock.calls[0][0].target).toBe(facade);
+    const forwarded = listener.mock.calls.map(([event]) => event);
+    expect(forwarded.map((event) => event.type)).toEqual([
+      'toolchange',
+      'toolactivated',
+      'toolcancel',
+    ]);
+    expect(forwarded.every((event) => event.target === facade)).toBe(true);
+    // Forwarded tool events are re-created as the page-visible interfaces, carrying the tool name.
+    expect(forwarded[1]).toBeInstanceOf((dom.window as any).ToolActivatedEvent);
+    expect(forwarded[2]).toBeInstanceOf((dom.window as any).ToolCancelEvent);
+    expect(forwarded.slice(1).map((event) => event.toolName)).toEqual([
+      'native_tool',
+      'native_tool',
+    ]);
+  });
+
+  it('exposes the ToolActivatedEvent and ToolCancelEvent interfaces', () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const { ToolActivatedEvent, ToolCancelEvent } = dom.window as any;
+
+    for (const [ToolEvent, name] of [
+      [ToolActivatedEvent, 'ToolActivatedEvent'],
+      [ToolCancelEvent, 'ToolCancelEvent'],
+    ]) {
+      expect(Object.getOwnPropertyDescriptor(dom.window, name)).toMatchObject({
+        value: ToolEvent,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+      expect(ToolEvent.name).toBe(name);
+      expect(Object.getPrototypeOf(ToolEvent.prototype)).toBe(dom.window.Event.prototype);
+
+      const event = new ToolEvent('custom', { toolName: 'named', bubbles: true });
+      expect(Object.prototype.toString.call(event)).toBe(`[object ${name}]`);
+      expect(event.type).toBe('custom');
+      expect(event.bubbles).toBe(true);
+      expect(event.toolName).toBe('named');
+      // `DOMString toolName = ""`: omitted defaults to the empty string, anything else stringifies.
+      expect(new ToolEvent('custom').toolName).toBe('');
+      expect(new ToolEvent('custom', {}).toolName).toBe('');
+      expect(new ToolEvent('custom', { toolName: 7 }).toolName).toBe('7');
+    }
+  });
+
+  it('implements ontoolchange, ontoolactivated and ontoolcancel handler attributes', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const seen: string[] = [];
+
+    for (const type of ['toolchange', 'toolactivated', 'toolcancel']) {
+      const attribute = `on${type}`;
+      expect(modelContext[attribute]).toBeNull();
+      expect(() => (modelContext[attribute] = 'nope')).toThrow(dom.window.TypeError);
+
+      const replaced = vi.fn();
+      modelContext[attribute] = replaced;
+      const handler = (event: any) => seen.push(`${type}:${event.toolName ?? ''}`);
+      modelContext[attribute] = handler;
+      expect(modelContext[attribute]).toBe(handler);
+      modelContext.dispatchEvent(new dom.window.Event(type));
+      // Assigning a new handler detaches the previous one instead of stacking listeners.
+      expect(replaced).not.toHaveBeenCalled();
+    }
+    expect(seen).toEqual(['toolchange:', 'toolactivated:', 'toolcancel:']);
+    seen.length = 0;
+
+    const execute = vi.fn(
+      () => new Promise<never>(() => {}) // never settles so cancellation is observable
+    );
+    await registerTool(modelContext, { name: 'handled_tool', execute });
+    const [descriptor] = await modelContext.getTools();
+    const controller = new dom.window.AbortController();
+    const execution = modelContext.executeTool(descriptor, {}, { signal: controller.signal });
+    controller.abort();
+    await expect(execution).rejects.toMatchObject({ name: 'AbortError' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['toolchange:', 'toolactivated:handled_tool', 'toolcancel:handled_tool']);
+
+    modelContext.ontoolcancel = null;
+    expect(modelContext.ontoolcancel).toBeNull();
+    modelContext.dispatchEvent(new dom.window.Event('toolcancel'));
+    expect(seen).toHaveLength(3);
   });
 
   it('latches the local backend when first use occurs before native exposure', async () => {
@@ -260,15 +351,17 @@ describe('WebMCP local backend contract', () => {
     const dom = createDom();
     loadPolyfill(dom);
     const modelContext = (dom.window.document as any).modelContext;
-    await registerTool(modelContext, {
+    const { tool: zTool } = await registerTool(modelContext, {
       name: 'z_tool',
       title: 'Zed',
-      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      annotations: { readOnlyHint: true, untrustedContentHint: true, debugging: true },
     });
     await registerTool(modelContext, {
       name: 'a_tool',
       inputSchema: undefined,
     });
+    // Registration serializes the schema; later mutation of the page's object is not observed.
+    (zTool.inputSchema as Record<string, unknown>).type = 'mutated after registration';
 
     const first = await modelContext.getTools();
     const second = await modelContext.getTools();
@@ -284,10 +377,40 @@ describe('WebMCP local backend contract', () => {
     expect(first[0]).not.toHaveProperty('inputSchema');
     expect(first[1]).toMatchObject({
       title: 'Zed',
-      inputSchema: JSON.stringify({ type: 'object', properties: {} }),
-      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      inputSchema: { type: 'object', properties: {} },
+    });
+    // ToolAnnotations is a dictionary: omitted members read back as false, never as missing.
+    expect(first[1].annotations).toEqual({
+      readOnlyHint: true,
+      untrustedContentHint: true,
+      consequentialHint: false,
+      debugging: true,
     });
     expect(first[0]).not.toBe(second[0]);
+    // Each descriptor carries its own object parsed from the serialized registration schema.
+    expect(first[1].inputSchema).not.toBe(second[1].inputSchema);
+    first[1].inputSchema.type = 'mutated by caller';
+    expect((await modelContext.getTools())[1].inputSchema).toEqual({
+      type: 'object',
+      properties: {},
+    });
+  });
+
+  it('exposes every ToolAnnotations member once annotations are provided', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    await registerTool(modelContext, { name: 'bare_tool' });
+    await registerTool(modelContext, { name: 'empty_tool', annotations: {} });
+
+    const [bare, empty] = await modelContext.getTools();
+    expect(bare).not.toHaveProperty('annotations');
+    expect(empty.annotations).toEqual({
+      readOnlyHint: false,
+      untrustedContentHint: false,
+      consequentialHint: false,
+      debugging: false,
+    });
   });
 
   it('converts tool titles as USVString values', async () => {
@@ -414,13 +537,16 @@ describe('WebMCP local backend contract', () => {
       execute,
     });
     const [descriptor] = await modelContext.getTools();
+    const input = { value: 7 };
 
-    const result = await modelContext.executeTool(descriptor, JSON.stringify({ value: 7 }));
+    const result = await modelContext.executeTool(descriptor, input);
 
     expect(execute).toHaveBeenCalledWith(
       { value: 7 },
       { signal: expect.any(dom.window.AbortSignal) }
     );
+    // The tool receives a JSON round trip of the caller's object, never the object itself.
+    expect(execute.mock.calls[0][0]).not.toBe(input);
     expect(execute.mock.calls[0][1].signal.aborted).toBe(false);
     expect(receiver).toBeUndefined();
     expect(result).toBe(JSON.stringify({ echoed: { value: 7 } }));
@@ -441,7 +567,7 @@ describe('WebMCP local backend contract', () => {
     });
     const [descriptor] = await modelContext.getTools();
 
-    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toMatchObject({
+    await expect(modelContext.executeTool(descriptor, {})).rejects.toMatchObject({
       name: 'UnknownError',
       message: 'WebMCP tool execution failed',
     });
@@ -463,7 +589,7 @@ describe('WebMCP local backend contract', () => {
     });
     const [descriptor] = await modelContext.getTools();
 
-    await expect(modelContext.executeTool(descriptor, '{}')).rejects.toMatchObject({
+    await expect(modelContext.executeTool(descriptor, {})).rejects.toMatchObject({
       name: 'UnknownError',
       message: 'WebMCP tool execution failed',
     });
@@ -480,25 +606,78 @@ describe('WebMCP local backend contract', () => {
     for (const member of ['name', 'description', 'window', 'origin']) {
       const missingDescriptor = { ...descriptor };
       delete missingDescriptor[member];
-      await expect(modelContext.executeTool(missingDescriptor, '{}')).rejects.toBeInstanceOf(
+      await expect(modelContext.executeTool(missingDescriptor, {})).rejects.toBeInstanceOf(
         dom.window.TypeError
       );
       await expect(
-        modelContext.executeTool({ ...descriptor, [member]: undefined }, '{}')
+        modelContext.executeTool({ ...descriptor, [member]: undefined }, {})
       ).rejects.toBeInstanceOf(dom.window.TypeError);
     }
     await expect(
-      modelContext.executeTool({ ...descriptor, window: {} }, '{}')
+      modelContext.executeTool({ ...descriptor, window: {} }, {})
     ).rejects.toBeInstanceOf(dom.window.TypeError);
 
-    for (const input of ['not-json', '"primitive"', '123', 'true', 'null']) {
-      await expect(modelContext.executeTool(descriptor, input)).rejects.toMatchObject({
-        name: 'UnknownError',
-      });
-    }
     await expect(
-      modelContext.executeTool({ ...descriptor, name: 'missing_tool' }, '{}')
+      modelContext.executeTool({ ...descriptor, name: 'missing_tool' }, {})
     ).rejects.toMatchObject({ name: 'UnknownError' });
+  });
+
+  it('takes an input object and rejects what object conversion or JSON serialization rejects', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    const { execute } = await registerTool(modelContext);
+    const [descriptor] = await modelContext.getTools();
+
+    // Arrays are objects; an omitted or undefined input is an empty object.
+    await modelContext.executeTool(descriptor, [1, 2, 3]);
+    await modelContext.executeTool(descriptor);
+    await modelContext.executeTool(descriptor, undefined);
+    await modelContext.executeTool(descriptor, undefined, {});
+    expect(execute.mock.calls.map(([input]) => input)).toEqual([[1, 2, 3], {}, {}, {}]);
+    execute.mockClear();
+
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    for (const input of [
+      '{}',
+      'hello',
+      123,
+      true,
+      null,
+      10n,
+      Symbol('input'),
+      () => ({}),
+      { toJSON: () => undefined },
+      { count: 10n },
+      circular,
+    ]) {
+      await expect(modelContext.executeTool(descriptor, input)).rejects.toBeInstanceOf(
+        dom.window.TypeError
+      );
+    }
+
+    const serializationError = new Error('toJSON failure');
+    await expect(
+      modelContext.executeTool(descriptor, {
+        toJSON() {
+          throw serializationError;
+        },
+      })
+    ).rejects.toBe(serializationError);
+
+    // Serialization precedes the abort check, so invalid input wins over an aborted signal.
+    const aborted = new dom.window.AbortController();
+    aborted.abort();
+    await expect(
+      modelContext.executeTool(descriptor, circular, { signal: aborted.signal })
+    ).rejects.toBeInstanceOf(dom.window.TypeError);
+
+    // toJSON() can serialize an object to a primitive, which never reaches the tool.
+    await expect(
+      modelContext.executeTool(descriptor, { toJSON: () => 'primitive' })
+    ).rejects.toMatchObject({ name: 'UnknownError' });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('propagates per-execution cancellation with Chromium event ordering', async () => {
@@ -527,23 +706,31 @@ describe('WebMCP local backend contract', () => {
     const preAbortedReason = { reason: 'already cancelled' };
     preAborted.abort(preAbortedReason);
     await expect(
-      modelContext.executeTool(descriptor, '{}', { signal: preAborted.signal })
+      modelContext.executeTool(descriptor, {}, { signal: preAborted.signal })
     ).rejects.toBe(preAbortedReason);
     expect(execute).not.toHaveBeenCalled();
 
-    dom.window.addEventListener(
+    // Chromium dispatches ToolActivatedEvent/ToolCancelEvent at the ModelContext, never at window.
+    const windowListener = vi.fn();
+    dom.window.addEventListener('toolactivated', windowListener);
+    dom.window.addEventListener('toolcancel', windowListener);
+    modelContext.addEventListener(
       'toolactivated',
-      (event) => {
-        expect((event as Event & { toolName: string }).toolName).toBe('slow_tool');
+      (event: any) => {
+        expect(event).toBeInstanceOf((dom.window as any).ToolActivatedEvent);
+        expect(event.target).toBe(modelContext);
+        expect(event.toolName).toBe('slow_tool');
         events.push('toolactivated');
       },
       { once: true }
     );
     const cancelled = new Promise<void>((resolve) => {
-      dom.window.addEventListener(
+      modelContext.addEventListener(
         'toolcancel',
-        (event) => {
-          expect((event as Event & { toolName: string }).toolName).toBe('slow_tool');
+        (event: any) => {
+          expect(event).toBeInstanceOf((dom.window as any).ToolCancelEvent);
+          expect(event.target).toBe(modelContext);
+          expect(event.toolName).toBe('slow_tool');
           events.push('toolcancel');
           resolve();
         },
@@ -553,7 +740,7 @@ describe('WebMCP local backend contract', () => {
 
     const controller = new dom.window.AbortController();
     const reason = { reason: 'cancelled' };
-    const execution = modelContext.executeTool(descriptor, '{}', { signal: controller.signal });
+    const execution = modelContext.executeTool(descriptor, {}, { signal: controller.signal });
     expect(execute).toHaveBeenCalledOnce();
     expect(events).toEqual(['tool started', 'toolactivated']);
 
@@ -573,6 +760,7 @@ describe('WebMCP local backend contract', () => {
       'signal aborted',
       'toolcancel',
     ]);
+    expect(windowListener).not.toHaveBeenCalled();
 
     let serializationAttempted = false;
     finishExecution({

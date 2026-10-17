@@ -47,7 +47,6 @@
   }
 
   function cloneJsonValue(value) {
-    if (typeof value === 'string') return value;
     return JSON.parse(JSON.stringify(value));
   }
 
@@ -241,11 +240,8 @@
 
     const methods = getApiMethods();
     if (!methods) throw new PublicBridgeError('Tool catalog is unavailable');
-    return Reflect.apply(methods.executeTool, api, [
-      registeredTool,
-      JSON.stringify(args ?? {}),
-      { signal }
-    ]);
+    // executeTool() takes the input object itself and serializes it (Chromium M155+).
+    return Reflect.apply(methods.executeTool, api, [registeredTool, args ?? {}, { signal }]);
   }
 
   async function onMessage(event) {

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { chromeSandboxArgs, findChrome } from './chrome-harness.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
-const defaultWptRevision = 'c7c7a1b2641777d1f5f3934705ddde645eb82116';
+const defaultWptRevision = '0c7a6c61ffc3e1d4eab65b7a8a6b1281aaa7c703';
 const wptRevision = process.env.AGENTBOARD_WPT_REVISION || defaultWptRevision;
 const wptRoot = path.resolve(
   process.env.AGENTBOARD_WPT_ROOT || path.join(repositoryRoot, 'local/wpt')
@@ -81,11 +81,13 @@ function ensureWptCheckout() {
       wptRoot,
     ]);
     git(['sparse-checkout', 'set', ...sparseCheckoutPaths]);
-  }
-
-  const dirtyFiles = git(['status', '--porcelain', '--untracked-files=no'], { capture: true });
-  if (dirtyFiles) {
-    throw new Error(`Refusing to change the modified WPT checkout at ${wptRoot}:\n${dirtyFiles}`);
+  } else {
+    // Only a pre-existing checkout can hold work worth protecting. A fresh --no-checkout clone
+    // reports every tracked file in WPT as deleted, which overflows spawnSync's output buffer.
+    const dirtyFiles = git(['status', '--porcelain', '--untracked-files=no'], { capture: true });
+    if (dirtyFiles) {
+      throw new Error(`Refusing to change the modified WPT checkout at ${wptRoot}:\n${dirtyFiles}`);
+    }
   }
 
   const hasRevision = spawnSync(
@@ -198,9 +200,18 @@ function main() {
   const binaryArgs = ['--disable-blink-features=WebMCP', ...chromeSandboxArgs()].map(
     (argument) => `--binary-arg=${argument}`
   );
+  // Options precede the positionals so `product` and the test list stay contiguous: argparse before
+  // Python 3.12.7 consumes a trailing nargs='*' positional as empty when options separate it from
+  // the one before, leaving every test path "unrecognized" (stock python3 on Ubuntu 24.04 is 3.12.3).
   const args = [
     'run',
-    'chrome',
+    // The canonical files are testharness tests plus one crashtest. Naming the types keeps wpt from
+    // installing the aamtest (platform accessibility) requirements, which on Linux build PyGObject
+    // and pycairo from source against system headers CI does not have. nargs='*' option: it ends
+    // at the next --flag, so it must not be the last option before the positionals.
+    '--test-types',
+    'testharness',
+    'crashtest',
     '--yes',
     `--channel=${inferChromeChannel(chrome)}`,
     `--binary=${chrome}`,
@@ -213,6 +224,7 @@ function main() {
     `--inject-script=${injectedPolyfillPath}`,
     `--log-wptreport=${reportPath}`,
     ...binaryArgs,
+    'chrome',
     ...selectedTests,
   ];
 

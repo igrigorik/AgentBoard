@@ -379,7 +379,7 @@ describe('WebMCP Script Injector', () => {
       expect(initialSignal.aborted).toBe(false);
       let tools = await modelContext.getTools();
       const initialTool = tools.find((tool: any) => tool.name === 'test_test_tool');
-      expect(await modelContext.executeTool(initialTool, '{}')).toBe('test result');
+      expect(await modelContext.executeTool(initialTool, {})).toBe('test result');
 
       mockExecuteScript.mockClear();
       vi.mocked(chrome.tabs.get).mockResolvedValue({
@@ -410,7 +410,7 @@ describe('WebMCP Script Injector', () => {
       tools = await modelContext.getTools();
       const updatedTool = tools.find((tool: any) => tool.name === 'test_test_tool');
       expect(tools).toHaveLength(1);
-      expect(await modelContext.executeTool(updatedTool, '{}')).toBe('updated result');
+      expect(await modelContext.executeTool(updatedTool, {})).toBe('updated result');
       dom.window.close();
     });
 
