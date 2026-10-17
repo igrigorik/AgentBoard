@@ -205,6 +205,13 @@ function main() {
   // the one before, leaving every test path "unrecognized" (stock python3 on Ubuntu 24.04 is 3.12.3).
   const args = [
     'run',
+    // The canonical files are testharness tests plus one crashtest. Naming the types keeps wpt from
+    // installing the aamtest (platform accessibility) requirements, which on Linux build PyGObject
+    // and pycairo from source against system headers CI does not have. nargs='*' option: it ends
+    // at the next --flag, so it must not be the last option before the positionals.
+    '--test-types',
+    'testharness',
+    'crashtest',
     '--yes',
     `--channel=${inferChromeChannel(chrome)}`,
     `--binary=${chrome}`,
