@@ -47,7 +47,6 @@
   }
 
   function cloneJsonValue(value) {
-    if (typeof value === 'string') return value;
     return JSON.parse(JSON.stringify(value));
   }
 
