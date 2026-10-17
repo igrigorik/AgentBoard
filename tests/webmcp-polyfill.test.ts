@@ -263,7 +263,7 @@ describe('WebMCP local backend contract', () => {
     const { tool: zTool } = await registerTool(modelContext, {
       name: 'z_tool',
       title: 'Zed',
-      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      annotations: { readOnlyHint: true, untrustedContentHint: true, debugging: true },
     });
     await registerTool(modelContext, {
       name: 'a_tool',
@@ -287,7 +287,13 @@ describe('WebMCP local backend contract', () => {
     expect(first[1]).toMatchObject({
       title: 'Zed',
       inputSchema: { type: 'object', properties: {} },
-      annotations: { readOnlyHint: true, untrustedContentHint: true },
+    });
+    // ToolAnnotations is a dictionary: omitted members read back as false, never as missing.
+    expect(first[1].annotations).toEqual({
+      readOnlyHint: true,
+      untrustedContentHint: true,
+      consequentialHint: false,
+      debugging: true,
     });
     expect(first[0]).not.toBe(second[0]);
     // Each descriptor carries its own object parsed from the serialized registration schema.
@@ -296,6 +302,23 @@ describe('WebMCP local backend contract', () => {
     expect((await modelContext.getTools())[1].inputSchema).toEqual({
       type: 'object',
       properties: {},
+    });
+  });
+
+  it('exposes every ToolAnnotations member once annotations are provided', async () => {
+    const dom = createDom();
+    loadPolyfill(dom);
+    const modelContext = (dom.window.document as any).modelContext;
+    await registerTool(modelContext, { name: 'bare_tool' });
+    await registerTool(modelContext, { name: 'empty_tool', annotations: {} });
+
+    const [bare, empty] = await modelContext.getTools();
+    expect(bare).not.toHaveProperty('annotations');
+    expect(empty.annotations).toEqual({
+      readOnlyHint: false,
+      untrustedContentHint: false,
+      consequentialHint: false,
+      debugging: false,
     });
   });
 

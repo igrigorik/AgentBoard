@@ -175,10 +175,13 @@
       }
       if (signal?.aborted) return Promise.reject(signal.reason);
 
+      // ToolAnnotations dictionary conversion: every member defaults to false once annotations exist.
       const annotations = rawTool.annotations
         ? {
             readOnlyHint: Boolean(rawTool.annotations.readOnlyHint),
-            untrustedContentHint: Boolean(rawTool.annotations.untrustedContentHint)
+            untrustedContentHint: Boolean(rawTool.annotations.untrustedContentHint),
+            consequentialHint: Boolean(rawTool.annotations.consequentialHint),
+            debugging: Boolean(rawTool.annotations.debugging)
           }
         : undefined;
       const entry = {
