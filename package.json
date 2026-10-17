@@ -33,7 +33,7 @@
     "check:generated": "git diff --exit-code HEAD -- src/lib/webmcp/tools/registry.ts src/lib/webmcp/builtin-sources.ts",
     "clean": "rm -rf dist release",
     "prerelease": "pnpm run clean && pnpm run check",
-    "release": "pnpm run build:release && pnpm run check:generated && node scripts/package-release.js --stamp && pnpm run test:browser:built && pnpm run test:browser:mv3:built && node scripts/package-release.js",
+    "release": "pnpm run build:release && pnpm run check:generated && node scripts/package-release.js --stamp && pnpm run test:browser:built && pnpm run test:browser:mv3:built && pnpm run test:browser:webmcp-wpt:built && node scripts/package-release.js",
     "release:github": "node scripts/github-release.js",
     "postinstall": "husky || true"
   },
