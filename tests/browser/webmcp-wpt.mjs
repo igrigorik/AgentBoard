@@ -81,11 +81,13 @@ function ensureWptCheckout() {
       wptRoot,
     ]);
     git(['sparse-checkout', 'set', ...sparseCheckoutPaths]);
-  }
-
-  const dirtyFiles = git(['status', '--porcelain', '--untracked-files=no'], { capture: true });
-  if (dirtyFiles) {
-    throw new Error(`Refusing to change the modified WPT checkout at ${wptRoot}:\n${dirtyFiles}`);
+  } else {
+    // Only a pre-existing checkout can hold work worth protecting. A fresh --no-checkout clone
+    // reports every tracked file in WPT as deleted, which overflows spawnSync's output buffer.
+    const dirtyFiles = git(['status', '--porcelain', '--untracked-files=no'], { capture: true });
+    if (dirtyFiles) {
+      throw new Error(`Refusing to change the modified WPT checkout at ${wptRoot}:\n${dirtyFiles}`);
+    }
   }
 
   const hasRevision = spawnSync(
